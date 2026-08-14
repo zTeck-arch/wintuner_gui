@@ -5,6 +5,26 @@
 
 # Wraps New-IntuneWinPackage. The setup file must live inside the source folder - Intune packages
 # a whole directory and records which file inside it starts the install.
+# The packager requires the setup file to live INSIDE the source folder - everything in that folder
+# is what ends up in the .intunewin, and a setup file outside it simply would not be shipped.
+#
+# Its own function because the rule now has two callers: the build itself, and the live check in the
+# card. Learning the constraint only from a failed build, after picking two folders and pressing the
+# button, was the actual complaint - one implementation so the hint can never contradict the guard.
+function Test-SetupFileInsideSource {
+  param([string]$SourcePath, [string]$SetupFile)
+  if ([string]::IsNullOrWhiteSpace($SourcePath) -or [string]::IsNullOrWhiteSpace($SetupFile)) { return $false }
+  if (-not (Test-Path -LiteralPath $SourcePath -PathType Container)) { return $false }
+  if (-not (Test-Path -LiteralPath $SetupFile -PathType Leaf)) { return $false }
+  try {
+    # Resolve both sides before comparing: a relative or differently-cased path would otherwise pass
+    # a check that Intune later fails on.
+    $srcFull = (Resolve-Path -LiteralPath $SourcePath).Path.TrimEnd([char]'\')
+    $setupFull = (Resolve-Path -LiteralPath $SetupFile).Path
+    return $setupFull.StartsWith($srcFull + '\', [System.StringComparison]::OrdinalIgnoreCase)
+  } catch { return $false }
+}
+
 function New-OwnIntuneWinPackage {
   param(
     [Parameter(Mandatory)][string]$SourcePath,
@@ -18,13 +38,11 @@ function New-OwnIntuneWinPackage {
   if (-not (Test-Path -LiteralPath $SetupFile -PathType Leaf)) {
     $out.ErrorMessage = (Get-UiString 'OwnPkgSetupMissing'); return $out
   }
-  # Resolve both sides before comparing: a relative or differently-cased path would otherwise pass
-  # a check that Intune later fails on.
-  $srcFull = (Resolve-Path -LiteralPath $SourcePath).Path.TrimEnd([char]'\')
-  $setupFull = (Resolve-Path -LiteralPath $SetupFile).Path
-  if (-not $setupFull.StartsWith($srcFull + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+  if (-not (Test-SetupFileInsideSource -SourcePath $SourcePath -SetupFile $SetupFile)) {
     $out.ErrorMessage = (Get-UiString 'OwnPkgSetupNotInSource'); return $out
   }
+  $srcFull = (Resolve-Path -LiteralPath $SourcePath).Path.TrimEnd([char]'\')
+  $setupFull = (Resolve-Path -LiteralPath $SetupFile).Path
   try {
     if (-not (Test-Path -LiteralPath $DestinationPath -PathType Container)) {
       New-Item -ItemType Directory -Path $DestinationPath -Force -ErrorAction Stop | Out-Null

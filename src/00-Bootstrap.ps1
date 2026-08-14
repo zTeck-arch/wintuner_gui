@@ -1,4 +1,4 @@
-# WinTuner GUI
+﻿# WinTuner GUI
 #
 # Copyright (C) 2026 Timo Schnabel, Lion Laurisch
 #
@@ -15,7 +15,7 @@
 #
 # Source code: https://github.com/zTeck-arch/wintuner_gui
 #
-# v0.15.4 - Public beta
+# v0.15.5 - Public beta
 # --- Guided prerequisite bootstrap (kept console-only so it also works in Windows PowerShell 5.1) ---
 $minimumPowerShellVersion = [version]'7.4'
 try { $psVersion = [version]$PSVersionTable.PSVersion } catch { $psVersion = [version]'0.0' }
@@ -184,5 +184,5 @@ $PSDefaultParameterValues = @{
 # ============================================================
 
 # --- Application metadata ---
-$script:appVersion  = "0.15.4"
+$script:appVersion  = "0.15.5"
 

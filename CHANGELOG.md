@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.15.5 – Microsoft Store als eigener Bereich, Gruppen-Favoriten, verständlichere Berichte
+
+**Die Veröffentlichung hat noch nie funktioniert**
+
+- **Kein einziges Release konnte gebaut werden.** Der Workflow setzt nach dem Bauen die Repository-Kennung in die ausgelieferte Datei ein. Das dafür verwendete Suchmuster endete auf `\s*$`; da `\s` auch den Wagenrücklauf einschließt und `$` im Mehrzeilenmodus **vor** dem Zeilenvorschub steht, verschluckte der Treffer das `\r`. Der Ersatztext setzte keines zurück, und genau diese eine Zeile endete danach mit einem nackten `\n`. Seit 0.15.4 laufen die Static Checks bewusst **nach** diesem Eingriff – und lehnten das Ergebnis seitdem jedes Mal ab. Das Muster prüft das Zeilenende jetzt über einen Vorausschau-Ausdruck, ohne es zu verbrauchen. Frühere Releases enthielten dieses nackte `\n` unbemerkt.
+
+**Microsoft Store**
+
+- **Eigener Bereich in der Navigation.** Store-Apps werden direkt in Intune angelegt, es wird nichts paketiert oder hochgeladen – als dritte Karte unter „WinGet-Apps" war das fachlich falsch einsortiert. Der Bereich hat jetzt eine eigene Zuweisungskarte; bisher lieh er sich die Steuerelemente der Nachbarkarte, weshalb der Hinweis „oben unter *Zuweisen an*" auf eine Karte mit ganz anderem Titel zeigte.
+- **Die bereitgestellte App bleibt im Blick.** Nach dem Bereitstellen wurde das Suchfeld geleert und die Liste ungefiltert neu geladen, sodass sie auf sämtliche Store-Apps des Tenants aufklappte und die gerade angelegte darin unterging. Jetzt wird nach der Paket-ID gefiltert und die neue App markiert.
+- **Keine geliehenen Einstellungen mehr.** Filter, Fristen und Kategorien aus der WinGet-Karte wirkten still auf eine danach bereitgestellte Store-App. Der Bereich hat eigene Felder. Verfügbarkeitsdatum, Übermittlungsoptimierung und Auto-Update werden nicht mehr angeboten – Store-Apps unterstützen sie nicht, was bisher erst hinterher als Warnung erschien.
+
+**Zuweisungen**
+
+- **Gruppen-Favoriten je Kunde.** Häufig gebrauchte Entra-Gruppen lassen sich neben dem Gruppenfeld unter einem Namen speichern und erscheinen anschließend direkt in der Ziel-Auswahlliste. Die Favoriten sind an die Tenant-Domain gebunden: Gruppen eines Kunden tauchen bei einem anderen nie auf. Verfügbar an allen drei Stellen mit Zielauswahl.
+- **Ein stiller Datenverlust beim Speichern.** `Save-Settings` serialisierte ohne Tiefenangabe; der Standard von zwei Ebenen hätte jeden Favoriten beim ersten Speichern in die Zeichenkette `System.Collections.Hashtable` verwandelt.
+
+**Berichte und Rückmeldungen**
+
+- **Der Leistungsnachweis zählt Updates statt Objekte.** Gingen mehrere alte Versionen auf dieselbe neue über, stand die App mehrfach untereinander und las sich, als wäre sie mehrfach aktualisiert worden. Jetzt eine Zeile je App und Zielversion, Vorgänger älteste zuerst.
+- **„Bewusst behalten" ist kein Fehler mehr.** Die Bereinigung meldete Schutz und Fehler in derselben Zahl. Beides ist getrennt, und wer die Bereinigung selbst anstößt, bekommt je Version den konkreten Grund genannt – samt Hinweis, dass sich diese Versionen von selbst erledigen, sobald die Geräte gewechselt haben.
+
+**Kleinere Verbesserungen**
+
+- **Der Update-Suchlauf nach dem Login ist standardmäßig aus.** In großen Tenants durchsuchte er nach jeder Anmeldung jede App. Bereits gespeicherte Einstellungen behalten ihren Wert.
+- Hinweis am Benachrichtigungsfeld, dass „unverändert" Intunes eigene Vorgabe bedeutet, und die ist „alle Popup-Benachrichtigungen anzeigen".
+- Info-Symbol bei „Inhalt einer vorhandenen App ersetzen", das auch erklärt, wann man es *nicht* nehmen sollte und dass Erkennungsregeln dabei unangetastet bleiben.
+- README erklärt jetzt, wie der Anmelde-Zwischenspeicher technisch funktioniert und was er für gemeinsam genutzte Rechner bedeutet.
+- Testsuite auf 138 Prüfungen erweitert; der Test-Ambient lädt WinForms, weil auf einem sauberen CI-Runner sonst die Wiederholungslogik der Anmeldung fehlschlug.
+
 ## 0.15.4 – Versionsbereinigung funktioniert wieder, Tests, Bestätigungsdialog, Spaltenbeschriftung
 
 **Berechtigungen und Konto**

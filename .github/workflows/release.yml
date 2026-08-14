@@ -46,7 +46,13 @@ jobs:
             throw "PowerShell parser reported $($parseErrors.Count) error(s)."
           }
 
-          $repoPattern = '(?m)^\s*\$script:githubRepo\s*=\s*["''][^"'']*["'']\s*$'
+          # The trailing (?=\r?$) is a LOOKAHEAD on purpose. In multiline mode $ sits before the \n,
+          # so with CRLF the \r sits right in front of it: a plain \s*$ matched that \r and consumed
+          # it, the replacement put none back, and the line ended in a bare LF. The static checks
+          # below run AFTER this patch (since 0.15.4), so they rejected the artefact every time and
+          # no release was ever produced. Earlier releases shipped that stray bare LF unnoticed.
+          # A lookahead anchors the same place without eating the carriage return.
+          $repoPattern = '(?m)^[ \t]*\$script:githubRepo[ \t]*=[ \t]*["''][^"'']*["''][ \t]*(?=\r?$)'
           if (-not [regex]::IsMatch($content, $repoPattern)) { throw 'githubRepo setting was not found.' }
           $replacement = '$script:githubRepo  = "' + $env:GITHUB_REPOSITORY + '"'
           $releaseContent = [regex]::Replace($content, $repoPattern, [Text.RegularExpressions.MatchEvaluator]{ param($match) $replacement })
