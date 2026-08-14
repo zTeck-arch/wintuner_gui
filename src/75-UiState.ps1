@@ -340,6 +340,22 @@ $usernameHost = New-RoundedInput -Inner $usernameBox -X 486 -Y 22 -W 320 -H 36
 $usernameHost.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
 $headerPanel.Controls.Add($usernameHost)
 
+# The caption is placed relative to the input field, not at a fixed X. It is AutoSize, and the
+# German "Benutzername:" is wider than the English "Username:" - at a fixed left edge it ran
+# underneath the field. Measuring the actual text and right-aligning it against the field keeps
+# the gap constant in every language, and survives a different font or DPI as well.
+function Update-UsernameLabelPosition {
+  try {
+    if (-not $usernameLabel -or -not $usernameHost) { return }
+    $textWidth = [System.Windows.Forms.TextRenderer]::MeasureText($usernameLabel.Text, $usernameLabel.Font).Width
+    $left = $usernameHost.Left - $textWidth - 10
+    if ($left -lt 8) { $left = 8 }   # never push it off the panel on a very narrow window
+    $top = $usernameHost.Top + [int](($usernameHost.Height - $usernameLabel.Height) / 2)
+    $usernameLabel.Location = New-Object System.Drawing.Point($left, $top)
+  } catch { }   # class 3: a mispositioned caption must never stop the header from building
+}
+Update-UsernameLabelPosition
+
 # Recent-logins menu + trigger button (replaces the old editable-ComboBox dropdown).
 $recentMenu = New-Object System.Windows.Forms.ContextMenuStrip
 $recentMenu.Tag = 'no-theme'

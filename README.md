@@ -1,249 +1,287 @@
 # WinTuner GUI
 
+**English** · [Deutsch](README.de.md)
+
+A Windows desktop interface for managing WinGet, Win32 and Microsoft Store apps in Microsoft Intune.
+
+Packaging, deployment, version comparison, assignments and the controlled retirement of old app versions in one place, with a bilingual interface (English and German). Built on the [WinTuner](https://github.com/svrooij/WinTuner) PowerShell module, WinGet and Microsoft Graph.
+
 > [!WARNING]
-> **Beta – noch nicht für den produktiven Einsatz freigegeben.** Siehe [Projektstatus](#projektstatus).
-
-WinTuner GUI ist eine Windows-Oberfläche für die zentrale Verwaltung von WinGet-, Win32- und Microsoft-Store-Apps in Microsoft Intune. Die Anwendung bündelt Paketierung, Bereitstellung, Versionsvergleich, Zuweisungen und die kontrollierte Ablösung älterer App-Versionen in einer deutsch- und englischsprachigen Oberfläche.
-
-Die Lösung basiert auf dem PowerShell-Modul [WinTuner](https://github.com/svrooij/WinTuner), WinGet und Microsoft Graph. Sie richtet sich an Administratorinnen und Administratoren, die wiederkehrende Aufgaben rund um Intune-Apps nachvollziehbar und mit zusätzlichen Sicherheitsprüfungen ausführen möchten.
+> **Beta. Not released for production use.** See [Project status](#project-status).
 
 > [!IMPORTANT]
-> WinTuner GUI verändert je nach gewählter Aktion Apps und Zuweisungen in Microsoft Intune. Pakete, Erkennungs- und Anforderungsregeln sowie Zuweisungen sollten vor dem produktiven Einsatz in einem Test-Tenant oder mit einer Testgruppe geprüft werden.
+> Depending on the action you choose, WinTuner GUI changes apps and assignments in Microsoft Intune. Verify packages, detection rules, requirement rules and assignments in a test tenant or against a test group before you use it productively.
 
-## Download und Verwendung
+---
 
-Für die Nutzung muss **nicht das vollständige Repository** heruntergeladen oder geklont werden. Benötigt wird ausschließlich die fertige Datei:
+## Contents
+
+- [Quick start](#quick-start)
+- [What it does](#what-it-does)
+- [How each section behaves](#how-each-section-behaves)
+- [Security model](#security-model)
+- [Sign-in and session](#sign-in-and-session)
+- [Requirements](#requirements)
+- [Account and permissions](#account-and-permissions)
+- [A typical run](#a-typical-run)
+- [Limits and responsibility](#limits-and-responsibility)
+- [Project status](#project-status)
+- [License and origin](#license-and-origin)
+
+---
+
+## Quick start
+
+You do **not** need to clone this repository. One file is enough:
 
 ```text
 WinTuner_GUI_ntg.ps1
 ```
 
-So geht die Installation:
-
-1. Die Seite [Neueste GitHub-Version](../../releases/latest) öffnen.
-2. Den Bereich **Assets** aufklappen.
-3. Ausschließlich **`WinTuner_GUI_ntg.ps1`** herunterladen. Das Repository, den Quellcode und die ZIP-Dateien von GitHub werden für die Nutzung nicht benötigt.
-4. PowerShell 7 im Downloadordner öffnen und das Skript starten:
-(Hinweis, beim ersten öffnen musst du entweder via Powershell das Skript zulassen oder per Rechtsklick -> Eigenschaften -> Zulassen)
+1. Open the [latest release](../../releases/latest).
+2. Expand **Assets**.
+3. Download **`WinTuner_GUI_ntg.ps1`** only. The source code and the GitHub ZIP archives are not needed to run the tool.
+4. Open PowerShell 7 in your download folder and start it:
 
    ```powershell
    Unblock-File -LiteralPath '.\WinTuner_GUI_ntg.ps1'
    & '.\WinTuner_GUI_ntg.ps1'
    ```
 
-Die ebenfalls angebotene Datei `WinTuner_GUI_ntg.ps1.sha256` ist optional und dient nur dazu, die Prüfsumme des Downloads zu kontrollieren. Die übrigen Repository-Dateien werden ausschließlich für Entwicklung, Prüfung und Veröffentlichung benötigt.
+> [!NOTE]
+> Windows blocks scripts downloaded from the internet on first run. `Unblock-File` clears that mark. You can also do it manually: right-click the file, **Properties**, then tick **Unblock**.
 
-> **Wichtig für Versionen bis einschließlich 0.15.2:** In diesen Versionen war die eingebaute Update-Prüfung defekt. Sie meldete immer „kein Update verfügbar" (erkennbar an der Anzeige `GitHub version: vunknown`), unabhängig davon, was tatsächlich veröffentlicht war. Wer eine dieser Versionen einsetzt, wird **nicht** automatisch auf eine neuere hingewiesen und muss die Datei einmalig von Hand über die oben beschriebenen Schritte ersetzen. Ab 0.15.3 funktioniert die Prüfung; anschließende Aktualisierungen laufen wieder über die Anwendung selbst.
+The second asset, `WinTuner_GUI_ntg.ps1.sha256`, is optional and only lets you verify the checksum of your download.
 
-Beim Ersetzen legt die Anwendung eine Sicherung der bisherigen Datei neben dem Skript ab (`WinTuner_GUI_ntg.ps1.<Zeitstempel>.backup`). Die beiden jüngsten Sicherungen bleiben erhalten, ältere werden beim nächsten Update automatisch entfernt.
+**Missing prerequisites are handled for you.** If PowerShell 7 is absent, the script offers to install or update it through WinGet. The required `WinTuner` module can be installed from the PowerShell Gallery for the current user after you confirm. The `Microsoft.Graph` module has to be available; if it is missing, the application tells you how to install it.
 
-Vor dem ersten Einsatz müssen lediglich die unter [Voraussetzungen](#voraussetzungen) genannten System-, Lizenz- und Berechtigungsanforderungen erfüllt sein. Fehlt PowerShell 7, bietet das Skript eine Installation beziehungsweise Aktualisierung über WinGet an. Das benötigte PowerShell-Modul `WinTuner` kann nach Bestätigung für den aktuellen Benutzer aus der PowerShell Gallery installiert werden. Das Modul `Microsoft.Graph` muss verfügbar sein; falls es fehlt, zeigt die Anwendung den passenden Installationshinweis an.
+**Updating.** The application checks for new releases itself and can replace its own file. Before replacing, it writes a backup next to the script (`WinTuner_GUI_ntg.ps1.<timestamp>.backup`) and keeps the two most recent ones.
 
-## Funktionsumfang
+---
 
-- **WinGet-Apps suchen und paketieren**
-  Pakete im öffentlichen WinGet-Katalog suchen, verfügbare Versionen auswählen und lokal als Intune-Win32-Paket erstellen.
+## What it does
 
-- **Apps in Microsoft Intune bereitstellen**
-  Neue Win32-Apps hochladen und optional als verfügbar, erforderlich oder zur Deinstallation zuweisen. Zielgruppen, Filter, Benachrichtigungen, Fristen und weitere Zuweisungseinstellungen lassen sich in der Oberfläche festlegen.
+**Find and package WinGet apps**
+Search the public WinGet catalogue, pick a version and build it locally as an Intune Win32 package.
 
-- **Microsoft-Store-Apps verwalten**
-  Store-Apps anhand ihres Namens oder ihrer Paket-ID auflösen, im Tenant suchen und bereitstellen. Bereits vorhandene Apps werden erkannt, um doppelte Bereitstellungen zu vermeiden.
+**Deploy to Microsoft Intune**
+Upload new Win32 apps and optionally assign them as available, required or uninstall. Target groups, filters, notifications, deadlines and further assignment settings are all available in the interface.
 
-- **Vorhandene Apps auf Updates prüfen**
-  In Intune bereitgestellte Win32-Apps mit aktuellen WinGet-Versionen vergleichen. Die Ergebnisliste unterscheidet zwischen einem erforderlichen neuen Upload, der Wiederverwendung eines bereits vorhandenen Ziels und noch offener Nacharbeit.
+**Manage Microsoft Store apps**
+Resolve Store apps by name or package identifier, search the tenant and deploy. Apps that already exist are recognised, so nothing gets deployed twice.
 
-- **Updates kontrolliert ausrollen**
-  Neue Zielversionen paketieren oder vorhandene Zielversionen wiederverwenden, Zuweisungen übernehmen und Vorgängerversionen über Intune-Supersedence ablösen.
+**Check deployed apps for updates**
+Compare Win32 apps in Intune against current WinGet versions. The result list distinguishes between a required new upload, reuse of a target that already exists, and follow-up work still to be done.
 
-- **Alte App-Versionen sicher bereinigen**
-  Abgelöste oder nicht mehr benötigte Apps ermitteln. Eine automatische Löschung erfolgt nur nach erneuter Prüfung von Zuweisungen und erfolgreichen Installationen; risikoreiche Bereinigungsoptionen sind standardmäßig deaktiviert.
+**Roll updates out under control**
+Package a new target version or reuse an existing one, carry assignments across, and retire predecessors through Intune supersedence.
 
-- **Eigene Installer paketieren und Inhalte ersetzen**
-  Beliebige EXE- oder MSI-Installer zu einem `.intunewin`-Paket verarbeiten – auch Software, die es in WinGet nicht gibt. Zusätzlich lässt sich der Inhalt einer bereits vorhandenen Intune-App direkt ersetzen: App-ID, Zuweisungen und Historie bleiben erhalten, es entsteht kein zweites App-Objekt und keine Ablösung.
+**Clean up old versions safely**
+Find superseded or unused app objects. Automatic deletion only happens after assignments and successful installations have been re-checked. The risky cleanup options are off by default.
 
-- **Erkennungsregel ermitteln**
-  Bei einer MSI genügt ein Klick: Produktcode und Version werden direkt ausgelesen. Bei einer EXE wird die Uninstall-Registrierung vor und nach einer Installation verglichen; daraus entsteht eine fertig formulierte Intune-Erkennungsregel mit Schlüsselpfad, Wertname und Vergleichswert. Silent-Schalter lassen sich vorab in der Windows Sandbox testen, ohne den eigenen Rechner zu verändern.
+**Package your own installers and replace app content**
+Turn any EXE or MSI installer into an `.intunewin` package, including software that is not in WinGet. You can also replace the content of an existing Intune app in place: the app ID, its assignments and its history stay as they are, no second app object appears and nothing is superseded.
 
-- **Alle Apps des Tenants einsehen und zuweisen**
-  Sämtliche App-Objekte des Intune-Tenants auflisten – auch Typen, die diese Oberfläche nicht paketiert (MSI, UWP/MSIX, Microsoft 365 Apps, Weblinks). Zuweisungen einer App werden im Klartext angezeigt und lassen sich verwalten: Gruppen und Ausschlüsse hinzufügen oder entfernen, Absicht festlegen sowie Benachrichtigungen, Fristen und Neustartverhalten anpassen. Gruppen können optional über ihren Namen gesucht werden.
+**Work out a detection rule**
+For an MSI, one click reads the product code and version. For an EXE, the uninstall registry is compared before and after an installation, which produces a ready-made Intune detection rule with key path, value name and comparison value. Silent switches can be tried in Windows Sandbox first, without touching your own machine.
 
-- **Erkannte Software auswerten**
-  Das Intune-Inventar erkannter Apps laden, typische Treiber- und OEM-Einträge filtern und geeignete Anwendungen WinGet-Paketen zuordnen. Ausgewählte Treffer können anschließend unter Verwaltung genommen werden.
+**See and assign every app in the tenant**
+List all app objects of any type, including the ones this interface does not package (MSI, UWP/MSIX, Microsoft 365 Apps, web links). Assignments are shown in plain language and can be managed: add or remove groups and exclusions, set the intent, adjust notifications, deadlines and restart behaviour. Groups can optionally be searched by name.
 
-- **Lokale Pakete und Favoriten automatisch pflegen**
-  Häufig verwendete WinGet-Pakete als Favoriten speichern und beim Start der Anwendung optional automatisch auf Updates prüfen. Fehlende aktuelle Versionen werden heruntergeladen beziehungsweise lokal erstellt. Mit „Alle lokalen Apps aktualisieren“ lässt sich außerdem der gesamte gewählte Paketordner prüfen und gesammelt auf den aktuellen Stand bringen; bereits vorhandene aktuelle Versionen werden nicht erneut erstellt.
+**Evaluate discovered software**
+Load the Intune inventory of discovered apps, filter out the usual driver and OEM noise, and map suitable applications to WinGet packages. Selected matches can then be taken under management.
 
-- **Tenant-Übersicht und Protokollierung**
-  Dashboard für verwaltete Apps, verfügbare Updates und abgelöste Versionen. Aktionen und Fehler werden in einem lokalen Wochenprotokoll nachvollziehbar festgehalten.
+**Keep local packages and favourites current**
+Save frequently used WinGet packages as favourites and optionally check them for updates at startup. Missing versions are downloaded or built locally. **Update all local apps** checks the whole package folder and brings it up to date in one go, without rebuilding versions that are already current.
 
-- **Anpassbare Oberfläche**
-  Deutsche und englische Benutzeroberfläche, mehrere Darstellungsmodi sowie lokal gespeicherte Einstellungen und zuletzt verwendete Anmeldungen.
+**Tenant overview and logging**
+A dashboard for managed apps, available updates and superseded versions. Actions and errors are recorded in a local weekly log.
 
-## Funktionsweise
+**Adjustable interface**
+English and German interface, several display modes, plus locally stored settings and recently used sign-ins.
 
-| Bereich | Datenquelle | Wirkung |
-| --- | --- | --- |
-| Dashboard | Microsoft Intune | Nur lesende Übersicht über Apps, Updates und abgelöste Versionen |
-| WinGet-Apps | WinGet und lokaler Paketordner | Sucht Pakete, erstellt lokale Pakete und lädt sie nach Bestätigung zu Intune hoch |
-| Updates | Intune, WinGet und WinTuner-Index | Vergleicht Versionen, erstellt oder verwendet eine Ziel-App und übergibt auf Wunsch Zuweisungen |
-| Lokale App-Pflege | WinGet und lokaler Paketordner | Prüft Favoriten optional beim Programmstart und aktualisiert auf Wunsch alle gültigen lokalen App-Pakete |
-| Erkannte Apps | Intune-Inventar und WinGet | Ordnet installierte Software möglichen WinGet-Paketen zu; der Scan selbst ist schreibgeschützt |
-| Microsoft Store | Microsoft Store und Intune | Durchsucht den Store-Katalog, zeigt Treffer zur Auswahl und stellt die gewählte App nach Bestätigung bereit; zusätzlich Übersicht der bereits bereitgestellten Store-Apps |
-| Alle Tenant-Apps | Intune | Listet alle App-Objekte jeden Typs. Zuweisungen werden gelesen und können geändert werden – dies schreibt nach Intune |
-| Eigene Installer | Lokale Dateien und Intune | Paketiert beliebige EXE-/MSI-Installer lokal zu `.intunewin`. Das Ersetzen des Inhalts einer vorhandenen App schreibt nach Intune |
-| Bereinigung | Intune | Prüft alte App-Objekte und löscht sie nur, wenn die konfigurierten Sicherheitsbedingungen erfüllt sind |
+---
 
-Die GUI installiert Software nicht direkt auf Endgeräten. Sie erstellt und verwaltet App-Objekte sowie Zuweisungen in Intune; die eigentliche Verteilung und Auswertung erfolgt anschließend durch Microsoft Intune.
+## How each section behaves
 
-## Sicherheitskonzept
+| Section | Data source | Effect |
+|---|---|---|
+| Dashboard | Microsoft Intune | Read-only overview of apps, updates and superseded versions |
+| WinGet apps | WinGet and the local package folder | Searches packages, builds them locally and uploads to Intune after confirmation |
+| Microsoft Store | Microsoft Store and Intune | Searches the Store catalogue, shows matches to pick from, deploys after confirmation, plus an overview of Store apps already deployed |
+| Updates | Intune, WinGet and the WinTuner index | Compares versions, creates or reuses a target app, and hands assignments across on request |
+| Local package maintenance | WinGet and the local package folder | Optionally checks favourites at startup and updates all valid local packages on request |
+| Discovered apps | Intune inventory and WinGet | Maps installed software to possible WinGet packages. The scan itself is read-only |
+| All tenant apps | Intune | Lists every app object of every type. Assignments are read and can be changed, which writes to Intune |
+| Own installers | Local files and Intune | Packages any EXE or MSI locally into `.intunewin`. Replacing the content of an existing app writes to Intune |
+| Cleanup | Intune | Checks old app objects and deletes them only when the configured safety conditions are met |
 
-- Änderungen an Intune werden erst nach einer bewussten Benutzeraktion ausgeführt.
-- Doppelte Uploads derselben Paketversion werden vor der Bereitstellung geprüft und blockiert.
-- Vor einer Bereinigung werden Zuweisungen und gemeldete erfolgreiche Installationen erneut abgefragt.
-- Zugewiesene Vorgänger werden nur unter den ausdrücklich aktivierten Bedingungen entfernt.
-- Kennwörter, Token und andere geheime Anmeldedaten werden weder im Skript noch in der Einstellungsdatei gespeichert. Die Authentifizierung erfolgt über Microsoft Entra ID und Microsoft Graph.
-- **Trennen / Disconnect** beendet nur die aktuell aktive Graph-Verbindung. Der von Microsoft bereitgestellte Sitzungskontext bleibt im Windows-Benutzerprofil zwischengespeichert. Dadurch kann die nächste Verbindung mit demselben Konto in der Regel ohne erneute Eingabe von Kennwort oder MFA hergestellt werden.
-- **Abmelden / Logout** beendet die Verbindung vollständig und entfernt zusätzlich den lokal zwischengespeicherten Graph-Sitzungskontext. Erst danach ist bei der nächsten Verbindung wieder eine neue interaktive Anmeldung erforderlich. Vor einem Wechsel zu einem anderen Kunden beziehungsweise Tenant und auf gemeinsam genutzten Rechnern sollte deshalb immer **Abmelden** verwendet werden.
-- Wie dieser Zwischenspeicher technisch funktioniert und was er für gemeinsam genutzte Rechner bedeutet, ist in [Anmeldung und Sitzung: wie der Zwischenspeicher funktioniert](#anmeldung-und-sitzung-wie-der-zwischenspeicher-funktioniert) im Detail beschrieben.
-- Einstellungen, zuletzt verwendete Kontonamen und Protokolle bleiben lokal im Windows-Benutzerprofil beziehungsweise im Anwendungsverzeichnis.
-- Pakete werden standardmäßig unter `%LOCALAPPDATA%\WinTunerGUI\Packages` erstellt. Dieses Verzeichnis gehört dem angemeldeten Benutzer. Ein gemeinsam beschreibbarer Ablageort wie `C:\Temp` ist bewusst nicht mehr voreingestellt, weil dort jeder Benutzer des Rechners ein fertiges Paket zwischen Erstellung und Upload verändern könnte.
-- Das Ändern von Zuweisungen unter **Alle Tenant-Apps** ersetzt immer den vollständigen Zuweisungssatz einer App – Microsoft Graph kennt keine Teilaktualisierung. Der Dialog zeigt die zu schreibende Liste vorher an und fragt ausdrücklich nach.
-- Das Ersetzen des Inhalts einer vorhandenen App verändert **nicht** deren Erkennungs- und Anforderungsregeln. Diese müssen zur neuen Version passen und sind vorab zu prüfen.
-- Die integrierte Selbstaktualisierung akzeptiert nur Releases mit passendem Skriptasset, SHA-256-Prüfsumme und plausibler interner Versionsnummer; vor dem Austausch wird eine Sicherung angelegt. Nach der Bestätigung läuft der Austausch ohne weitere Rückfragen; die beiden jüngsten Sicherungen bleiben erhalten.
+The interface does not install software on endpoints. It creates and manages app objects and assignments in Intune; the actual distribution and reporting is then done by Microsoft Intune.
 
-### Anmeldung und Sitzung: wie der Zwischenspeicher funktioniert
+---
 
-Dieser Abschnitt erklärt, warum nach der ersten Anmeldung meist kein Kennwort mehr abgefragt wird, wo diese Sitzung liegt und was das für die Sicherheit bedeutet. Dieselbe Erklärung ist in der Anwendung unter **Hilfe → „Anmeldung & Sitzung erklärt…"** erreichbar.
+## Security model
 
-**Was bei der Anmeldung gespeichert wird — und was nicht.**
-Kennwort und MFA werden **nicht** gespeichert. Die Anmeldung läuft über Microsoft Entra ID, das nach erfolgreicher, interaktiver Anmeldung zwei Token ausstellt:
+- Intune is only changed after a deliberate user action.
+- Duplicate uploads of the same package version are detected and blocked before deployment.
+- Before any cleanup, assignments and reported successful installations are queried again.
+- Assigned predecessors are only removed under conditions you explicitly enabled.
+- Passwords, tokens and other secrets are stored neither in the script nor in the settings file. Authentication goes through Microsoft Entra ID and Microsoft Graph.
+- Settings, recently used account names and logs stay local, in your Windows user profile or next to the application.
+- Packages are built under `%LOCALAPPDATA%\WinTunerGUI\Packages` by default. That directory belongs to the signed-in user. A shared writable location such as `C:\Temp` is deliberately no longer the default, because any user of the machine could alter a finished package there between build and upload.
+- Changing assignments under **All tenant apps** always replaces an app's complete assignment set, because Microsoft Graph has no partial update. The dialog shows the list it is about to write and asks first.
+- Replacing the content of an existing app does **not** touch its detection and requirement rules. They have to match the new version, so check them beforehand.
+- The built-in self-update only accepts releases with a matching script asset, SHA-256 checksum and a plausible internal version number. A backup is written before the replacement. After you confirm, the exchange runs without further prompts and the two most recent backups are kept.
 
-- ein **Zugriffstoken** (Access Token) — kurzlebig, rund eine Stunde gültig, wird bei jedem Graph-Aufruf mitgeschickt;
-- ein **Aktualisierungstoken** (Refresh Token) — längere Gültigkeit, dient dazu, im Hintergrund ohne erneute Benutzerinteraktion ein frisches Zugriffstoken zu beschaffen.
+### Disconnect and Sign out
 
-Das Aktualisierungstoken ist der eigentlich schützenswerte Teil: Wer es besitzt, kann daraus so lange neue Zugriffstoken erzeugen, bis es abläuft oder zentral widerrufen wird.
+| Action | Current session | Cached session | Next sign-in |
+|---|---|---|---|
+| **Disconnect** | ends | kept | immediate, no prompt |
+| **Sign out** | ends | deleted (the Windows broker is bypassed, the username field is cleared) | a real, interactive sign-in |
 
-**Wo die Sitzung liegt.**
-Der Zwischenspeicher wird von der darunterliegenden Microsoft Authentication Library (MSAL) verwaltet und liegt im Windows-Benutzerprofil unter:
+**Rule of thumb:** switching customer, or a shared machine, means **Sign out**. Everything else, **Disconnect**.
+
+The section below explains why that distinction matters.
+
+---
+
+## Sign-in and session
+
+This explains why no password is asked after the first sign-in, where that session lives, and what it means for security. The same text is available in the application under **Help → "Sign-in and session explained"**.
+
+### What is stored, and what is not
+
+Your password and MFA are **not** stored. Sign-in goes through Microsoft Entra ID, which issues two tokens after a successful interactive sign-in:
+
+- an **access token**, short-lived at around one hour, sent with every Graph call;
+- a **refresh token**, longer-lived, used to obtain a fresh access token in the background without asking you again.
+
+The refresh token is the part worth protecting. Whoever holds it can keep minting new access tokens until it expires or is revoked centrally.
+
+### Where the session lives
+
+The cache is managed by the underlying Microsoft Authentication Library (MSAL) and sits in your Windows user profile:
 
 ```text
-%LOCALAPPDATA%\.IdentityService\   (Dateien mg.msal.cache*)
+%LOCALAPPDATA%\.IdentityService\   (files named mg.msal.cache*)
 ```
 
-Auf Windows verschlüsselt MSAL diesen Cache mit der **Data Protection API (DPAPI)** im Benutzerkontext. Entschlüsseln kann ihn nur **derselbe Windows-Benutzer auf demselben Gerät**; ein anderer lokaler Benutzer kann die Datei zwar sehen, aber nicht lesen. Der Zwischenspeicher lässt sich damit nicht auf ein anderes Gerät oder Konto übertragen und läuft ab — Richtlinien für bedingten Zugriff oder MFA können ihn früher beenden.
+On Windows, MSAL encrypts this cache with the **Data Protection API (DPAPI)** in the user's context. Only **the same Windows user on the same device** can decrypt it. Another local user can see the file but not read it. The cache cannot be moved to another device or account, and it expires. Conditional Access or MFA policies can end it sooner.
 
-**Warum das nächste Verbinden ohne Abfrage klappt.**
-Beim erneuten Verbinden findet MSAL das Aktualisierungstoken im Cache und löst still ein neues Zugriffstoken ein. Zusätzlich kann der Windows-Anmeldedienst (WAM) ein auf dem Gerät bereits angemeldetes Konto wiederverwenden. Deshalb entfällt die erneute Kennwort- und MFA-Abfrage in der Regel.
+### Why the next connection needs no prompt
 
-**Was das für die Sicherheit bedeutet.**
-DPAPI schützt die Sitzung gegen *andere Benutzer* des Rechners — nicht gegen Code, der **im Kontext des angemeldeten Benutzers selbst** läuft. Schadsoftware oder ein Skript, das als derselbe Windows-Benutzer läuft, kann DPAPI genauso aufrufen und das Aktualisierungstoken auslesen. Bei einem Werkzeug, das Kundentenants verwaltet, ist ein liegengebliebener Zwischenspeicher auf einem geteilten Technikerrechner daher potenziell stiller Zugriff auf einen Kundentenant, bis das Token abläuft oder widerrufen wird. Genau darum gilt: **vor einem Kunden- beziehungsweise Tenant-Wechsel und auf gemeinsam genutzten Rechnern immer „Abmelden", nicht nur „Trennen".**
+On reconnecting, MSAL finds the refresh token in the cache and silently exchanges it for a new access token. The Windows broker (WAM) can additionally reuse an account already signed in on the device. That is why the password and MFA prompt usually does not reappear.
 
-**Trennen vs. Abmelden — präzise.**
+### What this means for security
 
-| Aktion | Aktuelle Sitzung | Zwischenspeicher | Nächste Anmeldung |
-|---|---|---|---|
-| **Trennen / Disconnect** | wird beendet | bleibt erhalten | sofort, ohne Rückfrage |
-| **Abmelden / Logout** | wird beendet | wird gelöscht (WAM wird umgangen, Benutzernamenfeld geleert) | echte, interaktive Anmeldung |
+DPAPI protects the session against *other users* of the machine. It does not protect against code running **as the signed-in user**. Malware or a script running under the same Windows account can call DPAPI just as well and read the refresh token.
 
-**Zwei Dinge, die man leicht übersieht:**
+For a tool that manages customer tenants, a cache left behind on a shared technician machine is therefore potential silent access to a customer tenant until the token expires or is revoked. That is exactly why you should sign out, not just disconnect, before switching customers and on shared machines.
 
-- Der Zwischenspeicher ist der **gemeinsame** des Moduls `Microsoft.Graph`, kein eigener dieser Anwendung. „Abmelden" beendet deshalb auch die zwischengespeicherte Sitzung **anderer** PowerShell-Werkzeuge desselben Windows-Benutzers, die sich darüber anmelden.
-- „Abmelden" löscht nur die **lokale** Kopie. Das Aktualisierungstoken bleibt serverseitig bei Entra ID gültig und ist damit **nicht widerrufen**. Bei echtem Verdacht auf Kompromittierung eines Kontos oder Geräts reicht „Abmelden" nicht — dann müssen die Sitzungen zusätzlich zentral im Entra-Portal widerrufen werden („Revoke sessions").
+### Two things that are easy to miss
 
-**Faustregel:** Kundenwechsel oder gemeinsam genutzter Rechner → **Abmelden**. Alles andere → **Trennen**.
+- The cache belongs to the `Microsoft.Graph` module and is **shared**, not private to this application. Signing out therefore also ends the cached session of **other** PowerShell tools used by the same Windows user.
+- Signing out only deletes the **local** copy. The refresh token stays valid at Entra ID and is **not revoked**. If you genuinely suspect an account or device is compromised, signing out is not enough: revoke the sessions centrally in the Entra portal as well.
 
-## Voraussetzungen
+---
 
-- Windows 10 oder Windows 11 beziehungsweise Windows Server mit grafischer Oberfläche
-- PowerShell 7.4 oder neuer
-- WinGet / App Installer für WinGet- und Microsoft-Store-Abfragen
-- PowerShell-Module `WinTuner` und `Microsoft.Graph`
-- Microsoft-Intune-Lizenz im **Ziel-Tenant**, der mit WinTuner GUI verwaltet werden soll
-- Ein für diesen **Ziel-Tenant** zugelassenes Konto mit den unten aufgeführten Berechtigungen
-- Internetzugriff auf die verwendeten Microsoft-, WinGet- und optionalen GitHub-Endpunkte
+## Requirements
+
+- Windows 10, Windows 11 or Windows Server with a desktop interface
+- PowerShell 7.4 or newer
+- WinGet / App Installer, for WinGet and Microsoft Store queries
+- The `WinTuner` and `Microsoft.Graph` PowerShell modules
+- A Microsoft Intune license in the **target tenant** you want to manage
+- An account permitted in that **target tenant**, with the permissions listed below
+- Internet access to the Microsoft, WinGet and optional GitHub endpoints
 
 > [!NOTE]
-> Die Lizenz- und Berechtigungsanforderungen beziehen sich auf den jeweils ausgewählten **Ziel-Tenant**. Maßgeblich ist also das zur Anmeldung verwendete Konto und dessen Berechtigungen in genau dem Tenant, dessen Intune-Apps verwaltet werden sollen.
+> License and permission requirements always refer to the **target tenant** you select. What counts is the account you sign in with and its permissions in exactly the tenant whose Intune apps you want to manage.
 
-## Konto und Berechtigungen
+---
 
-### Empfehlung: dediziertes Konto, kein globaler Administrator
+## Account and permissions
 
-**Für den Betrieb dieser Anwendung ist die Rolle „Globaler Administrator" nicht erforderlich, und wir empfehlen ausdrücklich, sie nicht dafür zu verwenden.** Das Werkzeug legt Intune-Apps an, ändert Zuweisungen und löscht App-Objekte — mehr Rechte als dafür nötig vergrößern nur den Schaden, den ein Fehlgriff oder ein kompromittiertes Konto anrichten kann.
+### Use a dedicated account, not a Global Administrator
 
-Empfohlen wird ein **eigenes Administrationskonto**, das ausschließlich für diese Aufgabe verwendet wird, mit Multifaktor-Authentifizierung und ohne Postfach- oder Endanwenderfunktion. Als Berechtigung genügt in Intune die eingebaute Rolle:
+**Global Administrator is not required to run this application, and we recommend against using one.** The tool creates Intune apps, changes assignments and deletes app objects. More rights than that only widen the damage a mistake or a compromised account can do.
 
-| Aufgabe | Passende Intune-Rolle |
+Use a **dedicated administration account** for this task alone, with multi-factor authentication and no mailbox or end-user function. In Intune, the built-in role is enough:
+
+| Task | Matching Intune role |
 |---|---|
-| Apps bereitstellen, aktualisieren, zuweisen, löschen | **Application Manager** |
-| Nur auswerten, nichts verändern | **Read Only Operator** |
+| Deploy, update, assign and delete apps | **Application Manager** |
+| Evaluate only, change nothing | **Read Only Operator** |
 
-Die Rolle **Application Manager** deckt genau den Funktionsumfang ab: Mobile Apps lesen, anlegen, ändern, zuweisen, löschen und in Beziehung setzen (Ablöse) sowie verwaltete Geräte lesen. Microsoft selbst empfiehlt, für die tägliche Intune-Administration diese Intune-Rollen zu verwenden und Entra-ID-Rollen mit Intune-Zugriff zu meiden, weil die meisten davon als privilegiert gelten.
+**Application Manager** covers exactly what this tool does: read, create, modify, assign, delete and relate mobile apps (supersedence), plus read managed devices. Microsoft itself recommends using these Intune roles for day-to-day Intune administration and avoiding Entra ID roles with Intune access, because most of those count as privileged.
 
-Zusätzlich lässt sich der Wirkungsbereich über **Bereichs-Tags (Scope Tags)** und Bereichsgruppen einschränken, sodass ein Konto nur bestimmte Apps oder Gerätegruppen verwalten darf.
+You can narrow the reach further with **scope tags** and scope groups, so an account may only manage certain apps or device groups.
 
 > [!IMPORTANT]
-> Für die **einmalige** Zustimmung zu den Microsoft-Graph-Berechtigungen wird ein Konto mit ausreichender Entra-ID-Berechtigung benötigt (z. B. Anwendungsadministrator oder Cloudanwendungsadministrator). Das ist ein einmaliger Vorgang bei der Ersteinrichtung im jeweiligen Tenant — für den laufenden Betrieb reicht danach das Konto mit der Intune-Rolle.
+> The **one-time** consent to the Microsoft Graph permissions needs an account allowed to grant it, for example Application Administrator or Cloud Application Administrator. That happens once per tenant during initial setup. Day-to-day operation then only needs the account with the Intune role.
 
-### Benötigte Microsoft-Graph-Berechtigungen (delegiert)
+### Microsoft Graph permissions (delegated)
 
-Die Anmeldung erfolgt über das PowerShell-Modul `WinTuner` und dessen App-Registrierung; angefordert wird `https://graph.microsoft.com/.default`, also genau der Berechtigungsumfang, dem im Tenant zugestimmt wurde. Fachlich benötigt die Anwendung:
+Sign-in uses the `WinTuner` module and its app registration, requesting `https://graph.microsoft.com/.default`, which is exactly the scope the tenant has consented to. Functionally, the application needs:
 
-| Berechtigung | Wofür | Art |
+| Permission | Used for | Type |
 |---|---|---|
-| `DeviceManagementApps.ReadWrite.All` | Intune-Apps lesen und schreiben: Bereitstellen, Aktualisieren, Ablösen, Löschen, Zuweisungen und Zuweisungseinstellungen, Installationsberichte | Schreibend |
-| `DeviceManagementManagedDevices.Read.All` | Inventar „Erkannte Apps" (`/deviceManagement/detectedApps`) | Lesend |
-| `Group.Read.All` | **Optional.** Nur für die Suche nach Entra-ID-Gruppen *anhand ihres Namens* unter „Alle Tenant-Apps" | Lesend |
+| `DeviceManagementApps.ReadWrite.All` | Reading and writing Intune apps: deploy, update, supersede, delete, assignments and assignment settings, installation reports | Write |
+| `DeviceManagementManagedDevices.Read.All` | The "Discovered apps" inventory (`/deviceManagement/detectedApps`) | Read |
+| `Group.Read.All` | **Optional.** Only to search Entra ID groups *by name* under "All tenant apps" | Read |
 
-`Group.Read.All` wird bei der Anmeldung **bewusst nicht** angefordert. Erst wenn die Namenssuche tatsächlich benutzt wird, fragt die Anwendung danach — und erklärt vorher, worum es geht. Ohne diese Berechtigung funktioniert alles Übrige unverändert; Gruppen lassen sich dann über ihre Objekt-ID zuweisen.
+`Group.Read.All` is deliberately **not** requested at sign-in. The application asks for it separately, with an explanation, only when you actually use the name search. Without it everything else works unchanged and groups can be assigned by object ID.
 
-Wer die Anwendung **ausschließlich zur Auswertung** einsetzt (Dashboard, Update-Suchlauf, Tenant-Übersicht, erkannte Apps), kommt fachlich mit `DeviceManagementApps.Read.All` statt `.ReadWrite.All` aus. Ein eigener Nur-Lesen-Modus, der beim Anmelden nur diesen Umfang anfordert, ist geplant, aber noch nicht umgesetzt.
+If you use the application **for evaluation only** (dashboard, update scan, tenant overview, discovered apps), `DeviceManagementApps.Read.All` is functionally sufficient instead of `.ReadWrite.All`. A dedicated read-only mode that requests just that scope is planned but not implemented yet.
 
-Je nach Tenant können zusätzlich Administratorzustimmung, Conditional-Access-Richtlinien oder weitere organisatorische Freigaben erforderlich sein.
+Depending on the tenant, administrator consent, Conditional Access policies or further organisational approvals may also be required.
 
-> [!NOTE]
-> **„Abmelden" wirkt über diese Anwendung hinaus.** Dabei wird der zwischengespeicherte Anmeldetoken unter `%LOCALAPPDATA%\.IdentityService` gelöscht. Das ist der **gemeinsame** Zwischenspeicher des Moduls `Microsoft.Graph` und nicht ein eigener dieser Anwendung — andere PowerShell-Werkzeuge desselben Windows-Benutzers, die sich darüber anmelden, verlieren ihre zwischengespeicherte Sitzung ebenfalls. „Trennen" lässt den Zwischenspeicher unangetastet.
+---
 
-## Typischer Ablauf
+## A typical run
 
-1. Mit dem gewünschten Microsoft-365-Tenant verbinden.
-2. Neue Apps über WinGet oder den Microsoft Store auswählen, einen eigenen Installer paketieren – oder vorhandene Intune-Apps auf Updates prüfen.
-3. Paketversion, Zielgruppe, Intent und erweiterte Zuweisungseinstellungen kontrollieren.
-4. Paketierung beziehungsweise Bereitstellung ausdrücklich bestätigen.
-5. Ergebnis in Intune und im lokalen Aktivitätsprotokoll prüfen.
+1. Connect to the Microsoft 365 tenant you want to work on.
+2. Pick new apps from WinGet or the Microsoft Store, package your own installer, or check existing Intune apps for updates.
+3. Review the package version, target group, intent and advanced assignment settings.
+4. Confirm packaging or deployment explicitly.
+5. Check the result in Intune and in the local activity log.
 
-Für ein Update stehen zwei Wege zur Verfügung: die neue Version als eigene App bereitstellen und die alte ablösen (Standard unter **Updates**), oder den Inhalt der vorhandenen App ersetzen (**Eigene Installer**). Der zweite Weg vermeidet mehrere App-Objekte pro Produkt, setzt aber voraus, dass die Erkennungsregeln weiterhin passen.
+For an update there are two routes. Deploy the new version as its own app and supersede the old one (the default under **Updates**), or replace the content of the existing app (**Own installers**). The second route avoids ending up with several app objects per product, but it assumes the detection rules still fit.
 
-## Grenzen und Verantwortung
+---
 
-- Die Qualität eines Pakets hängt von den verfügbaren WinGet-Metadaten, Installern sowie den durch WinTuner erzeugten Erkennungs- und Anforderungsregeln ab.
-- Apps ohne sichere WinGet-Zuordnung können nicht automatisch aktualisiert oder verwaltet werden.
-- Tenant-spezifische Richtlinien, Filter, Neustartverhalten, Abhängigkeiten und Installationskontexte müssen vorab geprüft werden.
-- Die Nutzung in produktiven Umgebungen erfolgt auf eigene Verantwortung. Es wird keine Gewähr für Auswirkungen durch WinTuner, Microsoft Graph, WinGet-Pakete oder tenant-spezifische Konfigurationen übernommen.
-- WinTuner GUI ist kein Microsoft-Produkt und wird nicht von Microsoft bereitgestellt oder unterstützt.
+## Limits and responsibility
 
-## Projektstatus
+- Package quality depends on the available WinGet metadata and installers, and on the detection and requirement rules WinTuner produces.
+- Apps without a reliable WinGet match cannot be updated or managed automatically.
+- Tenant-specific policies, filters, restart behaviour, dependencies and installation contexts have to be checked beforehand.
+- Use in production environments is at your own risk. No warranty is given for effects caused by WinTuner, Microsoft Graph, WinGet packages or tenant-specific configuration.
+- WinTuner GUI is not a Microsoft product and is neither provided nor supported by Microsoft.
+
+---
+
+## Project status
 
 > [!WARNING]
-> **Beta.** WinTuner GUI ist noch nicht als stabil freigegeben. Funktionen, Bedienabläufe und Einstellungen können sich zwischen Versionen ändern, auch ohne Übergangslösung. Für den produktiven Einsatz in Kundenumgebungen ist die Anwendung noch nicht freigegeben.
+> **Beta.** WinTuner GUI is not released as stable. Features, workflows and settings can change between versions, including without a migration path. It is not yet approved for production use in customer environments.
 
-Was das praktisch bedeutet:
+What that means in practice:
 
-- Jede Aktion, die Intune verändert, sollte zuerst in einem Test-Tenant oder gegen eine Testgruppe ausgeführt werden.
-- Ergebnisse in Intune und im Aktivitätsprotokoll nachkontrollieren, statt sich auf die Rückmeldung der Oberfläche zu verlassen.
-- Versionen sind als Vorabversionen gekennzeichnet; ein Update kann Verhalten ändern.
+- Run any action that changes Intune in a test tenant or against a test group first.
+- Verify results in Intune and in the activity log rather than relying on what the interface reports.
+- Versions are marked as pre-releases. An update can change behaviour.
 
-Aktuelle Versionen und die zugehörigen Prüfsummen stehen unter [GitHub Releases](../../releases). Fehlerberichte und Verbesserungsvorschläge können über die [GitHub Issues](../../issues) eingereicht werden — gerade in der Beta-Phase sind sie ausdrücklich erwünscht.
+Current versions and their checksums are on the [releases page](../../releases). Bug reports and suggestions are welcome through [GitHub Issues](../../issues), particularly during the beta.
 
+---
 
-## Lizenz und Herkunft
+## License and origin
 
-WinTuner GUI steht unter der [GNU General Public License v3.0](LICENSE).
+WinTuner GUI is licensed under the [GNU General Public License v3.0](LICENSE).
 
-Die Anwendung ist eine eigenständige Entwicklung. Sie setzt zur Laufzeit das PowerShell-Modul [WinTuner](https://github.com/svrooij/WinTuner) von Stephan van Rooij voraus, das ebenfalls unter der GPL-3.0 steht. Das Modul wird nicht mitgeliefert, sondern bei Bedarf aus der PowerShell Gallery installiert. WinTuner GUI wurde bewusst unter dieselbe Lizenz gestellt, damit die enge Kopplung an dieses Modul lizenzrechtlich eindeutig bleibt.
+This is an independent project. At runtime it requires the [WinTuner](https://github.com/svrooij/WinTuner) PowerShell module by Stephan van Rooij, which is also licensed under GPL-3.0. The module is not bundled; it is installed from the PowerShell Gallery when needed. WinTuner GUI was deliberately placed under the same license so that the close coupling to that module stays legally unambiguous.
 
-WinGet und Microsoft Graph werden lediglich angesprochen.
+WinGet and Microsoft Graph are only called, not redistributed.
 
-WinTuner GUI ist weder mit Microsoft noch mit dem WinTuner-Projekt verbunden und wird von diesen nicht unterstützt.
-
+WinTuner GUI is not affiliated with Microsoft or with the WinTuner project, and is not endorsed by either.
