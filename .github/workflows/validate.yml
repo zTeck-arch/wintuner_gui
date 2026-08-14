@@ -1,0 +1,102 @@
+name: Validate PowerShell
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  parser:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The parts in src/ are assembled first: the static checks describe the script that
+      # users actually download, not the individual fragments.
+      - name: Build single file from src/
+        shell: pwsh
+        run: |
+          & (Join-Path $env:GITHUB_WORKSPACE 'build\Build-SingleFile.ps1')
+
+      - name: Parse WinTuner GUI
+        shell: pwsh
+        run: |
+          & (Join-Path $env:GITHUB_WORKSPACE 'tests\StaticChecks.ps1')
+
+  unit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Pester
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck -ErrorAction Stop
+
+      # Behaviour tests for the pure logic - version comparison, version grouping, the installation
+      # probe, the performance record, the self-update. They run against src/ directly, so a failure
+      # points at the source file rather than at a line in the assembled bundle.
+      - name: Run unit tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module Pester -MinimumVersion 5.5.0
+          $config = New-PesterConfiguration
+          $config.Run.Path = (Join-Path $env:GITHUB_WORKSPACE 'tests\Unit')
+          $config.Run.Throw = $true
+          $config.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $config
+
+  lint:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -ErrorAction Stop
+
+      - name: Run PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $settings = Join-Path $env:GITHUB_WORKSPACE 'PSScriptAnalyzerSettings.psd1'
+          # Pester needs global stubs to cross its scope boundaries, so tests/Unit runs against a
+          # settings file that allows exactly that and keeps every other rule. The application code
+          # stays under the stricter set.
+          $testSettings = Join-Path $env:GITHUB_WORKSPACE 'PSScriptAnalyzerSettings.Tests.psd1'
+
+          # Analysed per source part, so findings point at the file that has to be edited.
+          # dist/ is deliberately not scanned: it is generated and would duplicate every finding.
+          $targets = @(
+            Join-Path $env:GITHUB_WORKSPACE 'src'
+            Join-Path $env:GITHUB_WORKSPACE 'build'
+            Join-Path $env:GITHUB_WORKSPACE 'dev.ps1'
+          )
+          # -Path accepts a single location only, so each target is analysed in turn.
+          $findings = @($targets | ForEach-Object {
+            Invoke-ScriptAnalyzer -Path $_ -Recurse -Settings $settings
+          })
+          $findings += @(Invoke-ScriptAnalyzer -Path (Join-Path $env:GITHUB_WORKSPACE 'tests') -Recurse -Settings $testSettings)
+
+          # Informational findings are reported but never fail the build.
+          $blocking = @($findings | Where-Object { $_.Severity -in 'Error', 'Warning' })
+          $info     = @($findings | Where-Object { $_.Severity -eq 'Information' })
+
+          foreach ($f in $findings) {
+            $file = Split-Path $f.ScriptName -Leaf
+            $level = if ($f.Severity -in 'Error', 'Warning') { 'error' } else { 'notice' }
+            Write-Host ("::{0} file={1},line={2}::[{3}] {4}" -f $level, $file, $f.Line, $f.RuleName, $f.Message)
+          }
+
+          Write-Host ("PSScriptAnalyzer: {0} blocking, {1} informational." -f $blocking.Count, $info.Count)
+          if ($blocking.Count -gt 0) {
+            throw "PSScriptAnalyzer reported $($blocking.Count) Error/Warning finding(s)."
+          }

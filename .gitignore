@@ -1,0 +1,14 @@
+*.backup
+*.update
+*.log
+settings.json
+version-cache.json
+.vs/
+.vscode/
+.idea/
+.claude/
+dist/
+packages/
+*.intunewin
+*.wtpackage
+

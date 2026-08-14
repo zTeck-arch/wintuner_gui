@@ -1,0 +1,82 @@
+name: Publish release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate tag and build release assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Assemble src/ into the single file that is shipped, then validate that artefact.
+          # Building here is what guarantees the release can never contain a stale bundle.
+          & (Join-Path $env:GITHUB_WORKSPACE 'build\Build-SingleFile.ps1') -WriteLineMap
+
+          $tag = $env:GITHUB_REF_NAME
+          $tagMatch = [regex]::Match($tag, '^v(?<version>\d+\.\d+\.\d+)$')
+          if (-not $tagMatch.Success) {
+            throw "Release tag must use vMAJOR.MINOR.PATCH, for example v0.13.7. Received: $tag"
+          }
+          $tagVersion = $tagMatch.Groups['version'].Value
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
+          $source = Join-Path $dist 'WinTuner_GUI_ntg.ps1'
+          $content = [IO.File]::ReadAllText($source)
+          $versionMatch = [regex]::Match($content, '(?m)^\s*\$script:appVersion\s*=\s*["''](?<version>[^"'']+)["'']\s*$')
+          if (-not $versionMatch.Success) { throw 'appVersion was not found in the script.' }
+          if ($versionMatch.Groups['version'].Value -ne $tagVersion) {
+            throw "Tag $tag does not match appVersion $($versionMatch.Groups['version'].Value)."
+          }
+
+          $tokens = $null
+          $parseErrors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$parseErrors)
+          if ($parseErrors.Count -gt 0) {
+            $parseErrors | ForEach-Object { Write-Error ("{0}:{1}: {2}" -f $_.Extent.StartLineNumber, $_.Extent.StartColumnNumber, $_.Message) }
+            throw "PowerShell parser reported $($parseErrors.Count) error(s)."
+          }
+
+          $repoPattern = '(?m)^\s*\$script:githubRepo\s*=\s*["''][^"'']*["'']\s*$'
+          if (-not [regex]::IsMatch($content, $repoPattern)) { throw 'githubRepo setting was not found.' }
+          $replacement = '$script:githubRepo  = "' + $env:GITHUB_REPOSITORY + '"'
+          $releaseContent = [regex]::Replace($content, $repoPattern, [Text.RegularExpressions.MatchEvaluator]{ param($match) $replacement })
+
+          # The repository slug is patched into the already-built asset, so the source tree
+          # never has to hard-code it and the self-updater still finds this repository.
+          $asset = $source
+          # UTF-8 *with* BOM on purpose: the prerequisite bootstrap runs under Windows
+          # PowerShell 5.1, which decodes BOM-less files using the ANSI code page and would
+          # otherwise mangle the German umlauts in its console output.
+          [IO.File]::WriteAllText($asset, $releaseContent, [Text.UTF8Encoding]::new($true))
+
+          # The full static checks run HERE, on the patched asset - not before the patch.
+          # They used to run on the freshly built file and the repository slug was substituted
+          # afterwards, so the artefact that users actually download had never been through them.
+          # A parser check alone would not have caught, say, a broken UI key or a lost guard.
+          & (Join-Path $env:GITHUB_WORKSPACE 'tests\StaticChecks.ps1') -ScriptPath $asset
+
+          $hash = (Get-FileHash -Path $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+          $hashFile = Join-Path $dist 'WinTuner_GUI_ntg.ps1.sha256'
+          [IO.File]::WriteAllText($hashFile, "$hash  WinTuner_GUI_ntg.ps1`n", [Text.UTF8Encoding]::new($false))
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME `
+            (Join-Path $env:GITHUB_WORKSPACE 'dist\WinTuner_GUI_ntg.ps1') `
+            (Join-Path $env:GITHUB_WORKSPACE 'dist\WinTuner_GUI_ntg.ps1.sha256') `
+            --title "WinTuner GUI $($env:GITHUB_REF_NAME -replace '^v', '')" `
+            --generate-notes `
+            --verify-tag

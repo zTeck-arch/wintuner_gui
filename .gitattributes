@@ -1,0 +1,12 @@
+# Line endings are stored as LF in the repository and restored as CRLF on checkout, on every
+# machine and on the CI runner alike.
+#
+# This is not cosmetic. build/Build-SingleFile.ps1 rejects any source part whose lines end in
+# a bare LF, and tests/StaticChecks.ps1 asserts the same for the assembled script, because the
+# shipped file has always used CRLF. Without this file the result would depend on whatever
+# core.autocrlf happens to be set to locally or on the runner, so an identical commit could
+# build on one machine and fail on another.
+* text=auto eol=crlf
+
+# Checksums are consumed by tooling that expects exactly the bytes the release workflow wrote.
+*.sha256 -text
