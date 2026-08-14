@@ -1,6 +1,7 @@
 BeforeAll {
   . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
   Initialize-TestAmbient
+  . ([scriptblock]::Create((Get-SourceFunctionText -Part '20-Version.ps1' -Name 'Get-ComparableVersionParts')))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '50-UpdateEngine.ps1' `
     -Name 'Add-SessionActivity', 'Get-SessionLeistungstext')))
 
@@ -97,6 +98,51 @@ Describe 'Performance record' {
     It 'uses the English headings when asked' {
       Add-SessionActivity -Kind 'VersionRemoved' -Name 'Airtame' -FromVersion '4.14.0'
       Get-SessionLeistungstext -Lang 'en' | Should -Match 'Old versions removed:'
+    }
+  }
+
+  Context 'several old versions updated to the same new one' {
+    # This is one update with two predecessors, not two updates. Printed line by line it read as if
+    # the app had been updated twice - a customer reading the record could not tell the difference
+    # between "two old versions were replaced" and "we did this job twice".
+    It 'writes one line per app and target version' {
+      Add-SessionActivity -Kind 'Update' -Name 'Google Chrome' -FromVersion '151.0.7922.109' -ToVersion '151.0.7922.138'
+      Add-SessionActivity -Kind 'Update' -Name 'Google Chrome' -FromVersion '151.0.7922.72'  -ToVersion '151.0.7922.138'
+      $text = Get-SessionLeistungstext -Lang 'de'
+      @($text -split "`r`n" | Where-Object { $_ -like '- Google Chrome*' }).Count | Should -Be 1
+    }
+
+    It 'lists the predecessors oldest first' {
+      Add-SessionActivity -Kind 'Update' -Name 'Google Chrome' -FromVersion '151.0.7922.109' -ToVersion '151.0.7922.138'
+      Add-SessionActivity -Kind 'Update' -Name 'Google Chrome' -FromVersion '151.0.7922.72'  -ToVersion '151.0.7922.138'
+      Get-SessionLeistungstext -Lang 'de' | Should -Match '151\.0\.7922\.72, 151\.0\.7922\.109 -> 151\.0\.7922\.138'
+    }
+
+    # Numeric ordering, not lexical: as text "72" sorts after "109", which would print the newer
+    # predecessor first and make the line read backwards.
+    It 'orders the predecessors numerically' {
+      Add-SessionActivity -Kind 'Update' -Name 'App' -FromVersion '1.0.10' -ToVersion '2.0'
+      Add-SessionActivity -Kind 'Update' -Name 'App' -FromVersion '1.0.9'  -ToVersion '2.0'
+      Get-SessionLeistungstext -Lang 'de' | Should -Match '1\.0\.9, 1\.0\.10 -> 2\.0'
+    }
+
+    It 'counts the grouped update once in the summary' {
+      Add-SessionActivity -Kind 'Update' -Name 'Google Chrome' -FromVersion '151.0.7922.109' -ToVersion '151.0.7922.138'
+      Add-SessionActivity -Kind 'Update' -Name 'Google Chrome' -FromVersion '151.0.7922.72'  -ToVersion '151.0.7922.138'
+      Get-SessionLeistungstext -Lang 'de' | Should -Match 'Zusammenfassung: 1 App\(s\) aktualisiert'
+    }
+
+    It 'keeps different target versions apart' {
+      Add-SessionActivity -Kind 'Update' -Name 'App' -FromVersion '1.0' -ToVersion '2.0'
+      Add-SessionActivity -Kind 'Update' -Name 'App' -FromVersion '2.0' -ToVersion '3.0'
+      $text = Get-SessionLeistungstext -Lang 'de'
+      @($text -split "`r`n" | Where-Object { $_ -like '- App*' }).Count | Should -Be 2
+    }
+
+    It 'states how many predecessors were actually superseded' {
+      Add-SessionActivity -Kind 'Update' -Name 'App' -FromVersion '1.0' -ToVersion '3.0' -OldVersionRemoved $true
+      Add-SessionActivity -Kind 'Update' -Name 'App' -FromVersion '2.0' -ToVersion '3.0' -OldVersionRemoved $true
+      Get-SessionLeistungstext -Lang 'de' | Should -Match '2 alte Versionen abgelöst'
     }
   }
 

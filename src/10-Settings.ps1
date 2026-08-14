@@ -37,6 +37,10 @@ $script:settings = @{
   Language = "en"
   RecentLogins = @()   # most-recent-first list of previously used UPNs, for quick re-selection
   MaxRecentLogins = 8
+  # Entra group favorites, keyed by TENANT DOMAIN: @{ 'kunde.de' = @(@{Id=..; Name=..}) }.
+  # Keyed per tenant on purpose - this is an MSP tool, and offering customer A's groups while
+  # connected to customer B would invite assigning an app to the wrong organisation entirely.
+  GroupFavorites = @{}
   WindowWidth = 0      # 0 = use the built-in default size
   WindowHeight = 0
   WindowMaximized = $false
@@ -183,6 +187,24 @@ function Load-Settings {
           foreach ($p in $o.WingetOverrides.PSObject.Properties) { $ht[$p.Name] = [string]$p.Value }
           $script:settings.WingetOverrides = $ht
         } else { $script:settings.WingetOverrides = @{} }
+
+        # Group favorites per tenant domain. Anything malformed is dropped rather than repaired:
+        # a half-read favorite would put an unverified GUID in front of an assignment action.
+        if ($o.PSObject.Properties['GroupFavorites']) {
+          $fav = @{}
+          foreach ($p in $o.GroupFavorites.PSObject.Properties) {
+            $entries = @()
+            foreach ($e in @($p.Value)) {
+              $id = [string]$e.Id
+              $name = [string]$e.Name
+              if ($id -match '^[0-9a-fA-F-]{36}$' -and -not [string]::IsNullOrWhiteSpace($name)) {
+                $entries += @{ Id = $id; Name = $name }
+              }
+            }
+            if ($entries.Count -gt 0) { $fav[$p.Name] = $entries }
+          }
+          $script:settings.GroupFavorites = $fav
+        } else { $script:settings.GroupFavorites = @{} }
       }
     }
   } catch {
@@ -203,7 +225,10 @@ function Save-Settings {
   try {
     $dir = Split-Path -Parent $script:settingsPath
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    $json = $script:settings | ConvertTo-Json -Compress
+    # -Depth 6 is required, not cosmetic: the default of 2 silently serialises anything deeper as
+    # the literal string "System.Collections.Hashtable". GroupFavorites is tenant -> list of
+    # objects and would be destroyed on the first save without this.
+    $json = $script:settings | ConvertTo-Json -Compress -Depth 6
     # Never write straight into the live settings file: a crash/power loss mid-write leaves it
     # truncated and the next start loses the package path + recent logins. Write a temp file,
     # verify it parses, then swap it in – the real file is only ever replaced by a complete one.
@@ -231,6 +256,63 @@ function Add-RecentLogin {
   while ($list.Count -gt $max) { $list.RemoveAt($list.Count - 1) }
   $script:settings.RecentLogins = $list.ToArray()
   Save-Settings
+}
+
+# --- Entra group favorites, scoped to the signed-in tenant ---------------------------------------
+#
+# The key is the domain part of the signed-in UPN, so each customer keeps its own list and no group
+# of another tenant is ever offered. Without a session there is no key, and therefore no favorites:
+# a GUID from the wrong tenant would simply fail at assignment time, but showing it at all would
+# invite the mistake.
+
+function Get-TenantFavoriteKey {
+  $upn = [string]$script:currentUserUpn
+  if ([string]::IsNullOrWhiteSpace($upn) -or $upn -notmatch '@') { return "" }
+  try { return ($upn -split '@')[-1].Trim().ToLowerInvariant() } catch { return "" }
+}
+
+function Get-GroupFavorites {
+  $key = Get-TenantFavoriteKey
+  if (-not $key) { return @() }
+  if (-not $script:settings.GroupFavorites) { return @() }
+  if (-not $script:settings.GroupFavorites.ContainsKey($key)) { return @() }
+  return @($script:settings.GroupFavorites[$key])
+}
+
+# Adds or renames a favorite for the current tenant. The id is validated here rather than at the
+# call site, because this is the only door into the stored list.
+function Add-GroupFavorite {
+  param([string]$Id, [string]$Name)
+  $key = Get-TenantFavoriteKey
+  if (-not $key) { return $false }
+  $gid = ([string]$Id).Trim()
+  $label = ([string]$Name).Trim()
+  if ($gid -notmatch '^[0-9a-fA-F-]{36}$') { return $false }
+  if ([string]::IsNullOrWhiteSpace($label)) { return $false }
+  if (-not $script:settings.GroupFavorites) { $script:settings.GroupFavorites = @{} }
+  $existing = @(Get-GroupFavorites)
+  $updated = @()
+  $replaced = $false
+  foreach ($e in $existing) {
+    if (([string]$e.Id) -eq $gid) { $updated += @{ Id = $gid; Name = $label }; $replaced = $true }
+    else { $updated += $e }
+  }
+  if (-not $replaced) { $updated += @{ Id = $gid; Name = $label } }
+  $script:settings.GroupFavorites[$key] = $updated
+  Save-Settings
+  return $true
+}
+
+function Remove-GroupFavorite {
+  param([string]$Id)
+  $key = Get-TenantFavoriteKey
+  if (-not $key) { return $false }
+  $gid = ([string]$Id).Trim()
+  $kept = @(Get-GroupFavorites | Where-Object { ([string]$_.Id) -ne $gid })
+  if ($kept.Count -eq 0) { $null = $script:settings.GroupFavorites.Remove($key) }
+  else { $script:settings.GroupFavorites[$key] = $kept }
+  Save-Settings
+  return $true
 }
 
 # Full logout hygiene: deletes the on-disk Microsoft.Graph token cache so a later login

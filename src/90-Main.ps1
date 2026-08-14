@@ -1,4 +1,4 @@
-
+﻿
 $dropdown.Add_SelectedIndexChanged({ Update-SelectedPackageVersionLabel })
 
 # Cache for winget searches to speed up repeated searches
@@ -192,6 +192,9 @@ $loginButton.Add_Click({
     # Record this login for quick re-selection next time, and refresh the recent list.
     Add-RecentLogin -Upn $usernameBox.Text
     Update-RecentLoginsUI
+    # Group favorites are per customer, so the target lists have to be rebuilt for THIS tenant -
+    # otherwise the previous customer's groups would still be on offer after a switch.
+    try { Update-AllAssignTargetCombos } catch { Write-Log ("Could not load group favorites: {0}" -f $_.Exception.Message) }
     if ($loginInfoLabel) { $loginInfoLabel.Text = (Get-UiString 'LoggedInAs') -f $script:currentUserUpn }
     Set-ConnectedUIState -Connected $true
 
@@ -462,7 +465,7 @@ $uploadButton.Add_Click({
             [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
           return
         }
-        if ($assignTarget -and $targetChanges.AssignmentMode -eq 'exclude' -and $assignTargetCombo.SelectedIndex -ne 3) {
+        if ($assignTarget -and $targetChanges.AssignmentMode -eq 'exclude' -and -not (Test-IsGroupSelection -TargetCombo $assignTargetCombo)) {
           [void][System.Windows.Forms.MessageBox]::Show((Get-UiString 'DeployExcludedRequiresGroup'), (Get-UiString 'ValidationTitle'),
             [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
           return
@@ -1657,7 +1660,7 @@ $deployDiscoveredButton.Add_Click({
         [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
       return
     }
-    if ($assignTarget -and $discoveredTargetChanges.AssignmentMode -eq 'exclude' -and $discoveredAssignTargetCombo.SelectedIndex -ne 3) {
+    if ($assignTarget -and $discoveredTargetChanges.AssignmentMode -eq 'exclude' -and -not (Test-IsGroupSelection -TargetCombo $discoveredAssignTargetCombo)) {
       [void][System.Windows.Forms.MessageBox]::Show((Get-UiString 'DeployExcludedRequiresGroup'), (Get-UiString 'ValidationTitle'),
         [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
       return

@@ -308,9 +308,21 @@ $discoveredAssignGroupIdBox.BorderStyle = 'FixedSingle'
 $discoveredAssignGroupIdBox.Visible = $false
 $cardScan.Controls.Add($discoveredAssignGroupIdBox)
 
+$discoveredAssignFavButton = New-Object System.Windows.Forms.Button
+$discoveredAssignFavButton.Tag = 'btn-secondary'
+$discoveredAssignFavButton.Text = Get-UiString 'FavAddButton'
+$discoveredAssignFavButton.Location = New-Object System.Drawing.Point(566, 70)
+$discoveredAssignFavButton.Size = New-Object System.Drawing.Size(32, 26)
+$discoveredAssignFavButton.Visible = $false
+$discoveredAssignFavButton.Add_Click({ Show-GroupFavoriteDialog -GroupIdBox $discoveredAssignGroupIdBox })
+$cardScan.Controls.Add($discoveredAssignFavButton)
+
 $discoveredAssignTargetCombo.Add_SelectedIndexChanged({
-  $discoveredAssignGroupIdBox.Visible = ($discoveredAssignTargetCombo.SelectedItem -eq (Get-UiString 'AssignCustomGroup'))
+  $isCustom = ($discoveredAssignTargetCombo.SelectedItem -eq (Get-UiString 'AssignCustomGroup'))
+  $discoveredAssignGroupIdBox.Visible = $isCustom
+  $discoveredAssignFavButton.Visible = $isCustom
 })
+Register-AssignTargetCombo -TargetCombo $discoveredAssignTargetCombo
 
 $discoveredAssignmentHint = New-Object System.Windows.Forms.Label
 $discoveredAssignmentHint.Text = Get-UiString 'DiscoveredAssignmentHint'
@@ -639,6 +651,68 @@ $clearCacheButton.Location = New-Object System.Drawing.Point(224,250)
 $clearCacheButton.Width = $script:settingsButtonWidth
 $clearCacheButton.Height = 34
 $cardGeneral.Controls.Add($clearCacheButton)
+
+# Local disk housekeeping. Sits next to the cache button because both act on this machine only -
+# neither touches the tenant, which is what separates them from everything above.
+$prunePackagesButton = New-Object System.Windows.Forms.Button
+$prunePackagesButton.Tag = 'btn-secondary'
+$prunePackagesButton.Text = Get-UiString 'PrunePackagesButton'
+$prunePackagesButton.Location = New-Object System.Drawing.Point(434,250)
+$prunePackagesButton.Width = $script:settingsButtonWidth
+$prunePackagesButton.Height = 34
+$cardGeneral.Controls.Add($prunePackagesButton)
+
+$prunePackagesButton.Add_Click({
+  if (Test-UiBusy) { return }
+  $root = $defaultPathTextBox.Text.Trim()
+  if ([string]::IsNullOrWhiteSpace($root) -or -not (Test-Path -LiteralPath $root -PathType Container)) {
+    [void][System.Windows.Forms.MessageBox]::Show(((Get-UiString 'PruneNoFolder') -f $root), (Get-UiString 'PruneTitle'),
+      [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+    return
+  }
+  $keep = if ([int]$keepVersionCountInput.Value -ge 1) { [int]$keepVersionCountInput.Value } else { 2 }
+  try {
+    $prunePackagesButton.Enabled = $false
+    Update-Status (Get-UiString 'PruneScanning')
+    [System.Windows.Forms.Application]::DoEvents()  # pumps the message loop; this work stays on the UI thread on purpose (see 70-Runtime)
+
+    $plan = @(Get-LocalPackagePrunePlan -RootPackageFolder $root -KeepCount $keep)
+    if ($plan.Count -eq 0) {
+      Update-Status ((Get-UiString 'PruneNothing') -f $keep)
+      [void][System.Windows.Forms.MessageBox]::Show(((Get-UiString 'PruneNothing') -f $keep), (Get-UiString 'PruneTitle'),
+        [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+      return
+    }
+
+    # Show what would go BEFORE anything is deleted, with the total it frees. A silent bulk delete
+    # of a folder the user picked themselves is exactly the kind of surprise this tool avoids.
+    $totalBytes = [long]0
+    foreach ($e in $plan) { $totalBytes += (Get-FolderSizeBytes -Path $e.Path) }
+    $preview = @($plan | Select-Object -First 15 | ForEach-Object { '  {0}  {1}' -f $_.PackageId, $_.Version })
+    if ($plan.Count -gt 15) { $preview += ('  ... (+{0})' -f ($plan.Count - 15)) }
+
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+      ((Get-UiString 'PruneConfirm') -f $plan.Count, (Format-ByteSize $totalBytes), $keep, ($preview -join "`r`n")),
+      (Get-UiString 'PruneTitle'),
+      [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning,
+      [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { Update-Status ''; return }
+
+    Write-Log ("Local package prune starting: {0} folder(s), keeping newest {1} per package, root {2}" -f $plan.Count, $keep, $root)
+    $result = Invoke-LocalPackagePrune -Plan $plan
+    if ($result.Failed -gt 0) {
+      Update-Status ((Get-UiString 'PruneDoneWithErrors') -f $result.Removed, $result.Failed, (Format-ByteSize $result.FreedBytes))
+    } else {
+      Update-Status ((Get-UiString 'PruneDone') -f $result.Removed, (Format-ByteSize $result.FreedBytes))
+    }
+    Write-Log ("Local package prune finished: {0} removed, {1} failed, {2} freed." -f $result.Removed, $result.Failed, (Format-ByteSize $result.FreedBytes))
+  } catch {
+    Write-Log ("Local package prune failed: {0}" -f $_.Exception.Message)
+    Update-Status ((Get-UiString 'PruneDoneWithErrors') -f 0, 0, '0 B')
+  } finally {
+    $prunePackagesButton.Enabled = $true
+  }
+})
 
 # Browse Path Button Handler
 $browsePathButton.Add_Click({

@@ -148,7 +148,56 @@ function Get-SelectedAssignmentTarget {
     if ([string]::IsNullOrWhiteSpace($gid)) { return $null }
     return $gid
   }
+  # Saved group favorites sit AFTER the four fixed entries, so every existing SelectedIndex check
+  # (index 3 == "custom group") keeps its meaning. The id comes from the stored favorite, never
+  # from the text box, which is hidden for these entries.
+  $favId = Get-FavoriteIdForSelection -TargetCombo $TargetCombo
+  if ($favId) { return $favId }
   return $null
+}
+
+# Resolves a favorite entry selected in a target combo back to its group id, or "" for any of the
+# four fixed entries. Kept separate so the validation paths can ask "is this a group?" without
+# duplicating the index arithmetic.
+function Get-FavoriteIdForSelection {
+  param([Parameter(Mandatory=$true)][System.Windows.Forms.ComboBox]$TargetCombo)
+  $idx = [int]$TargetCombo.SelectedIndex
+  if ($idx -lt 4) { return "" }
+  $favorites = @(Get-GroupFavorites)
+  $favIndex = $idx - 4
+  if ($favIndex -lt 0 -or $favIndex -ge $favorites.Count) { return "" }
+  return [string]$favorites[$favIndex].Id
+}
+
+# True when the selection targets a specific Entra group - either the manual "custom group" entry
+# or a saved favorite. The exclude/filter validation needs this: excluding requires a group, and a
+# favorite is just as much a group as a pasted GUID.
+function Test-IsGroupSelection {
+  param([Parameter(Mandatory=$true)][System.Windows.Forms.ComboBox]$TargetCombo)
+  if ([int]$TargetCombo.SelectedIndex -eq 3) { return $true }
+  return [bool](Get-FavoriteIdForSelection -TargetCombo $TargetCombo)
+}
+
+# Rebuilds a target combo: the four fixed entries plus this tenant's favorites. Called after login
+# and whenever the favorites change, for every combo that picks an assignment target.
+function Update-AssignTargetCombo {
+  param([System.Windows.Forms.ComboBox]$TargetCombo)
+  if (-not $TargetCombo) { return }
+  $previous = [string]$TargetCombo.SelectedItem
+  $TargetCombo.BeginUpdate()
+  try {
+    $TargetCombo.Items.Clear()
+    [void]$TargetCombo.Items.AddRange(@(
+      (Get-UiString 'AssignNotAssigned'), (Get-UiString 'AssignAllUsers'),
+      (Get-UiString 'AssignAllDevices'), (Get-UiString 'AssignCustomGroup')))
+    foreach ($f in @(Get-GroupFavorites)) {
+      [void]$TargetCombo.Items.Add(((Get-UiString 'AssignFavoriteEntry') -f [string]$f.Name))
+    }
+    # Restore the previous choice when it still exists; otherwise fall back to "not assigned"
+    # rather than silently landing on a different group after a tenant switch.
+    $restore = if ($previous) { $TargetCombo.Items.IndexOf($previous) } else { -1 }
+    $TargetCombo.SelectedIndex = if ($restore -ge 0) { $restore } else { 0 }
+  } finally { $TargetCombo.EndUpdate() }
 }
 
 function Get-VersionDiskCache {
@@ -402,6 +451,98 @@ function Get-LocalPackageIds {
   return @($ids | Sort-Object -Unique)
 }
 
+
+# --- Pruning the local package folder ---------------------------------------------------------
+#
+# Built packages pile up: every version ever created stays on disk under <Root>\<PackageId>\<Version>.
+# Over months that is tens of gigabytes of installers nobody needs. This works out WHAT would go,
+# without deleting anything - the caller shows the plan and asks first. Deleting build output is
+# safe in a way deleting tenant apps is not (it can always be rebuilt), but "safe" is not "silent".
+
+# Sort key that orders version folder names the same way the rest of the tool compares versions.
+# Anything unparseable sorts last and is therefore never a deletion candidate ahead of a real
+# version - a folder we cannot read is a folder we do not touch.
+function Get-VersionSortKey {
+  param([string]$Value)
+  $parts = Get-ComparableVersionParts -Value $Value
+  if (-not $parts) { return $null }
+  $padded = @($parts.Core) + @(0, 0, 0, 0)
+  return ,@($padded[0], $padded[1], $padded[2], $padded[3])
+}
+
+function Get-LocalPackagePrunePlan {
+  param(
+    [Parameter(Mandatory)][string]$RootPackageFolder,
+    [int]$KeepCount = 2
+  )
+  $plan = [System.Collections.Generic.List[object]]::new()
+  if ($KeepCount -lt 1) { return @() }
+  if (-not (Test-Path -LiteralPath $RootPackageFolder -PathType Container)) { return @() }
+  try {
+    foreach ($packageFolder in @(Get-ChildItem -LiteralPath $RootPackageFolder -Directory -ErrorAction Stop)) {
+      $versions = @()
+      foreach ($versionFolder in @(Get-ChildItem -LiteralPath $packageFolder.FullName -Directory -ErrorAction SilentlyContinue)) {
+        $key = Get-VersionSortKey -Value ([string]$versionFolder.Name)
+        if (-not $key) { continue }   # not a version folder: leave it completely alone
+        $versions += [pscustomobject]@{
+          PackageId = [string]$packageFolder.Name
+          Version   = [string]$versionFolder.Name
+          Path      = [string]$versionFolder.FullName
+          SortKey   = $key
+        }
+      }
+      if ($versions.Count -le $KeepCount) { continue }
+      $ordered = @($versions | Sort-Object -Property @{ Expression = { $_.SortKey[0] } }, @{ Expression = { $_.SortKey[1] } },
+                                                     @{ Expression = { $_.SortKey[2] } }, @{ Expression = { $_.SortKey[3] } } -Descending)
+      foreach ($victim in @($ordered | Select-Object -Skip $KeepCount)) { [void]$plan.Add($victim) }
+    }
+  } catch {
+    Write-Log ("Local package prune scan failed for {0}: {1}" -f $RootPackageFolder, $_.Exception.Message)
+    return @()
+  }
+  return @($plan)
+}
+
+# Size of one planned entry, in bytes. Separate from the plan so the scan stays fast and a folder
+# that cannot be measured still shows up in the list rather than vanishing from it.
+function Get-FolderSizeBytes {
+  param([string]$Path)
+  try {
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return 0 }
+    return [long](Get-ChildItem -LiteralPath $Path -Recurse -File -ErrorAction SilentlyContinue |
+      Measure-Object -Property Length -Sum).Sum
+  } catch { return 0 }
+}
+
+function Format-ByteSize {
+  param([long]$Bytes)
+  if ($Bytes -ge 1GB) { return ('{0:N1} GB' -f ($Bytes / 1GB)) }
+  if ($Bytes -ge 1MB) { return ('{0:N1} MB' -f ($Bytes / 1MB)) }
+  if ($Bytes -ge 1KB) { return ('{0:N0} KB' -f ($Bytes / 1KB)) }
+  return ('{0} B' -f $Bytes)
+}
+
+# Deletes what the plan lists and reports what actually went. A failure on one folder (file in use,
+# for example) must not abort the rest, so each removal stands on its own.
+function Invoke-LocalPackagePrune {
+  param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Plan)
+  $removed = 0
+  $failed = 0
+  $freed = [long]0
+  foreach ($entry in $Plan) {
+    $size = Get-FolderSizeBytes -Path $entry.Path
+    try {
+      Remove-Item -LiteralPath $entry.Path -Recurse -Force -ErrorAction Stop
+      $removed++
+      $freed += $size
+      Write-Log ("Local package prune: removed {0} {1}" -f $entry.PackageId, $entry.Version)
+    } catch {
+      $failed++
+      Write-Log ("Local package prune: could NOT remove {0} {1}: {2}" -f $entry.PackageId, $entry.Version, $_.Exception.Message)
+    }
+  }
+  return [pscustomobject]@{ Removed = $removed; Failed = $failed; FreedBytes = $freed }
+}
 
 # --- Short-lived cache for the tenant app inventory ---
 # Every Get-WtWin32Apps call makes the WinTuner module log "Getting list of published apps", and a

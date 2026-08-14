@@ -272,9 +272,21 @@ $assignGroupIdHost = New-RoundedInput -Inner $assignGroupIdBox -X 372 -Y 82 -W 1
 $assignGroupIdHost.Visible = $false
 $cardDeploy.Controls.Add($assignGroupIdHost)
 
+$assignFavButton = New-Object System.Windows.Forms.Button
+$assignFavButton.Tag = 'btn-secondary'
+$assignFavButton.Text = Get-UiString 'FavAddButton'
+$assignFavButton.Location = New-Object System.Drawing.Point(558, 82)
+$assignFavButton.Size = New-Object System.Drawing.Size(32, 32)
+$assignFavButton.Visible = $false
+$assignFavButton.Add_Click({ Show-GroupFavoriteDialog -GroupIdBox $assignGroupIdBox })
+$cardDeploy.Controls.Add($assignFavButton)
+
 $assignTargetCombo.Add_SelectedIndexChanged({
-  $assignGroupIdHost.Visible = ($assignTargetCombo.SelectedItem -eq (Get-UiString 'AssignCustomGroup'))
+  $isCustom = ($assignTargetCombo.SelectedItem -eq (Get-UiString 'AssignCustomGroup'))
+  $assignGroupIdHost.Visible = $isCustom
+  $assignFavButton.Visible = $isCustom
 })
+Register-AssignTargetCombo -TargetCombo $assignTargetCombo
 
 # Assignment intent (Available / Required / Uninstall) → Deploy-WtWin32App -AvailableFor /
 # -RequiredFor / -UninstallFor. Read by SelectedIndex so it is language-independent.
@@ -827,9 +839,21 @@ $storeAssignGroupIdHost = New-RoundedInput -Inner $script:storeAssignGroupIdBox 
 $storeAssignGroupIdHost.Visible = $false
 $cardStoreAssign.Controls.Add($storeAssignGroupIdHost)
 
+$storeAssignFavButton = New-Object System.Windows.Forms.Button
+$storeAssignFavButton.Tag = 'btn-secondary'
+$storeAssignFavButton.Text = Get-UiString 'FavAddButton'
+$storeAssignFavButton.Location = New-Object System.Drawing.Point(656, 62)
+$storeAssignFavButton.Size = New-Object System.Drawing.Size(32, 32)
+$storeAssignFavButton.Visible = $false
+$storeAssignFavButton.Add_Click({ Show-GroupFavoriteDialog -GroupIdBox $script:storeAssignGroupIdBox })
+$cardStoreAssign.Controls.Add($storeAssignFavButton)
+
 $script:storeAssignTargetCombo.Add_SelectedIndexChanged({
-  $storeAssignGroupIdHost.Visible = ($script:storeAssignTargetCombo.SelectedItem -eq (Get-UiString 'AssignCustomGroup'))
+  $isCustom = ($script:storeAssignTargetCombo.SelectedItem -eq (Get-UiString 'AssignCustomGroup'))
+  $storeAssignGroupIdHost.Visible = $isCustom
+  $storeAssignFavButton.Visible = $isCustom
 })
+Register-AssignTargetCombo -TargetCombo $script:storeAssignTargetCombo
 
 $storeAssignIntentLabel = New-Object System.Windows.Forms.Label
 $storeAssignIntentLabel.Text = Get-UiString 'AssignIntentLabel'
@@ -919,6 +943,15 @@ $script:storeNotifyCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::D
 $script:storeNotifyCombo.SelectedIndex = 0
 $script:storeNotifyCombo.Location = New-Object System.Drawing.Point(240, 334)
 $cardStoreAssign.Controls.Add($script:storeNotifyCombo)
+
+# "Leave unchanged" does not mean "no notifications": the property is simply not sent, and Intune
+# then applies its own default, which is showAll. Naming that here saves guessing what the neutral
+# option actually produces on the device.
+$storeNotifyDefaultHint = New-Object System.Windows.Forms.Label
+$storeNotifyDefaultHint.Text = Get-UiString 'NotifyDefaultHint'
+$storeNotifyDefaultHint.Location = New-Object System.Drawing.Point(500, 336)
+$storeNotifyDefaultHint.Size = New-Object System.Drawing.Size(212, 30)
+$cardStoreAssign.Controls.Add($storeNotifyDefaultHint)
 
 $script:storeDeadlineCheck = New-Object System.Windows.Forms.CheckBox
 $script:storeDeadlineCheck.Text = Get-UiString 'DeployDeadline'
@@ -1011,7 +1044,7 @@ $script:storeAdvControls = @($storeGroupModeLabel, $script:storeGroupModeCombo,
                              $storeExcludeBaseLabel, $script:storeExcludeBaseCombo,
                              $storeFilterModeLabel, $script:storeFilterModeCombo,
                              $storeFilterIdLabel, $storeFilterIdHost,
-                             $storeNotifyLabel, $script:storeNotifyCombo,
+                             $storeNotifyLabel, $script:storeNotifyCombo, $storeNotifyDefaultHint,
                              $script:storeDeadlineCheck, $script:storeDeadlinePicker, $script:storeLocalTimeCheck,
                              $script:storeRestartEnableCheck, $storeRestartGraceLabel, $script:storeRestartGraceValue,
                              $storeRestartCountdownLabel, $script:storeRestartCountdownValue,
@@ -1349,7 +1382,7 @@ $storeDeployButton.Add_Click({
     if ($script:storeAssignTargetCombo.SelectedIndex -eq 3 -and -not (Test-GuidString ([string]$assignTarget))) {
       throw (Get-UiString 'DeployGroupIdRequired')
     }
-    if ($assignTarget -and $targetChanges.AssignmentMode -eq 'exclude' -and $script:storeAssignTargetCombo.SelectedIndex -ne 3) {
+    if ($assignTarget -and $targetChanges.AssignmentMode -eq 'exclude' -and -not (Test-IsGroupSelection -TargetCombo $script:storeAssignTargetCombo)) {
       throw (Get-UiString 'DeployExcludedRequiresGroup')
     }
     if ($targetChanges.AssignmentMode -eq 'exclude' -and $targetChanges.FilterType -ne 'none') {

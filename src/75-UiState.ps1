@@ -893,6 +893,149 @@ function Show-Section {
 
 
 
+# --- Entra group favorites: shared dialog and the button that opens it ---------------------------
+#
+# Every place that picks an assignment target registers its combo here, so saving or removing a
+# favorite refreshes all of them at once instead of leaving one list stale until the next restart.
+$script:assignTargetCombos = [System.Collections.Generic.List[object]]::new()
+
+function Register-AssignTargetCombo {
+  param([System.Windows.Forms.ComboBox]$TargetCombo)
+  if ($TargetCombo -and -not $script:assignTargetCombos.Contains($TargetCombo)) {
+    [void]$script:assignTargetCombos.Add($TargetCombo)
+  }
+}
+
+function Update-AllAssignTargetCombos {
+  foreach ($c in $script:assignTargetCombos) {
+    try { Update-AssignTargetCombo -TargetCombo $c } catch {
+      try { Write-Log ("Could not refresh an assignment target list: {0}" -f $_.Exception.Message) } catch {}
+    }
+  }
+}
+
+# Save the id currently in $GroupIdBox under a name, and manage what is already stored. Favorites
+# belong to the signed-in tenant, so without a session there is nothing to write and the dialog
+# says so rather than silently storing under an empty key.
+function Show-GroupFavoriteDialog {
+  param([System.Windows.Forms.TextBox]$GroupIdBox)
+
+  if (-not (Get-TenantFavoriteKey)) {
+    [void][System.Windows.Forms.MessageBox]::Show((Get-UiString 'FavDialogNoTenant'), (Get-UiString 'FavDialogTitle'),
+      [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+    return
+  }
+
+  $dlg = New-Object System.Windows.Forms.Form
+  $dlg.Text = Get-UiString 'FavDialogTitle'
+  $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+  $dlg.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
+  $dlg.MinimizeBox = $false; $dlg.MaximizeBox = $false
+  $dlg.ClientSize = New-Object System.Drawing.Size(520, 380)
+
+  $pendingId = ([string]$GroupIdBox.Text).Trim()
+
+  $nameLabel = New-Object System.Windows.Forms.Label
+  $nameLabel.Text = Get-UiString 'FavDialogPromptName'
+  $nameLabel.Location = New-Object System.Drawing.Point(14, 14)
+  $nameLabel.Size = New-Object System.Drawing.Size(490, 20)
+  $dlg.Controls.Add($nameLabel)
+
+  $nameBox = New-Object System.Windows.Forms.TextBox
+  $nameBox.Location = New-Object System.Drawing.Point(14, 38)
+  $nameBox.Width = 370
+  $dlg.Controls.Add($nameBox)
+
+  $idLabel = New-Object System.Windows.Forms.Label
+  $idLabel.Text = $pendingId
+  $idLabel.Location = New-Object System.Drawing.Point(14, 68)
+  $idLabel.Size = New-Object System.Drawing.Size(490, 20)
+  $dlg.Controls.Add($idLabel)
+
+  $saveButton = New-Object System.Windows.Forms.Button
+  $saveButton.Text = Get-UiString 'FavSaveButton'
+  $saveButton.Location = New-Object System.Drawing.Point(394, 36)
+  $saveButton.Size = New-Object System.Drawing.Size(110, 26)
+  $dlg.Controls.Add($saveButton)
+
+  $listLabel = New-Object System.Windows.Forms.Label
+  $listLabel.Text = Get-UiString 'FavManageLabel'
+  $listLabel.Location = New-Object System.Drawing.Point(14, 100)
+  $listLabel.AutoSize = $true
+  $dlg.Controls.Add($listLabel)
+
+  $list = New-Object System.Windows.Forms.ListBox
+  $list.Location = New-Object System.Drawing.Point(14, 124)
+  $list.Size = New-Object System.Drawing.Size(490, 190)
+  $dlg.Controls.Add($list)
+
+  $removeButton = New-Object System.Windows.Forms.Button
+  $removeButton.Text = Get-UiString 'FavRemoveButton'
+  $removeButton.Location = New-Object System.Drawing.Point(14, 326)
+  $removeButton.Size = New-Object System.Drawing.Size(130, 30)
+  $dlg.Controls.Add($removeButton)
+
+  $closeButton = New-Object System.Windows.Forms.Button
+  $closeButton.Text = Get-UiString 'FavCloseButton'
+  $closeButton.Location = New-Object System.Drawing.Point(374, 326)
+  $closeButton.Size = New-Object System.Drawing.Size(130, 30)
+  $dlg.Controls.Add($closeButton)
+
+  $refreshList = {
+    $list.Items.Clear()
+    foreach ($f in @(Get-GroupFavorites)) {
+      [void]$list.Items.Add(("{0}  -  {1}" -f [string]$f.Name, [string]$f.Id))
+    }
+  }
+  & $refreshList
+
+  # Saving is only offered when the field actually held a well-formed id; otherwise the dialog is
+  # still useful for removing entries, so it opens rather than refusing outright.
+  $saveButton.Add_Click({
+    if ([string]::IsNullOrWhiteSpace($pendingId)) {
+      [void][System.Windows.Forms.MessageBox]::Show((Get-UiString 'FavDialogNoId'), (Get-UiString 'FavDialogTitle'),
+        [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+      return
+    }
+    if (-not (Test-GuidString $pendingId)) {
+      [void][System.Windows.Forms.MessageBox]::Show((Get-UiString 'FavDialogBadId'), (Get-UiString 'FavDialogTitle'),
+        [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+      return
+    }
+    $label = ([string]$nameBox.Text).Trim()
+    if ([string]::IsNullOrWhiteSpace($label)) { return }
+    if (Add-GroupFavorite -Id $pendingId -Name $label) {
+      Write-Log ("Group favorite saved for this tenant: {0} ({1})" -f $label, $pendingId)
+      Update-Status ((Get-UiString 'FavAddedStatus') -f $label)
+      & $refreshList
+      Update-AllAssignTargetCombos
+    }
+  })
+
+  $removeButton.Add_Click({
+    $idx = [int]$list.SelectedIndex
+    $favorites = @(Get-GroupFavorites)
+    if ($idx -lt 0 -or $idx -ge $favorites.Count) { return }
+    $victim = $favorites[$idx]
+    if (Remove-GroupFavorite -Id ([string]$victim.Id)) {
+      Write-Log ("Group favorite removed: {0} ({1})" -f [string]$victim.Name, [string]$victim.Id)
+      Update-Status ((Get-UiString 'FavRemovedStatus') -f [string]$victim.Name)
+      & $refreshList
+      Update-AllAssignTargetCombos
+    }
+  })
+
+  $closeButton.Add_Click({ $dlg.Close() })
+  try { Set-GuiTheme -control $dlg -theme $script:currentTheme } catch { }   # class 3: an unthemed dialog is still usable
+  [void]$dlg.ShowDialog()
+  $dlg.Dispose()
+}
+
+# NOTE: the favorite buttons are built inline at each of the three assignment cards rather than by
+# a shared factory. A factory would have to capture the group-id box via .GetNewClosure(), and a
+# closure created that way cannot resolve script functions here - Show-GroupFavoriteDialog would
+# fail at click time, not at build time. Inline handlers see the script-scope box directly.
+
 # Section: Dashboard (registered first so it is the top nav item + default view). Its
 # content (stat tiles, quick actions) is built in the dashboard stage; title placeholder here.
 $tabDashboard = New-Object System.Windows.Forms.Panel

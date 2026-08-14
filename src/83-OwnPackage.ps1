@@ -175,6 +175,7 @@ $replaceLabel.Location = New-Object System.Drawing.Point(14, 10)
 $replaceLabel.AutoSize = $true
 $replaceLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 $cardContentReplace.Controls.Add($replaceLabel)
+[void](Add-SectionInfoBadge -Parent $cardContentReplace -AfterLabel $replaceLabel -TextKey 'InfoContentReplace')
 
 $replaceAppLabel = New-Object System.Windows.Forms.Label
 $replaceAppLabel.Text = Get-UiString 'ContentReplaceAppLabel'

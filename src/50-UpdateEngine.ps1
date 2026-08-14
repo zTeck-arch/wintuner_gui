@@ -1,4 +1,4 @@
-# Keeps only the newest $KeepCount versions per app and removes everything older.
+﻿# Keeps only the newest $KeepCount versions per app and removes everything older.
 # SAFETY: a group is only touched when every version in it parses as a real version number – if any
 # version string is unparseable the whole group is skipped and logged, because guessing the order
 # here would mean deleting the wrong app. Groups with <= KeepCount versions are never touched, so a
@@ -101,7 +101,12 @@ function Invoke-VersionCleanup {
       }
     }
 
+    # "Protected" and "failed" are counted apart. A version Intune still reports as assigned or
+    # installed was kept exactly as designed - that is the guard working, not a fault. Reporting
+    # both as one number made a correct run read like a broken one ("0 removed, 4 kept back by
+    # safety checks or errors"), and the reason was only ever visible in the log.
     $removed = 0; $failed = 0
+    $protectedItems = [System.Collections.Generic.List[string]]::new()
     foreach ($g in $groups) {
       # Oldest first, so the supersedence chain is unwound from the bottom.
       $oldestFirst = @($g.Obsolete)
@@ -113,11 +118,22 @@ function Invoke-VersionCleanup {
         $installationProbe = Get-AppInstallationProbe -AppId $item.App.GraphId -AppName $g.Name
         if (-not $assignmentProbe.Succeeded -or -not $installationProbe.Succeeded -or
             $assignmentProbe.HasAssignments -or $installationProbe.HasInstallations) {
-          $failed++
-          $reason = if (-not $assignmentProbe.Succeeded -or -not $installationProbe.Succeeded) {
-            'assignment/installation state is unknown'
-          } elseif ($assignmentProbe.HasAssignments) { 'the app still has assignments' }
-          else { 'Intune still reports successful installations' }
+          if (-not $assignmentProbe.Succeeded -or -not $installationProbe.Succeeded) {
+            # Unknown state is a genuine problem: nothing can be decided, so this one counts as an
+            # error rather than as a deliberate protection.
+            $failed++
+            $reason = 'assignment/installation state is unknown'
+            $reasonText = Get-UiString 'CleanupKeptReasonUnknown'
+          } elseif ($assignmentProbe.HasAssignments) {
+            $reason = 'the app still has assignments'
+            $reasonText = Get-UiString 'CleanupKeptReasonAssigned'
+            [void]$protectedItems.Add(("{0} {1} - {2}" -f $g.Name, $item.Raw, $reasonText))
+          } else {
+            $reason = 'Intune still reports successful installations'
+            $installedOn = if ($null -ne $installationProbe.Count) { [int]$installationProbe.Count } else { 0 }
+            $reasonText = (Get-UiString 'CleanupKeptReasonInstalled') -f $installedOn
+            [void]$protectedItems.Add(("{0} {1} - {2}" -f $g.Name, $item.Raw, $reasonText))
+          }
           Write-Log ("Version cleanup: kept {0} {1} ({2}) because {3}." -f $g.Name, $item.Raw, $item.App.GraphId, $reason)
           continue
         }
@@ -127,10 +143,18 @@ function Invoke-VersionCleanup {
         } else { $failed++ }
       }
     }
-    # "kept back" is not the same as "failed": a version that Intune still reports as installed was
-    # protected exactly as intended. Calling that an error made a correct outcome read like a fault.
-    Write-Log ("Version cleanup finished: {0} removed, {1} kept back by safety checks or errors." -f $removed, $failed)
-    Update-Status ((Get-UiString 'VersionCleanupDoneStatus') -f $removed, $failed)
+    Write-Log ("Version cleanup finished: {0} removed, {1} protected by the safety checks, {2} failed." -f $removed, $protectedItems.Count, $failed)
+    Update-Status ((Get-UiString 'VersionCleanupDoneStatus') -f $removed, $protectedItems.Count, $failed)
+
+    # Say WHY, where the user is looking. Without this the run reads as "nothing happened" and the
+    # explanation sits in a log file nobody opens mid-task.
+    if ($protectedItems.Count -gt 0 -and -not $Silent) {
+      [void][System.Windows.Forms.MessageBox]::Show(
+        ((Get-UiString 'CleanupKeptDialog') -f $protectedItems.Count, (($protectedItems | Select-Object -First 15) -join "`r`n")),
+        (Get-UiString 'CleanupKeptTitle'),
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information)
+    }
     # Only when the user started the cleanup themselves. Inside an update batch the progress bar is
     # still visible, so this click landed in Test-UiBusy and put a MODAL "another operation is
     # running" box up - usually behind the window, where it silently blocked the whole batch until
@@ -538,6 +562,7 @@ function Get-SessionLeistungstext {
     @{ Intro = "The following applications were updated and deployed in the customer's Intune environment, including the required assignments and supersedence of old applications:"
        None = "Nothing has been recorded for this tenant in this session yet."
        Removed = " (old version superseded)"
+       RemovedMany = " ({0} old versions superseded)"
        HeadUpdates = "Updated:"
        HeadDeployed = "Newly deployed:"
        HeadVersionRemoved = "Old versions removed:"
@@ -548,6 +573,7 @@ function Get-SessionLeistungstext {
     @{ Intro = "Folgende Anwendungen in der Intune Kundenumgebung aktualisiert und bereitgestellt sowie benötigte Zuweisungen und Ablöse von alten Anwendungen vorgenommen:"
        None = "Für diesen Tenant wurde in dieser Sitzung noch nichts erfasst."
        Removed = " (alte Version abgelöst)"
+       RemovedMany = " ({0} alte Versionen abgelöst)"
        HeadUpdates = "Aktualisiert:"
        HeadDeployed = "Neu bereitgestellt:"
        HeadVersionRemoved = "Alte Versionen entfernt:"
@@ -591,12 +617,53 @@ function Get-SessionLeistungstext {
 
   $removedCount = 0
   $updates = @(if ($byKind.ContainsKey('Update')) { $byKind['Update'] } else { @() })
+  $updateGroupCount = 0
   if ($updates.Count -gt 0) {
     $lines.Add($tpl.HeadUpdates)
+    # Several old versions of one app routinely land on the SAME new version - that is one update
+    # with several predecessors, not several updates. Listed line by line it read as if the app had
+    # been updated twice, which is exactly what a customer should not have to decode from a record.
+    # Grouped by app + target version, in first-appearance order.
+    $groupOrder = [System.Collections.Generic.List[string]]::new()
+    $groups = @{}
     foreach ($item in $updates) {
+      $key = ("{0}|{1}" -f [string]$item.Name, [string]$item.ToVersion)
+      if (-not $groups.ContainsKey($key)) {
+        $groups[$key] = [pscustomobject]@{
+          Name = [string]$item.Name; ToVersion = [string]$item.ToVersion
+          From = [System.Collections.Generic.List[string]]::new()
+          SortKeys = [System.Collections.Generic.List[string]]::new(); Removed = 0
+        }
+        [void]$groupOrder.Add($key)
+      }
+      $from = [string]$item.FromVersion
+      if ($from -and -not $groups[$key].From.Contains($from)) {
+        [void]$groups[$key].From.Add($from)
+        # Sort key computed HERE, not inside the Sort-Object scriptblock below: such a scriptblock
+        # runs in its own scope and cannot reliably resolve script functions, so calling the version
+        # parser from inside it failed silently and left the predecessors unordered.
+        $parts = Get-ComparableVersionParts -Value $from
+        $padded = if ($parts) { @($parts.Core) + @(0, 0, 0, 0) } else { @(0, 0, 0, 0) }
+        [void]$groups[$key].SortKeys.Add(('{0:D10}.{1:D10}.{2:D10}.{3:D10}' -f
+          [uint64]$padded[0], [uint64]$padded[1], [uint64]$padded[2], [uint64]$padded[3]))
+      }
+      if ($item.OldVersionRemoved) { $groups[$key].Removed++; $removedCount++ }
+    }
+    $updateGroupCount = $groupOrder.Count
+    foreach ($key in $groupOrder) {
+      $g = $groups[$key]
+      # Predecessors oldest first, so the line reads as a range that ends at the new version.
+      # Sorted on the pre-computed padded keys - plain string ordering is correct for those.
+      $pairs = @()
+      for ($i = 0; $i -lt $g.From.Count; $i++) {
+        $pairs += [pscustomobject]@{ Version = $g.From[$i]; Key = $g.SortKeys[$i] }
+      }
+      $ordered = @($pairs | Sort-Object -Property Key | ForEach-Object { $_.Version })
       $suffix = ""
-      if ($item.OldVersionRemoved) { $suffix = $tpl.Removed; $removedCount++ }
-      $lines.Add("- $($item.Name): $($item.FromVersion) -> $($item.ToVersion)$suffix")
+      if ($g.Removed -gt 0) {
+        $suffix = if ($g.Removed -eq 1) { $tpl.Removed } else { $tpl.RemovedMany -f $g.Removed }
+      }
+      $lines.Add("- $($g.Name): $($ordered -join ', ') -> $($g.ToVersion)$suffix")
     }
     $lines.Add("")
   }
@@ -624,7 +691,7 @@ function Get-SessionLeistungstext {
   }
 
   $countOf = { param($k) @(if ($byKind.ContainsKey($k)) { $byKind[$k] } else { @() }).Count }
-  $lines.Add(($tpl.Summary -f $updates.Count, $removedCount,
+  $lines.Add(($tpl.Summary -f $updateGroupCount, $removedCount,
     (& $countOf 'Deployed'), (& $countOf 'VersionRemoved'),
     (& $countOf 'SupersededRemoved'), (& $countOf 'AssignmentsChanged')))
 
