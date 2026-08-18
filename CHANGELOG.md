@@ -26,6 +26,7 @@
 
 - **„Benutzername:" überlappte das Eingabefeld.** Die Beschriftung stand auf einer festen Position mit 76 Pixeln Platz; das deutsche Wort braucht 86. Sie wird jetzt gemessen und rechtsbündig vor das Feld gesetzt, was auch bei anderer Schriftgröße oder höherer DPI-Einstellung trägt.
 - **Das Fenster ist breit genug für die vierte Kachel.** Bei 1014 Pixeln wurde die neue Speicher-Kachel rechts abgeschnitten; das Startmaß ist auf 1060 erhöht und wird jetzt aus der Mindestgröße des Fensters hergeleitet, statt an zwei Stellen fest verdrahtet zu sein.
+- **Der Fortschritt beim Update-Lauf hängt nicht mehr scheinbar fest.** Der Balken war ein Laufband (Marquee), das nur animiert, solange der Oberflächen-Faden seine Nachrichtenschleife pumpt – während des langen Paketbaus ruckelte es, während des blockierenden Uploads stand es still, was wie ein Absturz aussah. Ein echter Prozentwert ist nicht möglich, weil weder WinGet noch das Modul einen liefern. Stattdessen füllt sich der Balken jetzt echt über die Anzahl der Apps (eine App fertig = ein Schritt), und die Statuszeile nennt die Phase je App: „(2/8) Google Chrome — Paketieren…" bzw. „— Hochladen zu Intune…". So ist jederzeit ablesbar, wo der Lauf steht, auch wenn eine einzelne große App minutenlang paketiert.
 
 **Sicherheit und Protokolle**
 

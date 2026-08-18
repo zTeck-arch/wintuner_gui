@@ -13,8 +13,13 @@ function Invoke-AppUpdateBatch {
   $checkAllButton.Enabled = $false
   $uncheckAllButton.Enabled = $false
 
-  $script:progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
-  $script:progressBar.MarqueeAnimationSpeed = 30
+  # Real per-app progress instead of a marquee. A marquee only animates while the UI thread pumps
+  # its message loop; during a long package build (60ms sleeps) it stutters and during the blocking
+  # upload it freezes outright - which read as "hung". A continuous bar over the app count moves at
+  # honest, observable moments (one app done), and the status line names the phase within each app.
+  $script:progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
+  $script:progressBar.Maximum = [Math]::Max(1, $Apps.Count)
+  $script:progressBar.Value = 0
   $script:progressBar.Visible = $true
 
   $successCount = 0
@@ -42,6 +47,11 @@ function Invoke-AppUpdateBatch {
         break
       }
       $currentIndex++
+      # Advance the bar by COMPLETED apps: it sits at currentIndex-1 while this app runs, so the fill
+      # never claims an app is done before it is. The phase prefix ("(2/8) ") is picked up by the
+      # packaging/upload status lines inside Update-SingleApp.
+      $script:progressBar.Value = [Math]::Min([Math]::Max(0, $currentIndex - 1), $script:progressBar.Maximum)
+      $script:batchProgressPrefix = "({0}/{1}) " -f $currentIndex, $totalCount
       $appStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
       Update-Status ("Updating ({0}/{1}): {2} {3}" -f $currentIndex, $totalCount, $app.Name, $app.CurrentVersion)
       [System.Windows.Forms.Application]::DoEvents()  # pumps the message loop; this work stays on the UI thread on purpose (see 70-Runtime)
@@ -173,6 +183,7 @@ function Invoke-AppUpdateBatch {
     $uncheckAllButton.Enabled = $true
     if ($cancelBatchButton) { Set-CancelBatchButtonVisible $false }
     $script:cancelBatch = $false
+    $script:batchProgressPrefix = ''
   }
 }
 

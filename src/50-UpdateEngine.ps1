@@ -333,6 +333,10 @@ function Update-SingleApp {
 
     # 2) Create/refresh package using fallback logic
     Write-Log "Creating package for $AppName..."
+    # Step display: name the phase the run is in. Packaging is the long, silent phase (a big
+    # installer can take minutes), so saying so beats a progress bar that cannot show a percentage
+    # the tools never report. The prefix carries the batch counter ("(2/8) ") or is empty.
+    Update-Status ((Get-UiString 'PhasePackagingStatus') -f $script:batchProgressPrefix, $AppName, $LatestVersion)
     # For updates, ALWAYS use LatestVersion (ignore cached selectedPackageVersions)
     $desired = $LatestVersion
     Write-Log "Update workflow: forcing LatestVersion $desired (ignoring any cached selection)"
@@ -384,6 +388,10 @@ function Update-SingleApp {
 
     # 3) Deploy with best available identifier
     Write-Log "Deploying $AppName version $effectiveVersion..."
+    # Phase switch: the upload runs blocking on the UI thread (the Graph session is per-runspace),
+    # so the window cannot animate during it. The text at least records that the phase changed from
+    # packaging to uploading before the thread goes quiet.
+    Update-Status ((Get-UiString 'PhaseUploadingStatus') -f $script:batchProgressPrefix, $AppName, $effectiveVersion)
     $deploySplat = @{
       RootPackageFolder = $RootPackageFolder
       ErrorAction = 'Stop'

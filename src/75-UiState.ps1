@@ -453,6 +453,9 @@ $script:progressBar.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [Syst
 $script:progressBar.Visible = $false
 $bottomPanel.Controls.Add($script:progressBar)
 
+# Batch step counter shown in the packaging/upload status lines, e.g. "(2/8) ". Empty outside a batch.
+$script:batchProgressPrefix = ''
+
 # "Stop after current app": packaging a single app blocks the UI thread (the module call is
 # synchronous), so the window can show "Not responding" for minutes on big installers. A click here
 # is queued by Windows and picked up at the next DoEvents – i.e. between two apps – which lets a
