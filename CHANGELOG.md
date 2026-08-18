@@ -1,4 +1,26 @@
-# Changelog
+﻿# Changelog
+
+## 0.15.6 – Eigene Installer erklären sich selbst, englische README
+
+**Eigene Installer**
+
+- **Paketieren scheiterte stumm, wenn Ziel- und Quellordner derselbe waren.** Die Paketierung komprimiert den gesamten Quellordner und weigert sich deshalb, ihr Ergebnis genau dorthin zu schreiben. Sie meldet das aber nur als `WARNING`, was an `-ErrorAction Stop` vorbeigeht: Der Aufruf kehrte nach 0,0 Sekunden zurück, meldete Erfolg, und übrig blieb die Meldung „hat keine .intunewin-Datei erzeugt" – das Symptom, nicht die Ursache. Der Fall wird jetzt vorher abgefangen und benannt, einschließlich eines Zielordners *innerhalb* der Quelle.
+- **Die Paketierung sagt jetzt, was sie tut.** Alle Ausgabeströme des Werkzeugs werden protokolliert, dazu die Laufzeit. Ein verweigerter Lauf ist an unter einer Sekunde erkennbar, ein echter dauert Sekunden. Bleibt die Datei aus, nennt die Fehlermeldung die tatsächliche Meldung des Werkzeugs.
+- **Die drei Pfadfelder sind entflochten.** Zuerst wird der Installer gewählt, der Quellordner ergibt sich daraus. Beide Regeln – Installer im Quellordner, Zielordner nicht darin – werden beim Tippen und Auswählen laufend geprüft und als Warnung angezeigt, statt erst beim Bauen aufzutreten.
+- **Das fertige Paket wird sichtbar weitergereicht.** Der Pfad landete schon vorher automatisch in der Karte darunter, nur stumm und zwei Karten entfernt, sodass der Bau ins Leere zu führen schien.
+- **Schritt 2 sagt, womit er arbeitet.** Die Erkennungsregel wird aus dem *Installer* ermittelt, nicht aus dem Paket, denn eine Regel lässt sich nur durch Installieren finden. Titel und Hinweis benennen das jetzt.
+- **Leere Felder erzeugen keine Entwicklermeldung mehr.** Ein leeres Pfadfeld führte zu „Cannot bind argument to parameter 'SourcePath' because it is an empty string", weil PowerShell schon bei der Parameterbindung abbrach, bevor die eigenen Prüfungen liefen.
+- **Windows Sandbox: Verfügbarkeit wird vorher geprüft.** Fehlte das Feature, meldete die Anwendung einen Fehler über ein Arbeitsverzeichnis, das mit der Ursache nichts zu tun hatte. Jetzt wird erklärt, was fehlt, und angeboten, es per `dism.exe` zu aktivieren oder den Windows-Features-Dialog zu öffnen. Voreingestellt ist „Abbrechen", denn beides verändert das System.
+- Die Suche nach der erzeugten `.intunewin` läuft rekursiv, damit ein in einem Unterordner abgelegtes Paket nicht übersehen wird.
+
+**Oberfläche**
+
+- **„Benutzername:" überlappte das Eingabefeld.** Die Beschriftung stand auf einer festen Position mit 76 Pixeln Platz; das deutsche Wort braucht 86. Sie wird jetzt gemessen und rechtsbündig vor das Feld gesetzt, was auch bei anderer Schriftgröße oder höherer DPI-Einstellung trägt.
+
+**Dokumentation**
+
+- **Die README ist jetzt englisch**, die deutsche Fassung liegt als `README.de.md` daneben, mit Sprachumschalter oben in beiden. Überarbeitet, mit Inhaltsverzeichnis und ohne Gedankenstriche.
+- Der Hinweis auf ältere Versionen ohne funktionierende Update-Prüfung ist entfallen; solche Kopien gibt es nicht mehr.
 
 ## 0.15.5 – Microsoft Store als eigener Bereich, Gruppen-Favoriten, verständlichere Berichte
 
