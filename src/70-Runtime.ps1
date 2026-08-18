@@ -1,4 +1,30 @@
-# Logging function (thread-safe for WinForms event handlers)
+﻿# Logging function (thread-safe for WinForms event handlers)
+# One writer at a time across processes. Add-Content opens, writes and closes without any lock, so
+# two running instances interleave and can truncate each other's lines - which is exactly the kind
+# of corruption that makes a log useless at the moment it is needed. A named mutex is cheap here:
+# writes are short, and a caller that cannot get the lock within a second simply skips the file and
+# still shows the line in the window.
+$script:logMutex = $null
+function Get-LogMutex {
+  if ($script:logMutex) { return $script:logMutex }
+  try { $script:logMutex = [System.Threading.Mutex]::new($false, 'WinTunerGUI_LogFile') } catch { $script:logMutex = $null }
+  return $script:logMutex
+}
+
+# The one place that decides where the log file lives. Write-Log used to derive it from
+# $PSScriptRoot, which put customer data next to the script - the Downloads folder for the
+# documented way of running it - and quietly ignored the configured directory.
+function Get-CurrentLogPath {
+  param([datetime]$Now = (Get-Date))
+  $base = if ($script:logDirectory) { $script:logDirectory } else { [Environment]::GetFolderPath('LocalApplicationData') }
+  if (-not (Test-Path -LiteralPath $base)) {
+    try { New-Item -ItemType Directory -Path $base -Force -ErrorAction Stop | Out-Null } catch { return $null }
+  }
+  $isoYear = [System.Globalization.ISOWeek]::GetYear($Now)
+  $isoWeek = [System.Globalization.ISOWeek]::GetWeekOfYear($Now)
+  return (Join-Path $base ("WinTuner_GUI_{0}-W{1:D2}.log" -f $isoYear, $isoWeek))
+}
+
 function Write-Log {
   param([string]$message)
   if ([string]::IsNullOrWhiteSpace($message)) { return }
@@ -10,18 +36,23 @@ function Write-Log {
 
     # Write to file
     try {
-      $base = if ($PSScriptRoot) { $PSScriptRoot } elseif ($MyInvocation -and $MyInvocation.MyCommand -and $MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { (Get-Location).Path }
-      if ([string]::IsNullOrWhiteSpace($base)) { $base = [Environment]::GetFolderPath('LocalApplicationData') }
-      if (-not (Test-Path $base)) {
-          try { New-Item -ItemType Directory -Path $base -Force | Out-Null } catch { return }
+      $logPath = Get-CurrentLogPath -Now $now
+      if ($logPath) {
+        # Keep UI/help actions in sync even if the application remains open across a week boundary.
+        $script:logFilePath = $logPath
+        $mutex = Get-LogMutex
+        $held = $false
+        try {
+          if ($mutex) {
+            # A second is generous for appending one line. Timing out is not worth failing over:
+            # the line still reaches the window, and the alternative is blocking the UI thread.
+            try { $held = $mutex.WaitOne(1000) } catch [System.Threading.AbandonedMutexException] { $held = $true }
+          }
+          Add-Content -Path $logPath -Value $logLine -Encoding utf8 -ErrorAction SilentlyContinue
+        } finally {
+          if ($held) { try { $mutex.ReleaseMutex() } catch { } }
+        }
       }
-      $isoYear = [System.Globalization.ISOWeek]::GetYear($now)
-      $isoWeek = [System.Globalization.ISOWeek]::GetWeekOfYear($now)
-      $logPath = Join-Path $base ("WinTuner_GUI_{0}-W{1:D2}.log" -f $isoYear, $isoWeek)
-      # Keep UI/help actions in sync even if the application remains open across a week boundary.
-      $script:logFilePath = $logPath
-
-      Add-Content -Path $logPath -Value $logLine -Encoding utf8 -ErrorAction SilentlyContinue
     } catch {
       # Silently ignore file write errors
     }
@@ -91,13 +122,21 @@ function Write-LogSafe {
     $now = Get-Date
     $timestamp = $now.ToString("yyyy-MM-dd HH:mm:ss")
     $logLine = "$timestamp - $Message"
-    $base = if ($PSScriptRoot) { $PSScriptRoot } else { [Environment]::GetFolderPath('LocalApplicationData') }
-    if ([string]::IsNullOrWhiteSpace($base)) { $base = [Environment]::GetFolderPath('LocalApplicationData') }
+    $base = if ($script:logDirectory) { $script:logDirectory } else { [Environment]::GetFolderPath('LocalApplicationData') }
     if (-not (Test-Path $base)) { New-Item -ItemType Directory -Path $base -Force | Out-Null }
     $isoYear = [System.Globalization.ISOWeek]::GetYear($now)
     $isoWeek = [System.Globalization.ISOWeek]::GetWeekOfYear($now)
     $logPath = Join-Path $base ("WinTuner_GUI_{0}-W{1:D2}.log" -f $isoYear, $isoWeek)
-    Add-Content -Path $logPath -Value $logLine -Encoding utf8 -ErrorAction SilentlyContinue
+    # Same named mutex as Write-Log: a background runspace writing to the same file is exactly the
+    # collision this guards against.
+    $m = $null; $held = $false
+    try {
+      try { $m = [System.Threading.Mutex]::new($false, 'WinTunerGUI_LogFile'); $held = $m.WaitOne(1000) } catch { }
+      Add-Content -Path $logPath -Value $logLine -Encoding utf8 -ErrorAction SilentlyContinue
+    } finally {
+      if ($held -and $m) { try { $m.ReleaseMutex() } catch { } }
+      if ($m) { try { $m.Dispose() } catch { } }
+    }
   } catch {}
 }
 

@@ -252,7 +252,7 @@ $ownBuildHint.Size = New-Object System.Drawing.Size(698, 48)   # two wrapped lin
 $cardOwnBuild.Controls.Add($ownBuildHint)
 
 # --- Card 2: replace the content of an existing Intune app ---
-$cardContentReplace = New-Card -X 16 -Y 1128 -W 726 -H 296
+$cardContentReplace = New-Card -X 16 -Y 1168 -W 726 -H 296
 $tabOwnPackage.Controls.Add($cardContentReplace)
 
 $replaceLabel = New-Object System.Windows.Forms.Label
@@ -531,6 +531,12 @@ function Get-UninstallSnapshot {
           DisplayVersion  = [string]$props.DisplayVersion
           Publisher       = [string]$props.Publisher
           InstallLocation = [string]$props.InstallLocation
+          # The uninstall command, which Intune needs and which was previously discarded even
+          # though it sits in the very key being read. QuietUninstallString is preferred when the
+          # vendor supplies one: it already carries the silent switches, whereas UninstallString
+          # usually opens a window and would leave an Intune uninstall hanging forever.
+          UninstallString      = [string]$props.UninstallString
+          QuietUninstallString = [string]$props.QuietUninstallString
         }
       } catch { }   # class 3: an unreadable key must not abort the snapshot
     }
@@ -539,6 +545,59 @@ function Get-UninstallSnapshot {
 }
 
 # Turns the newly appeared entries into text that can be pasted into an Intune detection rule.
+# Holds what the last comparison (or MSI read) found, so "apply to the form" has something to work
+# with. Everything the detection step discovers used to end up as text to retype by hand.
+$script:detectionCandidate = $null
+
+# Reads an MSI's own property table through the Windows Installer COM object. Deliberately not the
+# module's Show-MsiInfo: this returns typed values instead of text meant for a human, and it is the
+# same source the installer itself uses, so the product code is guaranteed to match what lands in
+# the uninstall registry.
+# The two commands Intune needs for an MSI. Quoted because paths contain spaces, /qn for silent.
+# REBOOT=ReallySuppress keeps the installer from restarting the device behind Intune's back;
+# restart behaviour belongs in the assignment, not in the command line.
+function Get-MsiInstallCommand {
+  param([Parameter(Mandatory)][string]$MsiPath)
+  return ('msiexec /i "{0}" /qn /norestart REBOOT=ReallySuppress' -f (Split-Path $MsiPath -Leaf))
+}
+
+function Get-MsiUninstallCommand {
+  param([Parameter(Mandatory)][string]$ProductCode)
+  return ('msiexec /x {0} /qn /norestart' -f $ProductCode)
+}
+
+function Get-MsiProperties {
+  param([Parameter(Mandatory)][string]$MsiPath)
+  $installer = $null
+  $database = $null
+  try {
+    $installer = New-Object -ComObject WindowsInstaller.Installer
+    # 0 = read-only; anything else would risk modifying the file being inspected.
+    $database = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($MsiPath, 0))
+    $out = @{}
+    foreach ($name in @('ProductCode', 'ProductVersion', 'ProductName', 'Manufacturer')) {
+      try {
+        $view = $database.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $database,
+          @("SELECT Value FROM Property WHERE Property = '$name'"))
+        $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+        $record = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
+        if ($record) {
+          $out[$name] = [string]$record.GetType().InvokeMember('StringData', 'GetProperty', $null, $record, @(1))
+        }
+        $view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null)
+      } catch { }   # class 3: a missing property is not fatal, the others still help
+    }
+    return $out
+  } catch {
+    Write-Log ("Reading MSI properties failed: {0}" -f $_.Exception.Message)
+    return $null
+  } finally {
+    foreach ($com in @($database, $installer)) {
+      if ($com) { try { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($com) } catch { } }
+    }
+  }
+}
+
 function Format-DetectionSuggestion {
   param([Parameter(Mandatory)][AllowEmptyCollection()][array]$NewEntries)
   if ($NewEntries.Count -eq 0) { return (Get-UiString 'DetectNoChange') }
@@ -548,8 +607,10 @@ function Format-DetectionSuggestion {
     if ($e.Publisher)       { $lines.Add(('  {0}: {1}' -f (Get-UiString 'DetectPublisher'), $e.Publisher)) }
     if ($e.DisplayVersion)  { $lines.Add(('  {0}: {1}' -f (Get-UiString 'DetectVersion'), $e.DisplayVersion)) }
     if ($e.InstallLocation) { $lines.Add(('  {0}: {1}' -f (Get-UiString 'DetectInstallLocation'), $e.InstallLocation)) }
+    $uninstall = if ($e.QuietUninstallString) { $e.QuietUninstallString } else { $e.UninstallString }
+    if ($uninstall) { $lines.Add(('  {0}: {1}' -f (Get-UiString 'DetectUninstallCommand'), $uninstall)) }
     $lines.Add('')
-    $lines.Add('  ' + (Get-UiString 'DetectRuleHeading'))
+    $lines.Add(('  ' + (Get-UiString 'DetectRuleHeading')))
     $lines.Add(('    {0}: {1}' -f (Get-UiString 'DetectRuleKeyPath'), $e.RegistryPath))
     $lines.Add(('    {0}: DisplayVersion' -f (Get-UiString 'DetectRuleValueName')))
     if ($e.DisplayVersion) {
@@ -563,7 +624,7 @@ function Format-DetectionSuggestion {
   return ($lines -join "`r`n")
 }
 
-$cardDetect = New-Card -X 16 -Y 328 -W 726 -H 330
+$cardDetect = New-Card -X 16 -Y 328 -W 726 -H 370
 $tabOwnPackage.Controls.Add($cardDetect)
 
 $detectLabel = New-Object System.Windows.Forms.Label
@@ -630,10 +691,66 @@ $detectResultBox.Location = New-Object System.Drawing.Point(14, 122)
 $detectResultBox.Size = New-Object System.Drawing.Size(698, 150)
 $cardDetect.Controls.Add($detectResultBox)
 
+$detectApplyButton = New-Object System.Windows.Forms.Button
+$detectApplyButton.Text = Get-UiString 'DetectApplyButton'
+$detectApplyButton.Location = New-Object System.Drawing.Point(14, 280)
+$detectApplyButton.Size = New-Object System.Drawing.Size(280, 32)
+$detectApplyButton.Enabled = $false
+$cardDetect.Controls.Add($detectApplyButton)
+
+# Fills the Win32 card from whatever the detection step found. Values are only ever pre-filled,
+# never sent anywhere: the form stays editable and the app is still created by its own button.
+$detectApplyButton.Add_Click({
+  $candidate = $script:detectionCandidate
+  if (-not $candidate) { Update-Status (Get-UiString 'DetectApplyNothing'); return }
+  try {
+    if ($candidate.Kind -eq 'Msi') {
+      $msi = $candidate.Msi
+      if ($msi['ProductName'])  { $win32NameBox.Text = [string]$msi['ProductName'] }
+      if ($msi['Manufacturer']) { $win32PublisherBox.Text = [string]$msi['Manufacturer'] }
+      $win32InstallBox.Text   = Get-MsiInstallCommand -MsiPath $candidate.Path
+      $win32UninstallBox.Text = Get-MsiUninstallCommand -ProductCode $msi['ProductCode']
+      $win32DetectTypeCombo.SelectedIndex = 1          # MSI product code
+      Update-Win32DetectionFields
+      $win32Field1Box.Text = [string]$msi['ProductCode']
+      Write-Log ("Detection applied to the form from MSI properties: {0}" -f $msi['ProductCode'])
+    } else {
+      $e = $candidate.Entry
+      if ($e.DisplayName) { $win32NameBox.Text = [string]$e.DisplayName }
+      if ($e.Publisher)   { $win32PublisherBox.Text = [string]$e.Publisher }
+      # Prefer the quiet variant: the plain UninstallString usually opens a window, and an Intune
+      # uninstall that waits for a click never finishes.
+      $uninstall = if ($e.QuietUninstallString) { $e.QuietUninstallString } else { $e.UninstallString }
+      if ($uninstall) { $win32UninstallBox.Text = [string]$uninstall }
+      # The install command can only be assembled from what the user actually tried: the setup file
+      # plus the switches typed in for the sandbox run. Guessing silent switches for an arbitrary
+      # EXE is not possible, so an empty argument box leaves a command that still needs the switch.
+      $setupLeaf = Split-Path $ownSetupBox.Text.Trim() -Leaf
+      if ($setupLeaf) {
+        $installerArgs = $detectArgsBox.Text.Trim()
+        $win32InstallBox.Text = if ($installerArgs) { '"{0}" {1}' -f $setupLeaf, $installerArgs } else { '"{0}"' -f $setupLeaf }
+      }
+      $win32DetectTypeCombo.SelectedIndex = 0          # registry
+      Update-Win32DetectionFields
+      $win32Field1Box.Text = [string]$e.RegistryPath
+      $win32Field2Box.Text = 'DisplayVersion'
+      $win32Field3Box.Text = [string]$e.DisplayVersion
+      # A 32-bit installer registers under WOW6432Node, and Intune needs that flag set explicitly
+      # or the rule silently never matches on 64-bit clients.
+      $win32Detect32Check.Checked = ([string]$e.RegistryPath -like '*WOW6432Node*')
+      Write-Log ("Detection applied to the form from registry entry: {0}" -f $e.RegistryPath)
+    }
+    Update-Status (Get-UiString 'DetectApplyDone')
+  } catch {
+    Write-Log ("Applying the detection to the form failed: {0}" -f $_.Exception.Message)
+    Update-Status ((Get-UiString 'DetectFailed') -f $_.Exception.Message)
+  }
+})
+
 $detectHint = New-Object System.Windows.Forms.Label
 $detectHint.Tag = 'hint'
 $detectHint.Text = Get-UiString 'DetectHint'
-$detectHint.Location = New-Object System.Drawing.Point(14, 280)
+$detectHint.Location = New-Object System.Drawing.Point(14, 320)
 $detectHint.Size = New-Object System.Drawing.Size(698, 44)
 $cardDetect.Controls.Add($detectHint)
 
@@ -700,6 +817,12 @@ $detectStep3Button.Add_Click({
     # Entries without a display name are components, not the application itself.
     $named = @($new | Where-Object { $_.DisplayName })
     $detectResultBox.Text = Format-DetectionSuggestion -NewEntries $named
+    # Keep the first named entry: with several, it is the one carrying the application's own name,
+    # the rest are usually runtimes pulled in alongside.
+    $script:detectionCandidate = if ($named.Count -gt 0) {
+      [pscustomobject]@{ Kind = 'Registry'; Entry = $named[0] }
+    } else { $null }
+    $detectApplyButton.Enabled = [bool]$script:detectionCandidate
     Write-Log ("Detection comparison: {0} new uninstall entr(y/ies), {1} with a display name." -f $new.Count, $named.Count)
     Update-Status ((Get-UiString 'DetectCompareDone') -f $named.Count)
   } catch {
@@ -717,8 +840,33 @@ $detectMsiButton.Add_Click({
   try {
     Update-Status (Get-UiString 'DetectMsiRunning')
     [System.Windows.Forms.Application]::DoEvents()  # pumps the message loop; this work stays on the UI thread on purpose (see 70-Runtime)
-    $info = Show-MsiInfo -MsiPath $setup -ErrorAction Stop
-    $detectResultBox.Text = ((Get-UiString 'DetectMsiHeading') + "`r`n`r`n" + (($info | Format-List | Out-String).Trim()))
+    # Read straight from the MSI property table. An MSI needs no install-and-compare round trip:
+    # product code, version, name and publisher are all in the file, so everything Intune wants can
+    # be derived without touching the machine.
+    $msi = Get-MsiProperties -MsiPath $setup
+    if (-not $msi -or -not $msi['ProductCode']) {
+      # Fall back to the module's reader rather than failing outright.
+      $info = Show-MsiInfo -MsiPath $setup -ErrorAction Stop
+      $detectResultBox.Text = ((Get-UiString 'DetectMsiHeading') + "`r`n`r`n" + (($info | Format-List | Out-String).Trim()))
+      $script:detectionCandidate = $null
+    } else {
+      $lines = [System.Collections.Generic.List[string]]::new()
+      $lines.Add((Get-UiString 'DetectMsiHeading'))
+      $lines.Add('')
+      foreach ($k in @('ProductName', 'Manufacturer', 'ProductVersion', 'ProductCode')) {
+        if ($msi[$k]) { $lines.Add(('  {0}: {1}' -f $k, $msi[$k])) }
+      }
+      $lines.Add('')
+      $lines.Add('  ' + (Get-UiString 'DetectRuleHeading'))
+      $lines.Add(('    {0}: {1}' -f (Get-UiString 'Win32DetectMsi'), $msi['ProductCode']))
+      $lines.Add('')
+      $lines.Add(('  ' + (Get-UiString 'DetectMsiCommands')))
+      $lines.Add(('    {0}' -f (Get-MsiInstallCommand -MsiPath $setup)))
+      $lines.Add(('    {0}' -f (Get-MsiUninstallCommand -ProductCode $msi['ProductCode'])))
+      $detectResultBox.Text = ($lines -join "`r`n")
+      $script:detectionCandidate = [pscustomobject]@{ Kind = 'Msi'; Msi = $msi; Path = $setup }
+    }
+    $detectApplyButton.Enabled = [bool]$script:detectionCandidate
     Write-Log ("MSI information read for '{0}'." -f $setup)
     Update-Status (Get-UiString 'DetectMsiDone')
   } catch {
@@ -927,7 +1075,7 @@ function New-Win32AppViaGraph {
   return $created
 }
 
-$cardWin32 = New-Card -X 16 -Y 670 -W 726 -H 446
+$cardWin32 = New-Card -X 16 -Y 710 -W 726 -H 446
 $tabOwnPackage.Controls.Add($cardWin32)
 
 $win32Label = New-Object System.Windows.Forms.Label

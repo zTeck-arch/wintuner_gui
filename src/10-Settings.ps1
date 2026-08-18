@@ -1,4 +1,4 @@
-# One persistent log per ISO calendar week. Existing logs are deliberately kept; a new week simply
+﻿# One persistent log per ISO calendar week. Existing logs are deliberately kept; a new week simply
 # starts a new file (for example WinTuner_GUI_2026-W32.log) instead of growing one endless history.
 function Get-WeeklyLogFileName {
   param([datetime]$Date = (Get-Date))
@@ -9,8 +9,56 @@ function Get-WeeklyLogFileName {
 
 # Canonical current-week path used by Settings, Help and all foreground log writers. Background
 # delegates calculate the same ISO filename locally because they do not reliably inherit functions.
-$script:logFileBase = if ($PSScriptRoot) { $PSScriptRoot } else { [Environment]::GetFolderPath('LocalApplicationData') }
+#
+# The log used to sit next to the script, which for the documented way of running it means the
+# Downloads folder. That is the wrong home for this content: measured over three weeks it held 137
+# distinct Intune app and Entra group ids from several customer tenants, in clear text. Under
+# LocalAppData it is inside the user profile and ACL-protected like the package folder already is.
+$script:logDirectory = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'WinTunerGUI\Logs'
+try {
+  if (-not (Test-Path -LiteralPath $script:logDirectory -PathType Container)) {
+    New-Item -ItemType Directory -Path $script:logDirectory -Force -ErrorAction Stop | Out-Null
+  }
+} catch {
+  # Never let logging be the reason the application cannot start: fall back to the profile root.
+  $script:logDirectory = [Environment]::GetFolderPath('LocalApplicationData')
+}
+$script:logFileBase = $script:logDirectory
 $script:logFilePath = Join-Path $script:logFileBase (Get-WeeklyLogFileName)
+
+# Weekly logs are deleted after this many weeks. An MSP tool accumulates customer group ids and app
+# inventories across tenants; without a limit that pile simply grows for years on a technician's
+# machine. Two weeks keeps recent troubleshooting possible without building an archive.
+$script:logRetentionWeeks = 2
+
+# Removes weekly logs older than the retention window. Matched on the ISO week encoded in the file
+# name rather than on the file date, because copying or syncing a file rewrites its timestamps and
+# would then keep old content alive indefinitely.
+function Remove-ExpiredLogs {
+  param([int]$RetentionWeeks = $script:logRetentionWeeks, [datetime]$Now = (Get-Date))
+  $removed = 0
+  if ($RetentionWeeks -lt 1) { return 0 }
+  try {
+    if (-not (Test-Path -LiteralPath $script:logDirectory -PathType Container)) { return 0 }
+    # RetentionWeeks counts the weeks that are KEPT, the current one included. Subtracting the full
+    # retention would keep one week too many: with a two-week limit and "now" in week 10, a cutoff
+    # in week 8 would preserve weeks 8, 9 and 10.
+    $cutoff = $Now.AddDays(-7 * ($RetentionWeeks - 1))
+    $cutoffYear = [System.Globalization.ISOWeek]::GetYear($cutoff)
+    $cutoffWeek = [System.Globalization.ISOWeek]::GetWeekOfYear($cutoff)
+    foreach ($file in @(Get-ChildItem -LiteralPath $script:logDirectory -Filter 'WinTuner_GUI_*.log' -File -ErrorAction SilentlyContinue)) {
+      $m = [regex]::Match($file.Name, '^WinTuner_GUI_(?<y>\d{4})-W(?<w>\d{2})\.log$')
+      if (-not $m.Success) { continue }
+      $year = [int]$m.Groups['y'].Value
+      $week = [int]$m.Groups['w'].Value
+      # Compare year and week as one sortable number so a December/January boundary is handled.
+      if ((($year * 100) + $week) -lt (($cutoffYear * 100) + $cutoffWeek)) {
+        try { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop; $removed++ } catch { }
+      }
+    }
+  } catch { }   # class 3: housekeeping must never break startup
+  return $removed
+}
 
 # Where packages are built by default. NOT C:\Temp, which used to be the default: that directory
 # grants Modify to "Authenticated Users" on a standard Windows install, so any other signed-in user

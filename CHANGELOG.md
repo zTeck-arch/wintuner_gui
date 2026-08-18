@@ -1,8 +1,13 @@
 ﻿# Changelog
 
-## 0.15.6 – Eigene Installer erklären sich selbst, englische README
+## 0.15.6 – Eigene Installer erklären sich selbst, Protokolle ins Benutzerprofil, englische README
 
 **Eigene Installer**
+
+- **Der Deinstallationsbefehl wird nicht mehr weggeworfen.** Er steht als `UninstallString` beziehungsweise `QuietUninstallString` direkt in dem Registry-Schlüssel, den der Abgleich ohnehin liest. Bevorzugt wird die stille Variante, denn die gewöhnliche öffnet meist ein Fenster, und eine Intune-Deinstallation, die auf einen Klick wartet, wird nie fertig.
+- **„Ins Formular unten übernehmen".** Was der Erkennungsschritt herausfindet, landete bisher als Text zum Abtippen in einem Feld. Jetzt füllt ein Knopf Name, Herausgeber, Deinstallationsbefehl und die vollständige Erkennungsregel in die Win32-Karte, inklusive des 32-Bit-Schalters, wenn der Eintrag unter `WOW6432Node` liegt. Übernommen wird nur vorbelegt; angelegt wird die App weiterhin über ihren eigenen Knopf.
+- **MSI vollautomatisch.** Ein Klick liest Produktcode, Version, Name und Herausgeber direkt aus der Datei und leitet daraus Installations- und Deinstallationsbefehl sowie die Erkennungsregel ab, ohne die Software installieren zu müssen. Gelesen wird über die Windows-Installer-Schnittstelle, also dieselbe Quelle, aus der auch der Installer selbst schöpft.
+
 
 - **Paketieren scheiterte stumm, wenn Ziel- und Quellordner derselbe waren.** Die Paketierung komprimiert den gesamten Quellordner und weigert sich deshalb, ihr Ergebnis genau dorthin zu schreiben. Sie meldet das aber nur als `WARNING`, was an `-ErrorAction Stop` vorbeigeht: Der Aufruf kehrte nach 0,0 Sekunden zurück, meldete Erfolg, und übrig blieb die Meldung „hat keine .intunewin-Datei erzeugt" – das Symptom, nicht die Ursache. Der Fall wird jetzt vorher abgefangen und benannt, einschließlich eines Zielordners *innerhalb* der Quelle.
 - **Die Paketierung sagt jetzt, was sie tut.** Alle Ausgabeströme des Werkzeugs werden protokolliert, dazu die Laufzeit. Ein verweigerter Lauf ist an unter einer Sekunde erkennbar, ein echter dauert Sekunden. Bleibt die Datei aus, nennt die Fehlermeldung die tatsächliche Meldung des Werkzeugs.
@@ -15,7 +20,19 @@
 
 **Oberfläche**
 
+- **Das Dashboard kann jetzt etwas.** Die drei Schnellaktionen sprangen bisher nur in einen Bereich. Dazugekommen sind drei, die tatsächlich arbeiten: Favoriten prüfen, alle lokalen Apps aktualisieren, Leistungsnachweis anzeigen. Alle drei arbeiten lokal oder lesend; alles, was Intune verändert, bleibt bewusst hinter seiner Sektion mit Rückfrage.
+- **Vierte Kachel für den lokalen Paketordner** mit dem belegten Speicher, verlinkt auf die Einstellungen, wo aufgeräumt wird. Sie funktioniert auch ohne Tenant-Verbindung.
+
+
 - **„Benutzername:" überlappte das Eingabefeld.** Die Beschriftung stand auf einer festen Position mit 76 Pixeln Platz; das deutsche Wort braucht 86. Sie wird jetzt gemessen und rechtsbündig vor das Feld gesetzt, was auch bei anderer Schriftgröße oder höherer DPI-Einstellung trägt.
+- **Das Fenster ist breit genug für die vierte Kachel.** Bei 1014 Pixeln wurde die neue Speicher-Kachel rechts abgeschnitten; das Startmaß ist auf 1060 erhöht und wird jetzt aus der Mindestgröße des Fensters hergeleitet, statt an zwei Stellen fest verdrahtet zu sein.
+
+**Sicherheit und Protokolle**
+
+- **Die Protokolle liegen nicht mehr neben dem Skript.** Bei der dokumentierten Nutzung war das der Downloads-Ordner – ein ungeeigneter Ort für diesen Inhalt: über drei Wochen gemessen enthielten die Protokolle 137 verschiedene Intune-App- und Entra-Gruppen-Kennungen aus mehreren Kunden-Tenants, im Klartext. Sie liegen jetzt unter `%LOCALAPPDATA%\WinTunerGUI\Logs`, also innerhalb des Benutzerprofils und ACL-geschützt wie der Paketordner. `Write-Log` beachtete die eingestellte Verzeichnisangabe bislang gar nicht und leitete den Pfad weiterhin aus `$PSScriptRoot` her; es gibt jetzt eine einzige Stelle, die über den Ort entscheidet.
+- **Protokolle werden nach zwei Wochen gelöscht.** Ohne Frist wächst die Sammlung aus Kunden-Gruppenkennungen und App-Inventaren jahrelang auf dem Rechner eines Technikers. Entschieden wird über die im Dateinamen kodierte Kalenderwoche, nicht über den Zeitstempel der Datei – ein Kopieren oder Synchronisieren schreibt den Zeitstempel neu und würde alten Inhalt sonst unbegrenzt am Leben halten. Das Aufräumen läuft beim Start, wird protokolliert und darf den Start nie verhindern.
+- **Nur ein Schreiber gleichzeitig.** `Add-Content` öffnet, schreibt und schließt ohne Sperre; zwei laufende Instanzen verschränkten ihre Zeilen und konnten sich gegenseitig abschneiden – genau die Beschädigung, die ein Protokoll im Moment des Bedarfs unbrauchbar macht. Ein benannter Mutex schützt das jetzt; wer die Sperre nicht binnen einer Sekunde bekommt, überspringt die Datei und zeigt die Zeile trotzdem im Fenster.
+- **Sicherheitsrichtlinie (`SECURITY.md`).** Wie Schwachstellen privat gemeldet werden (GitHubs private Meldefunktion sowie eine Kontaktadresse), was im Geltungsbereich liegt und was bewusst nicht, und welche Eigenschaften bekannt und beabsichtigt sind – etwa das nicht signierte Skript, der zwischengespeicherte Anmeldevorgang und der Klartext-Inhalt der lokalen Protokolle.
 
 **Dokumentation**
 

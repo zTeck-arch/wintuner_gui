@@ -1,7 +1,7 @@
 ﻿# Stat tiles: big number + caption inside a rounded card. Numbers load on connect.
 function New-DashTile {
   param([int]$X, [string]$Caption, [string]$Target)
-  $card = New-Card -X $X -Y 56 -W 228 -H 96
+  $card = New-Card -X $X -Y 56 -W 170 -H 96
   $tabDashboard.Controls.Add($card)
   $num = New-Object System.Windows.Forms.Label
   $num.Text = [System.Char]::ConvertFromUtf32(0x2014)   # em dash placeholder
@@ -37,8 +37,29 @@ function New-DashTile {
   return $num
 }
 $script:dashManagedVal    = New-DashTile -X 16  -Caption (Get-UiString 'DashManaged')    -Target 'updates'
-$script:dashUpdatesVal    = New-DashTile -X 256 -Caption (Get-UiString 'DashUpdates')    -Target 'updates'
-$script:dashSupersededVal = New-DashTile -X 496 -Caption (Get-UiString 'DashSuperseded') -Target 'updates'
+$script:dashUpdatesVal    = New-DashTile -X 198 -Caption (Get-UiString 'DashUpdates')    -Target 'updates'
+$script:dashSupersededVal = New-DashTile -X 380 -Caption (Get-UiString 'DashSuperseded') -Target 'updates'
+# Fourth tile, and the only one that needs no tenant: the package folder grows quietly over months
+# and nothing ever pointed at it. Clicking lands in the settings, where the prune button lives.
+$script:dashPackagesVal = New-DashTile -X 562 -Caption (Get-UiString 'DashLocalPackages') -Target 'settings'
+
+# Size of the local package folder, formatted for the tile. Deliberately cheap to fail: an
+# unreadable or missing folder shows a dash rather than blocking the dashboard.
+function Update-LocalPackagesTile {
+  try {
+    if (-not $script:dashPackagesVal) { return }
+    $root = [string]$script:settings.DefaultPackagePath
+    if (-not $root -or -not (Test-Path -LiteralPath $root -PathType Container)) {
+      $script:dashPackagesVal.Text = [System.Char]::ConvertFromUtf32(0x2014)
+      return
+    }
+    $bytes = Get-FolderSizeBytes -Path $root
+    $script:dashPackagesVal.Text = if ($bytes -ge 1GB) { '{0:n1} GB' -f ($bytes / 1GB) }
+                                   elseif ($bytes -ge 1MB) { '{0:n0} MB' -f ($bytes / 1MB) }
+                                   else { '{0:n0} KB' -f ($bytes / 1KB) }
+  } catch { }   # class 3: a tile must never break the dashboard
+}
+Update-LocalPackagesTile
 
 $dashHint = New-Object System.Windows.Forms.Label
 $dashHint.Text = Get-UiString 'DashConnectHint'
@@ -75,6 +96,46 @@ $dashScanBtn.Location = New-Object System.Drawing.Point(496, 228)
 $dashScanBtn.Size = New-Object System.Drawing.Size(224, 40)
 $dashScanBtn.Add_Click({ Show-Section 'discovered' })
 $tabDashboard.Controls.Add($dashScanBtn)
+
+# Row two: these DO something instead of only navigating. All three are local-only - no tenant is
+# touched - which is why they are safe one click away. Anything that writes to Intune stays behind
+# its own section and confirmation, as the security model requires.
+$dashFavBtn = New-Object System.Windows.Forms.Button
+$dashFavBtn.Tag = 'btn-secondary'
+$dashFavBtn.Text = Get-UiString 'DashCheckFavorites'
+$dashFavBtn.Location = New-Object System.Drawing.Point(16, 276)
+$dashFavBtn.Size = New-Object System.Drawing.Size(224, 40)
+$dashFavBtn.Add_Click({
+  # Switch first, so the run is visible where its results appear - the way the login auto-check does.
+  Show-Section 'winget'
+  [System.Windows.Forms.Application]::DoEvents()
+  try { if ($favoriteRefreshButton -and $favoriteRefreshButton.Enabled) { $favoriteRefreshButton.PerformClick() } }
+  catch { Write-Log ("Dashboard favourite check failed: {0}" -f $_.Exception.Message) }
+})
+$tabDashboard.Controls.Add($dashFavBtn)
+
+$dashLocalBtn = New-Object System.Windows.Forms.Button
+$dashLocalBtn.Tag = 'btn-secondary'
+$dashLocalBtn.Text = Get-UiString 'DashUpdateLocal'
+$dashLocalBtn.Location = New-Object System.Drawing.Point(256, 276)
+$dashLocalBtn.Size = New-Object System.Drawing.Size(224, 40)
+$dashLocalBtn.Add_Click({
+  Show-Section 'winget'
+  [System.Windows.Forms.Application]::DoEvents()
+  try { if ($favoriteAllLocalButton -and $favoriteAllLocalButton.Enabled) { $favoriteAllLocalButton.PerformClick() } }
+  catch { Write-Log ("Dashboard local update failed: {0}" -f $_.Exception.Message) }
+})
+$tabDashboard.Controls.Add($dashLocalBtn)
+
+$dashRecordBtn = New-Object System.Windows.Forms.Button
+$dashRecordBtn.Tag = 'btn-secondary'
+$dashRecordBtn.Text = Get-UiString 'DashShowRecord'
+$dashRecordBtn.Location = New-Object System.Drawing.Point(496, 276)
+$dashRecordBtn.Size = New-Object System.Drawing.Size(224, 40)
+$dashRecordBtn.Add_Click({
+  try { Show-LeistungstextDialog } catch { Write-Log ("Dashboard record dialog failed: {0}" -f $_.Exception.Message) }
+})
+$tabDashboard.Controls.Add($dashRecordBtn)
 
 # Loads the tile numbers in the background (safe no-op when not connected).
 $script:dashboardLastRefresh = [datetime]::MinValue

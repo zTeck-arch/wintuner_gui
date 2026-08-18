@@ -14,6 +14,14 @@ try {
   Write-Log ("=" * 78)
   Write-Log ("Session start | WinTuner GUI {0} | PowerShell {1} | WinTuner module {2}" -f $script:appVersion, $psVer, $wtVer)
   Write-Log ("Environment   | {0} | user {1} | lang {2} | theme {3}" -f $osVer, $env:USERNAME, $script:uiLanguage, $script:themeName)
+  # Housekeeping first, so an old log is gone before this session appends to a fresh one. Logged
+  # rather than silent: deleting a customer-related record without saying so would be worse than
+  # keeping it.
+  $expired = Remove-ExpiredLogs
+  if ($expired -gt 0) {
+    Write-Log ("Log housekeeping: {0} weekly log(s) older than {1} week(s) removed from {2}." -f $expired, $script:logRetentionWeeks, $script:logDirectory)
+  }
+
   # Never silent: the package folder is where .intunewin files are built before they go to Intune,
   # so the user has to know it moved - and where their existing packages still are.
   # Read BEFORE this session can overwrite it, so "previous session" really is the previous one.
@@ -2151,10 +2159,13 @@ if ($openLogFolderButton)      { $toolTip.SetToolTip($openLogFolderButton,      
 # lower edge and gives resized or maximised windows' extra height to the main content. Skipped when
 # the user has a saved size or opens maximized - their choice wins.
 try {
+  # This is the size that actually reaches the screen: it runs last and overrides the one set while
+  # the controls were laid out. 1060 wide because the four dashboard tiles need 748px of content and
+  # the sidebar plus window chrome costs 256px - at the previous 1014 the fourth tile was clipped.
   if (-not $script:settings.WindowMaximized -and
-      -not ([int]$script:settings.WindowWidth -ge 940 -and [int]$script:settings.WindowHeight -ge 680)) {
+      -not ([int]$script:settings.WindowWidth -ge $form.MinimumSize.Width -and [int]$script:settings.WindowHeight -ge $form.MinimumSize.Height)) {
     $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-    $form.Size = New-Object System.Drawing.Size([Math]::Min(1014, $wa.Width), [Math]::Min(850, $wa.Height))
+    $form.Size = New-Object System.Drawing.Size([Math]::Min(1060, $wa.Width), [Math]::Min(850, $wa.Height))
     $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
   }
   Update-BottomLayout

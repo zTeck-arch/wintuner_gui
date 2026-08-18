@@ -1,4 +1,4 @@
-# Helper: toggle UI based on connection state
+﻿# Helper: toggle UI based on connection state
 function Set-ConnectedUIState {
   param([bool]$Connected)
   # Toggle the LOGIN group (rounded UPN field host + its recent-menu button + Login) vs the
@@ -77,13 +77,18 @@ $form.ShowIcon = $false   # hide the default (generic pwsh) title-bar icon for a
 # Controls are laid out against THIS size while they are being added (WinForms captures each
 # anchor margin at that moment), so it must stay the size the positions were designed for. The
 # larger default window is applied at the very END of the script, where a real resize pass runs.
-$form.Size = New-Object System.Drawing.Size(1010, 850)
-$form.MinimumSize = New-Object System.Drawing.Size(940, 680)
+# 1060 wide so the four dashboard tiles fit with room to spare: they span 748px of content, and the
+# window chrome plus sidebar costs 256px. The minimum is raised to match - below it the fourth tile
+# would be clipped, which is exactly what happened when it was added.
+$form.Size = New-Object System.Drawing.Size(1060, 850)
+$form.MinimumSize = New-Object System.Drawing.Size(1010, 680)
 # Restore the last window size (saved on close). Clamped to the working area so a window saved on a
 # larger/second monitor can never open bigger than the current screen.
 try {
   $sw = [int]$script:settings.WindowWidth; $sh = [int]$script:settings.WindowHeight
-  if ($sw -ge 940 -and $sh -ge 680) {
+  # Guarded against the CURRENT minimum, not a stale one: a size saved before the dashboard grew a
+  # fourth tile would otherwise be restored too narrow and clip it again.
+  if ($sw -ge $form.MinimumSize.Width -and $sh -ge $form.MinimumSize.Height) {
     $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
     $form.Size = New-Object System.Drawing.Size([Math]::Min($sw, $wa.Width), [Math]::Min($sh, $wa.Height))
   }
