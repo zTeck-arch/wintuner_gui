@@ -1,4 +1,4 @@
-# --- Own installers and in-place content replacement ---
+﻿# --- Own installers and in-place content replacement ---
 # Everything else in this GUI starts from a WinGet package. These two actions close the two gaps
 # that leaves: software that is not in WinGet at all, and updating an app WITHOUT creating a second
 # Intune app object next to it.
@@ -25,6 +25,37 @@ function Test-SetupFileInsideSource {
   } catch { return $false }
 }
 
+# Windows Sandbox ships with Windows but stays switched off until the optional feature
+# "Containers-DisposableClientVM" is enabled, and it does not exist at all on Home editions.
+# Looked up by path rather than through Get-WindowsOptionalFeature, which needs elevation.
+function Test-WindowsSandboxAvailable {
+  try {
+    $root = if ($env:SystemRoot) { $env:SystemRoot } else { 'C:\Windows' }
+    if (Test-Path -LiteralPath (Join-Path $root 'System32\WindowsSandbox.exe') -PathType Leaf) { return $true }
+    return [bool](Get-Command 'WindowsSandbox.exe' -ErrorAction SilentlyContinue)
+  } catch { return $false }
+}
+
+# True when the output folder is the source folder itself or sits inside it. Either way the packager
+# would be asked to write its result into the tree it is compressing, which it declines.
+# Non-existent destinations are fine: the caller creates them, and a folder that is not there yet
+# cannot be inside the source.
+function Test-DestinationInsideSource {
+  param([string]$SourcePath, [string]$DestinationPath)
+  if ([string]::IsNullOrWhiteSpace($SourcePath) -or [string]::IsNullOrWhiteSpace($DestinationPath)) { return $false }
+  if (-not (Test-Path -LiteralPath $SourcePath -PathType Container)) { return $false }
+  try {
+    $srcFull = (Resolve-Path -LiteralPath $SourcePath).Path.TrimEnd([char]'\')
+    $dstFull = if (Test-Path -LiteralPath $DestinationPath) {
+      (Resolve-Path -LiteralPath $DestinationPath).Path.TrimEnd([char]'\')
+    } else {
+      ([IO.Path]::GetFullPath($DestinationPath)).TrimEnd([char]'\')
+    }
+    if ([string]::Equals($srcFull, $dstFull, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    return $dstFull.StartsWith($srcFull + '\', [System.StringComparison]::OrdinalIgnoreCase)
+  } catch { return $false }
+}
+
 function New-OwnIntuneWinPackage {
   param(
     [Parameter(Mandatory)][string]$SourcePath,
@@ -43,15 +74,52 @@ function New-OwnIntuneWinPackage {
   }
   $srcFull = (Resolve-Path -LiteralPath $SourcePath).Path.TrimEnd([char]'\')
   $setupFull = (Resolve-Path -LiteralPath $SetupFile).Path
+  # The packager compresses the ENTIRE source folder, so it refuses to write its output into that
+  # same folder. It signals that refusal as a WARNING rather than a terminating error, which slips
+  # straight past -ErrorAction Stop: the call returns in well under a second, reports success, and
+  # the only symptom left is a missing artefact. Caught here so the message names the real cause.
+  if (Test-DestinationInsideSource -SourcePath $SourcePath -DestinationPath $DestinationPath) {
+    $out.ErrorMessage = (Get-UiString 'OwnPkgDestInsideSource'); return $out
+  }
   try {
     if (-not (Test-Path -LiteralPath $DestinationPath -PathType Container)) {
       New-Item -ItemType Directory -Path $DestinationPath -Force -ErrorAction Stop | Out-Null
     }
     Write-Log ("Packaging own installer: source '{0}', setup '{1}' -> '{2}'" -f $srcFull, (Split-Path $setupFull -Leaf), $DestinationPath)
-    New-IntuneWinPackage -SourcePath $srcFull -SetupFile $setupFull -DestinationPath $DestinationPath -ErrorAction Stop | Out-Null
-    $built = Get-ChildItem -LiteralPath $DestinationPath -Filter '*.intunewin' -File -ErrorAction SilentlyContinue |
+
+    # Every stream is captured, not just the pipeline. The packager reports a refusal as a WARNING
+    # and its progress as INFORMATION, so -ErrorAction Stop never fires and the only thing left to
+    # go on used to be a missing file. Recording what it actually said turns "no artefact" into a
+    # diagnosis. The stopwatch matters too: a refusal returns in well under a second, while real
+    # packaging takes seconds, which alone tells the two apart.
+    $pkgWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $packagerSaid = [System.Collections.Generic.List[string]]::new()
+    try {
+      New-IntuneWinPackage -SourcePath $srcFull -SetupFile $setupFull -DestinationPath $DestinationPath -ErrorAction Stop *>&1 |
+        ForEach-Object {
+          $line = [string]$_
+          if (-not [string]::IsNullOrWhiteSpace($line)) { [void]$packagerSaid.Add($line.Trim()) }
+        }
+    } finally {
+      $pkgWatch.Stop()
+      foreach ($line in $packagerSaid) { Write-Log ("Packager: {0}" -f $line) }
+      Write-Log ("Packager finished in {0:n1}s." -f $pkgWatch.Elapsed.TotalSeconds)
+    }
+
+    # Recursive on purpose: the artefact is normally written straight into the destination, but a
+    # non-recursive look would silently miss it if the packager ever nests it in a subfolder.
+    $built = Get-ChildItem -LiteralPath $DestinationPath -Filter '*.intunewin' -File -Recurse -ErrorAction SilentlyContinue |
       Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if (-not $built) { throw (Get-UiString 'OwnPkgNoArtifact') }
+    if (-not $built) {
+      # Hand the packager's own words to the caller. Without them the message named the symptom and
+      # left the cause in the dark, which is exactly what happened with the source/destination clash.
+      $detail = if ($packagerSaid.Count -gt 0) {
+        ($packagerSaid | Where-Object { $_ -match '(?i)warn|error|fail' } | Select-Object -First 3) -join ' | '
+      } else { '' }
+      if (-not $detail -and $packagerSaid.Count -gt 0) { $detail = ($packagerSaid | Select-Object -Last 2) -join ' | ' }
+      if ($detail) { throw ((Get-UiString 'OwnPkgNoArtifactDetail') -f $detail) }
+      throw (Get-UiString 'OwnPkgNoArtifact')
+    }
     $out.Success = $true
     $out.PackagePath = $built.FullName
     Write-Log ("Own installer packaged: {0} ({1:n1} MB)" -f $built.FullName, ($built.Length / 1MB))
@@ -115,39 +183,39 @@ $cardOwnBuild.Controls.Add($ownBuildLabel)
 
 $ownSourceLabel = New-Object System.Windows.Forms.Label
 $ownSourceLabel.Text = Get-UiString 'OwnPkgSourceLabel'
-$ownSourceLabel.Location = New-Object System.Drawing.Point(14, 46)
+$ownSourceLabel.Location = New-Object System.Drawing.Point(14, 86)
 $ownSourceLabel.AutoSize = $true
 $cardOwnBuild.Controls.Add($ownSourceLabel)
 
 $ownSourceBox = New-Object System.Windows.Forms.TextBox
 $ownSourceBox.Width = 400
 $ownSourceBox.PlaceholderText = Get-UiString 'OwnPkgSourcePlaceholder'
-$ownSourceHost = New-RoundedInput -Inner $ownSourceBox -X 160 -Y 40 -W 400 -H 32
+$ownSourceHost = New-RoundedInput -Inner $ownSourceBox -X 160 -Y 80 -W 400 -H 32
 $cardOwnBuild.Controls.Add($ownSourceHost)
 
 $ownSourceButton = New-Object System.Windows.Forms.Button
 $ownSourceButton.Tag = 'btn-secondary'
 $ownSourceButton.Text = Get-UiString 'BrowsePathButton'
-$ownSourceButton.Location = New-Object System.Drawing.Point(572, 40)
+$ownSourceButton.Location = New-Object System.Drawing.Point(572, 80)
 $ownSourceButton.Size = New-Object System.Drawing.Size(140, 32)
 $cardOwnBuild.Controls.Add($ownSourceButton)
 
 $ownSetupLabel = New-Object System.Windows.Forms.Label
 $ownSetupLabel.Text = Get-UiString 'OwnPkgSetupLabel'
-$ownSetupLabel.Location = New-Object System.Drawing.Point(14, 86)
+$ownSetupLabel.Location = New-Object System.Drawing.Point(14, 46)
 $ownSetupLabel.AutoSize = $true
 $cardOwnBuild.Controls.Add($ownSetupLabel)
 
 $ownSetupBox = New-Object System.Windows.Forms.TextBox
 $ownSetupBox.Width = 400
 $ownSetupBox.PlaceholderText = Get-UiString 'OwnPkgSetupPlaceholder'
-$ownSetupHost = New-RoundedInput -Inner $ownSetupBox -X 160 -Y 80 -W 400 -H 32
+$ownSetupHost = New-RoundedInput -Inner $ownSetupBox -X 160 -Y 40 -W 400 -H 32
 $cardOwnBuild.Controls.Add($ownSetupHost)
 
 $ownSetupButton = New-Object System.Windows.Forms.Button
 $ownSetupButton.Tag = 'btn-secondary'
 $ownSetupButton.Text = Get-UiString 'BrowsePathButton'
-$ownSetupButton.Location = New-Object System.Drawing.Point(572, 80)
+$ownSetupButton.Location = New-Object System.Drawing.Point(572, 40)
 $ownSetupButton.Size = New-Object System.Drawing.Size(140, 32)
 $cardOwnBuild.Controls.Add($ownSetupButton)
 
@@ -248,10 +316,39 @@ $cardContentReplace.Controls.Add($replaceHint)
 
 $script:contentReplaceApps = @()
 
+# Live feedback for the three paths, so the two rules that used to surface only as a failed build
+# are visible while you are still choosing: the installer has to sit inside the source folder, and
+# the output folder must not be that same folder. Amber means "this will not work".
+function Update-OwnPackageHint {
+  try {
+    if (-not $ownBuildHint) { return }
+    $source = $ownSourceBox.Text.Trim()
+    $setup  = $ownSetupBox.Text.Trim()
+    $dest   = $ownDestBox.Text.Trim()
+    $problem = ''
+    if ($source -and $setup -and (Test-Path -LiteralPath $setup -PathType Leaf) -and
+        -not (Test-SetupFileInsideSource -SourcePath $source -SetupFile $setup)) {
+      $problem = Get-UiString 'OwnPkgSetupNotInSource'
+    } elseif ($source -and $dest -and (Test-DestinationInsideSource -SourcePath $source -DestinationPath $dest)) {
+      $problem = Get-UiString 'OwnPkgDestInsideSourceShort'
+    }
+    if ($problem) {
+      $ownBuildHint.Text = $problem
+      $ownBuildHint.ForeColor = [System.Drawing.Color]::DarkOrange
+    } else {
+      $ownBuildHint.Text = Get-UiString 'OwnPkgHint'
+      $ownBuildHint.ForeColor = $script:currentTheme.SecondaryForeColor
+    }
+  } catch { }   # class 3: a hint must never block the card
+}
+
 $ownSourceButton.Add_Click({
   $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
   $dlg.Description = Get-UiString 'OwnPkgSourceLabel'
-  if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $ownSourceBox.Text = $dlg.SelectedPath }
+  if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    $ownSourceBox.Text = $dlg.SelectedPath
+    Update-OwnPackageHint
+  }
   $dlg.Dispose()
 })
 
@@ -261,31 +358,72 @@ $ownSetupButton.Add_Click({
   if ($ownSourceBox.Text.Trim() -and (Test-Path -LiteralPath $ownSourceBox.Text.Trim())) {
     $dlg.InitialDirectory = $ownSourceBox.Text.Trim()
   }
-  if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $ownSetupBox.Text = $dlg.FileName }
+  if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    $ownSetupBox.Text = $dlg.FileName
+    # The source folder follows from the installer instead of being a third free choice. Picking
+    # two folders that had to match, and only learning from a failed build that they did not, was
+    # the actual complaint. The field stays editable for the case where the payload lives one level
+    # up, and it is only overwritten when the current value does not already contain the installer.
+    $currentSource = $ownSourceBox.Text.Trim()
+    if (-not (Test-SetupFileInsideSource -SourcePath $currentSource -SetupFile $dlg.FileName)) {
+      $derived = Split-Path -Parent $dlg.FileName
+      if ($derived) {
+        $ownSourceBox.Text = $derived
+        Write-Log ("Source folder derived from the chosen installer: {0}" -f $derived)
+      }
+    }
+    Update-OwnPackageHint
+  }
   $dlg.Dispose()
 })
 
 $ownDestButton.Add_Click({
   $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
   $dlg.Description = Get-UiString 'OwnPkgDestLabel'
-  if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $ownDestBox.Text = $dlg.SelectedPath }
+  if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    $ownDestBox.Text = $dlg.SelectedPath
+    Update-OwnPackageHint
+  }
   $dlg.Dispose()
 })
+
+# Typing counts too, not just browsing.
+$ownSourceBox.Add_TextChanged({ Update-OwnPackageHint })
+$ownSetupBox.Add_TextChanged({ Update-OwnPackageHint })
+$ownDestBox.Add_TextChanged({ Update-OwnPackageHint })
+Update-OwnPackageHint
 
 $ownBuildButton.Add_Click({
   if (Test-UiBusy) { return }
   try {
+    # Checked HERE, before the call: the parameters are mandatory strings, so an empty box makes
+    # PowerShell refuse at parameter binding with "Cannot bind argument to parameter 'SourcePath'
+    # because it is an empty string" - a .NET message about the plumbing, shown to someone who
+    # simply had not filled in a field. The checks inside the function never got a chance to run.
+    $sourceText = $ownSourceBox.Text.Trim()
+    $setupText  = $ownSetupBox.Text.Trim()
+    $destText   = $ownDestBox.Text.Trim()
+    if (-not $sourceText) { Update-Status (Get-UiString 'OwnPkgSourceMissing'); return }
+    if (-not $setupText)  { Update-Status (Get-UiString 'OwnPkgSetupMissing');  return }
+    if (-not $destText)   { Update-Status (Get-UiString 'OwnPkgDestMissing');   return }
+
     $ownBuildButton.Enabled = $false
     Update-Status (Get-UiString 'OwnPkgBuildingStatus')
     [System.Windows.Forms.Application]::DoEvents()  # pumps the message loop; this work stays on the UI thread on purpose (see 70-Runtime)
-    $result = New-OwnIntuneWinPackage -SourcePath $ownSourceBox.Text.Trim() -SetupFile $ownSetupBox.Text.Trim() -DestinationPath $ownDestBox.Text.Trim()
+    $result = New-OwnIntuneWinPackage -SourcePath $sourceText -SetupFile $setupText -DestinationPath $destText
     if ($result.ErrorMessage) {
       Update-Status ((Get-UiString 'OwnPkgBuildFailedStatus') -f $result.ErrorMessage)
       return
     }
     Update-Status ((Get-UiString 'OwnPkgBuiltStatus') -f $result.PackagePath)
-    # Hand the fresh package straight to the replace card - that is the usual next step.
+    # Hand the fresh package straight to the replace card - that is the usual next step, and the
+    # "create a Win32 app" card reads the same field.
     $replaceFileBox.Text = [string]$result.PackagePath
+    # ... and say so. The hand-off already happened silently before, two cards further down, so it
+    # looked as if the built package led nowhere and the next step had to be started from scratch.
+    $ownBuildHint.Text = (Get-UiString 'OwnPkgHandedOn') -f (Split-Path $result.PackagePath -Leaf)
+    $ownBuildHint.ForeColor = $script:currentTheme.ForeColor
+    Write-Log ("Package handed on to the cards below: {0}" -f $result.PackagePath)
   } catch {
     Write-Log ("Own package build error: {0}" -f $_.Exception.Message)
     Update-Status ((Get-UiString 'OwnPkgBuildFailedStatus') -f $_.Exception.Message)
@@ -593,6 +731,48 @@ $detectSandboxButton.Add_Click({
   $setup = $ownSetupBox.Text.Trim()
   if (-not $setup -or -not (Test-Path -LiteralPath $setup -PathType Leaf)) {
     Update-Status (Get-UiString 'OwnPkgSetupMissing'); return
+  }
+  # Windows Sandbox is an optional Windows feature and absent on most machines until someone turns
+  # it on. Without this check the failure surfaced as "An error occurred trying to start process
+  # 'WindowsSandbox.exe' with working directory ..." - a message about a working directory that has
+  # nothing to do with the cause, leaving the reader to guess. Checked up front instead, with the
+  # one instruction that actually helps.
+  if (-not (Test-WindowsSandboxAvailable)) {
+    Write-Log 'Windows Sandbox is not available on this machine (optional feature not enabled).'
+    $detectResultBox.Text = Get-UiString 'DetectSandboxUnavailable'
+    Update-Status (Get-UiString 'DetectSandboxUnavailableStatus')
+    # Offer to do it instead of leaving the reader to type commands. Enabling changes the system
+    # and forces a restart, so it is never done without an explicit yes.
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+      (Get-UiString 'DetectSandboxEnableDialog'),
+      (Get-UiString 'DetectSandboxUnavailableStatus'),
+      [System.Windows.Forms.MessageBoxButtons]::YesNoCancel,
+      [System.Windows.Forms.MessageBoxIcon]::Question,
+      [System.Windows.Forms.MessageBoxDefaultButton]::Button3)
+    if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
+      try {
+        # DISM rather than Enable-WindowsOptionalFeature: that cmdlet lives in the DISM module,
+        # which Windows PowerShell 5.1 has and PowerShell 7 does not. dism.exe is a plain program
+        # and works from either. -Verb RunAs raises the UAC prompt; -NoRestart leaves the restart
+        # to the user rather than pulling the rug out mid-session.
+        Write-Log 'Enabling Windows Sandbox via dism.exe (elevation requested).'
+        Start-Process -FilePath 'dism.exe' -Verb RunAs -ArgumentList @(
+          '/Online', '/Enable-Feature', '/FeatureName:Containers-DisposableClientVM', '/All', '/NoRestart') -ErrorAction Stop
+        Update-Status (Get-UiString 'DetectSandboxEnableStarted')
+      } catch {
+        Write-Log ("Enabling Windows Sandbox failed: {0}" -f $_.Exception.Message)
+        Update-Status ((Get-UiString 'DetectFailed') -f $_.Exception.Message)
+      }
+    } elseif ($answer -eq [System.Windows.Forms.DialogResult]::No) {
+      try {
+        Start-Process 'optionalfeatures.exe' -ErrorAction Stop
+        Write-Log 'Opened the Windows features dialog.'
+      } catch {
+        Write-Log ("Could not open the Windows features dialog: {0}" -f $_.Exception.Message)
+        Update-Status ((Get-UiString 'DetectFailed') -f $_.Exception.Message)
+      }
+    }
+    return
   }
   try {
     Update-Status (Get-UiString 'DetectSandboxRunning')
