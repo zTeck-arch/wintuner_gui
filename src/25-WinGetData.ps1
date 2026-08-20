@@ -601,10 +601,24 @@ function Invoke-WithTransientRetry {
 
 # Inventory read with the transient-race retry above. Use this instead of a bare Get-WtWin32Apps for
 # any read that would otherwise abort a user action on the first attempt.
+#
+# -Update is a FILTER on UpdateAvailable, not "also evaluate updates" - and the module declares it
+# as Nullable[bool], so "unset" and "$false" mean two different things: unset = no filter,
+# $false = ONLY apps that are already up to date. 0.15.7 always bound -Update:$false here, which
+# removed every app WITH an update from the inventory the update scan works on. The scan then
+# reported "no update candidates" on tenants that plainly had them (Java 8, Jabra Direct 6.27.3702
+# -> 8.1.14601): the outdated apps never reached the comparison at all. The parameter is bound only
+# when a caller explicitly asks for one side of that filter.
 function Get-Win32AppsResilient {
-  param([switch]$Superseded, [switch]$Update, [string]$Label = 'inventory read')
+  param(
+    [switch]$Superseded,
+    [Nullable[bool]]$UpdateAvailable,
+    [string]$Label = 'inventory read'
+  )
+  $query = @{ Superseded = [bool]$Superseded; ErrorAction = 'Stop' }
+  if ($null -ne $UpdateAvailable) { $query['Update'] = [bool]$UpdateAvailable }
   return @(Invoke-WithTransientRetry -Label $Label -Action {
-    Get-WtWin32Apps -Superseded:([bool]$Superseded) -Update:([bool]$Update) -ErrorAction Stop
+    Get-WtWin32Apps @query
   })
 }
 

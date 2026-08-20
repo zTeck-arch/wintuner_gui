@@ -278,7 +278,7 @@ function Test-WtConnected {
       # Materialised right here with @(): the module hands back a collection it may still be
       # filling, and enumerating that live is what produced "Collection was modified" during
       # sign-in. Select-Object -First 1 is still avoided - it crashed the pipeline under WinForms.
-      $null = @(Get-WtWin32Apps -Update:$false -Superseded:$false -ErrorAction Stop)
+      $null = @(Get-WtWin32Apps -Superseded:$false -ErrorAction Stop)
       $script:lastConnectionProbeError = $null
       return $true   # the query itself worked; an empty tenant is a valid answer
     } catch {

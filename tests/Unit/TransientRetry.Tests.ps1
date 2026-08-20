@@ -2,7 +2,7 @@ BeforeAll {
   . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
   Initialize-TestAmbient
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '25-WinGetData.ps1' -Name @(
-    'Test-IsTransientModuleRace', 'Invoke-WithTransientRetry'))))
+    'Test-IsTransientModuleRace', 'Invoke-WithTransientRetry', 'Get-Win32AppsResilient'))))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '30-UpdateTargets.ps1' -Name 'Remove-SupersededInventoryOverlap')))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '70-Runtime.ps1' -Name 'Format-ErrorDetail')))
 }
@@ -105,5 +105,52 @@ Describe 'Remove-SupersededInventoryOverlap with an empty active inventory' {
     $out = @(Remove-SupersededInventoryOverlap -ActiveApps $active -SupersededApps $superseded)
     $out.Count | Should -Be 1
     $out[0].Name | Should -Be 'Keep'
+  }
+}
+
+Describe 'Get-Win32AppsResilient parameter binding' {
+  # Regression: the module declares -Update as Nullable[bool] and treats it as a FILTER on
+  # UpdateAvailable. 0.15.7 always bound -Update:$false, so the inventory contained ONLY apps that
+  # were already up to date and the update scan could never find a candidate.
+  BeforeAll {
+    function global:Get-WtWin32Apps {
+      [CmdletBinding()]
+      [OutputType([object[]])]
+      param(
+        [Nullable[bool]]$Superseded,
+        [Nullable[bool]]$Update,
+        [Nullable[bool]]$Superseding,
+        [string]$NameContains,
+        [Nullable[bool]]$IsAssigned
+      )
+      $global:lastQuery = $PSBoundParameters
+      return @([pscustomobject]@{ Name = 'App'; GraphId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' })
+    }
+  }
+  AfterAll {
+    Remove-Item function:global:Get-WtWin32Apps -ErrorAction SilentlyContinue
+    Remove-Variable -Name lastQuery -Scope Global -ErrorAction SilentlyContinue
+  }
+  BeforeEach { $global:lastQuery = $null }
+
+  It 'does NOT filter on UpdateAvailable unless a caller asks for it' {
+    $out = @(Get-Win32AppsResilient -Label 'test')
+    $out.Count | Should -Be 1
+    $global:lastQuery.ContainsKey('Update') | Should -BeFalse -Because 'an unset filter must stay unset'
+    $global:lastQuery['Superseded'] | Should -BeFalse
+  }
+
+  It 'still asks for the superseded side of the inventory' {
+    $null = Get-Win32AppsResilient -Superseded -Label 'test'
+    $global:lastQuery['Superseded'] | Should -BeTrue
+    $global:lastQuery.ContainsKey('Update') | Should -BeFalse
+  }
+
+  It 'passes the UpdateAvailable filter through when it is requested explicitly' {
+    $null = Get-Win32AppsResilient -UpdateAvailable $true -Label 'test'
+    $global:lastQuery['Update'] | Should -BeTrue
+    $null = Get-Win32AppsResilient -UpdateAvailable $false -Label 'test'
+    $global:lastQuery.ContainsKey('Update') | Should -BeTrue
+    $global:lastQuery['Update'] | Should -BeFalse
   }
 }

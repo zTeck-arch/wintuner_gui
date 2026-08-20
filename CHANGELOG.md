@@ -1,5 +1,10 @@
 ﻿# Changelog
 
+## 0.15.8 – Nachtrag zu 0.15.7: Die Update-Suche fand keine Updates mehr
+
+- **Die Update-Suche meldete „keine Updates gefunden“, obwohl welche vorhanden waren.** Ab 0.15.7 wurde die App-Liste aus Intune mit dem Filter `-Update:$false` geladen. Dieser Parameter des WinTuner-Moduls bedeutet nicht „Updates mitprüfen“, sondern filtert **nach dem Update-Zustand**: `$false` liefert ausschließlich Apps, die schon aktuell sind. Genau die veralteten Apps, um die es geht, fehlten damit in der Liste, die die Suche prüft – sie kamen nie beim Versionsvergleich an. Im Kundentenant verschwanden so Java 8 und Jabra Direct (6.27.3702 → 8.1.14601) aus der Ansicht, obwohl 0.15.6 sie noch fand; die Übersicht zeigte weiterhin korrekt „3 Updates“, weil sie die Liste auf einem anderen Weg holt. Der Filter wird jetzt nur noch gesetzt, wenn er ausdrücklich verlangt wird.
+- **Betroffen war auch die Versionsbereinigung.** Sie liest dieselbe Liste und sah dadurch nur aktuelle Apps, konnte also abgelöste Versionen übersehen. Mit demselben Fix behoben.
+
 ## 0.15.7 – Feldmeldungen: Tenants ohne aktive Apps, erster Fehlversuch beim Paketieren, klarere Fehlermeldungen
 
 **Aus echten Kundenläufen**
@@ -18,12 +23,16 @@
 - **Schritt 3 (Win32-App anlegen) hat jetzt ein eigenes, sichtbares Paketfeld.** Bisher zog sich diese Karte die `.intunewin` still aus einem Feld einer ganz anderen Karte weiter unten – man sah weder, welches Paket verwendet wird, noch konnte man dort ein anderes wählen. Jetzt steht die gewählte Datei sichtbar in der Karte, wird nach Schritt 1 automatisch eingetragen, und ein Knopf „Paketdatei wählen…" lässt **jede vorhandene** `.intunewin` auswählen – nicht nur die in dieser Sitzung gebaute.
 - **Die Übernahme von Schritt 1 ist jetzt sichtbar.** Nach dem Bauen erscheint der Paketname direkt in Schritt 3 (und in der Ersetzen-Karte), statt wortlos zwei Karten tiefer zu landen.
 - **Der Knopf „MSI-Informationen lesen" heißt jetzt „MSI: Daten automatisch auslesen"** und hat einen Tooltip, der erklärt, was er tut: liest bei einer MSI Produktcode, Version, Name und Herausgeber direkt aus der Datei – ohne Installation –, danach „Ins Formular unten übernehmen". EXE-Dateien nutzen weiterhin die drei nummerierten Schritte.
+- **Neuer „Automatisch ermitteln"-Knopf in Schritt 2.** Ein Klick erledigt die ganze Erkennung bis zum Ergebnis: bei einer MSI wird sie direkt aus der Datei gelesen, bei einer EXE nacheinander Zustand aufnehmen, lokal installieren (mit einer Sicherheitsabfrage, weil dabei wirklich auf diesem Rechner installiert wird) und vergleichen. Das Ergebnis wird anschließend automatisch in die Win32-Karte übernommen. Die einzelnen Schritte bleiben für den manuellen Weg erhalten.
+- **Klarere Wegweisung zwischen Installer und Paket.** Schritt 1 weist jetzt darauf hin, dass eine bereits vorhandene `.intunewin` direkt in Schritt 3 gewählt werden kann; Schritt 2 nennt im Hinweis, dass er den Installer aus Schritt 1 nutzt, nicht das Paket.
+- **Alter Erkennungsstand bleibt nicht mehr stehen.** Wer erst eine MSI auslas und dann zu einer EXE wechselte, sah in Schritt 2 weiterhin die MSI-Daten von vorher – mit dem Risiko, sie versehentlich zu übernehmen. Beim Wechsel der Installer-Datei werden Ergebnisfeld und übernahmebereiter Fund jetzt geleert.
 
 **Windows-Sandbox-Test friert die Oberfläche nicht mehr ein**
 
 - **Kein Einfrieren mehr nach dem Sandbox-Test.** Die Modul-Funktion beendet ihren Ablauf mit einem blockierenden „Press enter when you closed the sandbox" – auf dem Oberflächen-Faden legte das die ganze Anwendung lahm („keine Rückmeldung"). Der Test läuft jetzt in einem eigenen Prozess mit geschlossener Eingabe: die Wartezeile erhält sofort ein Dateiende, die Sandbox startet, und das Fenster bleibt bedienbar. Auch die störende „WriteObject … cannot be called from outside"-Flut des Moduls bleibt in diesem Prozess.
 - **Kein versehentlicher zweiter Start mehr.** Weil die Oberfläche einfror, klickten Nutzer ein zweites Mal – und ein zweiter Sandbox-Start neben dem ersten ist genau die Ursache für „Zugriff verweigert (0x80070005)", denn Windows erlaubt nur **eine** Sandbox gleichzeitig. Der Knopf wird während des Laufs gesperrt, und ist bereits eine Sandbox offen, erscheint jetzt eine klare Meldung statt des kryptischen Windows-Fehlers.
-- **Bei „Zugriff verweigert" hilft die Anwendung weiter** und nennt die üblichen Ursachen (noch offene Sandbox, Installer in einem nicht einbindbaren Ordner wie OneDrive – erst nach `C:\Temp` kopieren –, Sicherheitsrichtlinie), statt den Nutzer mit dem Windows-Fehler allein zu lassen.
+- **Der Installer wird für den Test in einen sauberen Ordner kopiert.** Windows Sandbox bindet den Ordner des Installers ein; liegt er in `Downloads`, `Dokumente` oder auf dem Desktop, blockiert der Ordnerschutz (Controlled Folder Access) das Einbinden häufig mit „Zugriff verweigert (0x80070005)". Der Test läuft jetzt aus einer Kopie unter `%LOCALAPPDATA%` – ein Ordner, der nicht geschützt ist –, was diese Ursache umgeht. Alte Kopien werden beim nächsten Lauf aufgeräumt.
+- **Bei „Zugriff verweigert" hilft die Anwendung weiter** und nennt die üblichen Ursachen (noch offene Sandbox, geschützter Quellordner, Sicherheitsrichtlinie), statt den Nutzer mit dem Windows-Fehler allein zu lassen. Ausgaben des Hilfsprozesses werden vor der Anzeige von Farbcodes bereinigt.
 
 **Protokolle ausführlicher**
 
