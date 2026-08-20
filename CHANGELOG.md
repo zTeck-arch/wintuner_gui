@@ -1,5 +1,35 @@
 ﻿# Changelog
 
+## 0.15.7 – Feldmeldungen: Tenants ohne aktive Apps, erster Fehlversuch beim Paketieren, klarere Fehlermeldungen
+
+**Aus echten Kundenläufen**
+
+- **Tenants, deren Apps alle abgelöst sind, luden die Update-Ansicht nicht mehr.** Bei einem Tenant mit 0 aktiven, aber 6 abgelösten Apps brach das Laden mit „Cannot bind argument to parameter 'ActiveApps' because it is an empty array" ab – ein leeres Feld wurde an der Parameterprüfung abgewiesen, bevor die eigentliche Logik lief. Der Fall wird jetzt zugelassen; ist keine aktive App vorhanden, erscheint schlicht „keine Apps", die abgelösten bleiben in ihrem Bereich sichtbar.
+- **Der erste Klick auf „Aktualisieren" scheiterte, der zweite ging.** Das WinTuner-Modul zählt beim Bauen seine eigene, noch gefüllte App-Liste auf; unter der Oberfläche trat dabei „Collection was modified; enumeration operation may not execute" auf. Dieser Wettlauf ist vorübergehend – derselbe Aufruf klappt Sekunden später. Paketbau und Inventar-Abfragen (Update-Suche, Versionsbereinigung) wiederholen ihn jetzt automatisch mit kurzer Pause, statt den Vorgang abzubrechen. Man muss nicht mehr zweimal klicken.
+- **„Request not applicable to target tenant" wird richtig benannt.** Diese Meldung bedeutet, dass der Tenant keine aktive Microsoft-Intune-Lizenz hat oder das Konto dort keine Intune-Berechtigung besitzt – ein dauerhafter Zustand. Bisher hieß es „möglicherweise vorübergehend nicht erreichbar, in einigen Minuten erneut versuchen", was in die falsche Richtung schickte. Jetzt steht dort, dass Wiederholen nicht hilft und Lizenz bzw. Rolle in genau diesem Tenant zu prüfen sind.
+
+**Leistungsnachweis erfasst jetzt, was wirklich passiert**
+
+- **Bereitstellungen und Zuweisungen werden endlich erfasst.** Bisher zählte der Nachweis nur Updates und Löschungen; neue Apps und die dabei gesetzten Zuweisungen tauchten nie auf – eine reine „neue Apps bereitstellen"-Sitzung las sich als „nichts erfasst". Jetzt werden festgehalten: jede Bereitstellung (WinGet, Microsoft Store, eigener Installer, erkannte Apps) unter „Neu bereitgestellt", und jede Zuweisungsänderung unter „Zuweisungen geändert" – neu angelegte Zuweisungen, geänderte Zuweisungseinstellungen und die automatische Übergabe an die neue Version beim Update.
+- **Die irreführende Zeile „0 Zuweisungsänderungen" ist entfallen.** Statt einer Zahl, die nie erfasst wurde und daher immer 0 war, listet der Nachweis die tatsächlichen Zuweisungsänderungen jetzt einzeln im eigenen Abschnitt auf.
+
+**Eigene Installer verständlicher**
+
+- **Schritt 3 (Win32-App anlegen) hat jetzt ein eigenes, sichtbares Paketfeld.** Bisher zog sich diese Karte die `.intunewin` still aus einem Feld einer ganz anderen Karte weiter unten – man sah weder, welches Paket verwendet wird, noch konnte man dort ein anderes wählen. Jetzt steht die gewählte Datei sichtbar in der Karte, wird nach Schritt 1 automatisch eingetragen, und ein Knopf „Paketdatei wählen…" lässt **jede vorhandene** `.intunewin` auswählen – nicht nur die in dieser Sitzung gebaute.
+- **Die Übernahme von Schritt 1 ist jetzt sichtbar.** Nach dem Bauen erscheint der Paketname direkt in Schritt 3 (und in der Ersetzen-Karte), statt wortlos zwei Karten tiefer zu landen.
+- **Der Knopf „MSI-Informationen lesen" heißt jetzt „MSI: Daten automatisch auslesen"** und hat einen Tooltip, der erklärt, was er tut: liest bei einer MSI Produktcode, Version, Name und Herausgeber direkt aus der Datei – ohne Installation –, danach „Ins Formular unten übernehmen". EXE-Dateien nutzen weiterhin die drei nummerierten Schritte.
+
+**Windows-Sandbox-Test friert die Oberfläche nicht mehr ein**
+
+- **Kein Einfrieren mehr nach dem Sandbox-Test.** Die Modul-Funktion beendet ihren Ablauf mit einem blockierenden „Press enter when you closed the sandbox" – auf dem Oberflächen-Faden legte das die ganze Anwendung lahm („keine Rückmeldung"). Der Test läuft jetzt in einem eigenen Prozess mit geschlossener Eingabe: die Wartezeile erhält sofort ein Dateiende, die Sandbox startet, und das Fenster bleibt bedienbar. Auch die störende „WriteObject … cannot be called from outside"-Flut des Moduls bleibt in diesem Prozess.
+- **Kein versehentlicher zweiter Start mehr.** Weil die Oberfläche einfror, klickten Nutzer ein zweites Mal – und ein zweiter Sandbox-Start neben dem ersten ist genau die Ursache für „Zugriff verweigert (0x80070005)", denn Windows erlaubt nur **eine** Sandbox gleichzeitig. Der Knopf wird während des Laufs gesperrt, und ist bereits eine Sandbox offen, erscheint jetzt eine klare Meldung statt des kryptischen Windows-Fehlers.
+- **Bei „Zugriff verweigert" hilft die Anwendung weiter** und nennt die üblichen Ursachen (noch offene Sandbox, Installer in einem nicht einbindbaren Ordner wie OneDrive – erst nach `C:\Temp` kopieren –, Sicherheitsrichtlinie), statt den Nutzer mit dem Windows-Fehler allein zu lassen.
+
+**Protokolle ausführlicher**
+
+- **Fehler werden im Protokoll jetzt vollständig benannt.** Bislang stand dort nur die oberste Fehlermeldung – oft die harmlose Hülle um die eigentliche Ursache, die in einer inneren Ausnahme steckt. Neu wird an den wichtigen Stellen (Anmeldung, Update-Lauf, Versionsbereinigung, App-Laden) eine einzeilige, durchsuchbare Vollangabe geschrieben: Fehlertyp, Meldung, innere Ausnahme(n), HTTP-Status und die Codezeile. So lässt sich ein Bindungsfehler, ein Graph-Fehler und ein Modul-Wettlauf im Nachhinein auseinanderhalten, statt jedes Mal dasselbe Symptom zu sehen.
+- Wiederholte Modul-Wettläufe werden mit Versuchszähler protokolliert, und die Einordnung der ersten Intune-Abfrage nach der Anmeldung (dauerhaft vs. vorübergehend) steht jetzt im Log.
+
 ## 0.15.6 – Eigene Installer erklären sich selbst, Protokolle ins Benutzerprofil, englische README
 
 **Eigene Installer**

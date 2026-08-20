@@ -1493,6 +1493,9 @@ $storeDeployButton.Add_Click({
     # The settings Store apps cannot honour are no longer offered in this section, so there is
     # nothing left to warn about here - the note in the assignment card states it up front instead.
     Write-Log ("Store deploy: '{0}' ({1}) -> {2}" -f $q, $storePackageId, $(if ($storeGraphId) { $storeGraphId } else { 'unresolved' }))
+    # The Store app was created above; record it for the performance text. Its assignment, if any,
+    # is recorded inside New-AppAssignmentConfiguration and is therefore not duplicated here.
+    try { Add-SessionActivity -Kind 'Deployed' -Name ([string]$storePackage.Name) -Detail (Get-UiString 'ActivityDeployed') } catch { }
     # Keep the freshly deployed app in view. The query box used to be cleared and the inventory
     # reloaded unfiltered, so the list jumped to every Store app in the tenant and the one just
     # created was lost among them - in a large tenant, off screen entirely.

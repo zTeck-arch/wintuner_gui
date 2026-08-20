@@ -4,10 +4,15 @@ BeforeAll {
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '50-UpdateEngine.ps1' -Name 'Get-AppVersionGroups')))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '20-Version.ps1' `
     -Name 'Get-ComparableVersionParts', 'Test-IsNewerVersion')))
+  # Get-AppVersionGroups now reads through the resilient inventory wrapper, which retries the module's
+  # "Collection was modified" race. Load the real wrapper so it exercises the same path the app does;
+  # it still bottoms out in the mocked Get-WtWin32Apps below.
+  . ([scriptblock]::Create((Get-SourceFunctionText -Part '25-WinGetData.ps1' -Name @(
+    'Test-IsTransientModuleRace', 'Invoke-WithTransientRetry', 'Get-Win32AppsResilient'))))
 
   function global:Resolve-WtWingetId { param($AppOrResult) [string]$AppOrResult.PackageId }
   function global:Get-WtWin32Apps {
-    param($Superseded, $ErrorAction)
+    param($Superseded, $Update, $ErrorAction)
     if ($Superseded) { return $global:SupersededApps }
     return $global:ActiveApps
   }

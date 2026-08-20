@@ -140,6 +140,37 @@ function Write-LogSafe {
   } catch {}
 }
 
+# Rich, one-line error detail for the log. A bare .Message frequently hides WHICH kind of failure it
+# was: a parameter-binding error, a Graph/HTTP error and a module race read very differently in a bug
+# report, and the real cause often sits in an InnerException the top message never shows. Kept to a
+# single greppable line: "[Type] message | inner[Type]: message | HTTP 403 | at line 512".
+function Format-ErrorDetail {
+  param([Parameter(Mandatory)]$ErrorRecord)
+  try {
+    $parts = @()
+    $ex = $ErrorRecord.Exception
+    if ($ex) {
+      $parts += ("[{0}] {1}" -f $ex.GetType().Name, $ex.Message)
+      $inner = $ex.InnerException
+      $depth = 0
+      while ($inner -and $depth -lt 3) {
+        $parts += ("inner[{0}]: {1}" -f $inner.GetType().Name, $inner.Message)
+        $inner = $inner.InnerException; $depth++
+      }
+    } else {
+      $parts += [string]$ErrorRecord
+    }
+    $status = try { Get-ErrorHttpStatus -ErrorRecord $ErrorRecord } catch { 0 }
+    if ($status -gt 0) { $parts += ("HTTP {0}" -f $status) }
+    $inv = $ErrorRecord.InvocationInfo
+    if ($inv -and $inv.ScriptLineNumber) { $parts += ("at line {0}" -f $inv.ScriptLineNumber) }
+    return ($parts -join ' | ')
+  } catch {
+    # The detail formatter must never be the thing that throws while logging an error.
+    try { return [string]$ErrorRecord.Exception.Message } catch { return [string]$ErrorRecord }
+  }
+}
+
 # Runs an action on the UI thread if required
 function Invoke-UiAction {
   param(

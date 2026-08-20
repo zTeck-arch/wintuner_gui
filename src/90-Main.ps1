@@ -187,7 +187,17 @@ $loginButton.Add_Click({
     # Reporting it as an auth error used to hide the real cause completely.
     if (-not (Test-WtConnected)) {
       $probeDetail = if ($script:lastConnectionProbeError) { $script:lastConnectionProbeError } else { '-' }
-      throw ((Get-UiString 'LoginProbeFailedError') -f $probeDetail)
+      # "Request not applicable to target tenant" (and the "no active Intune license" shapes) are NOT
+      # transient: the Graph Intune API requires an active Intune license in the target tenant, and
+      # the account must be permitted there. Telling the user to "try again in a few minutes" sent
+      # them chasing a Graph outage that was never the cause. Name the real, permanent condition.
+      $noIntune = (
+        $probeDetail -match '(?i)not applicable to target tenant' -or
+        $probeDetail -match '(?i)not onboarded' -or
+        ($probeDetail -match '(?i)Intune' -and $probeDetail -match '(?i)licen[sc]e'))
+      $errKey = if ($noIntune) { 'LoginNoIntuneError' } else { 'LoginProbeFailedError' }
+      Write-Log ("First Intune query failed after sign-in ({0}): {1}" -f $(if ($noIntune) { 'tenant has no usable Intune / no permission' } else { 'transient or unknown' }), $probeDetail)
+      throw ((Get-UiString $errKey) -f $probeDetail)
     }
     $script:isConnected = $true
     # Before anything tenant-specific is shown again: whatever is still on screen belongs to the
@@ -229,6 +239,9 @@ $loginButton.Add_Click({
     }
   } catch {
     $msg = $_.Exception.Message
+    # Full detail to the log (type, inner exception, HTTP status, line); the dialog keeps the short
+    # message. A login failure is exactly the kind of report that needs the type, not just the text.
+    Write-Log ("Login failed: {0}" -f (Format-ErrorDetail $_))
     # 401/403 is an authentication/permission answer no matter how the message is worded or
     # localized; the text patterns below are only the fallback for exceptions without a status.
     $loginStatus = Get-ErrorHttpStatus -ErrorRecord $_
@@ -578,6 +591,10 @@ $uploadButton.Add_Click({
         } else {
           Update-Status (Get-UiString 'UploadCompletedStatus')
         }
+        # Record the deployment for the performance text. The assignment itself is recorded inside
+        # New-AppAssignmentConfiguration above, so it is not double-counted here.
+        $deployedName = if ($deployDisplayName) { [string]$deployDisplayName } else { [string]$packageID }
+        try { Add-SessionActivity -Kind 'Deployed' -Name $deployedName -FromVersion ([string]$version) -Detail (Get-UiString 'ActivityDeployed') } catch { }
         $uploadSucceeded = $true
         $uploadButton.Enabled = $false
         $appSearchBox.Text = ""
@@ -708,17 +725,19 @@ $updateSearchButton.Add_Click({
     # returned by both module queries; GraphId overlap is removed before update evaluation.
     $all = @()
     try {
-      $activeInventory = @(Get-WtWin32Apps -Superseded:$false -ErrorAction Stop)
+      $activeInventory = @(Get-Win32AppsResilient -Label 'updates load (active)')
       $supersededInventory = @()
       try {
-        $supersededInventory = @(Get-WtWin32Apps -Superseded:$true -ErrorAction Stop)
+        $supersededInventory = @(Get-Win32AppsResilient -Superseded -Label 'updates load (superseded)')
       } catch {
         Write-Log ("Could not load the superseded inventory for scan classification: {0}. Active items remain visible, but the pre-upload guard will still block unsafe mutations." -f $_.Exception.Message)
       }
       $all = @(Remove-SupersededInventoryOverlap -ActiveApps $activeInventory -SupersededApps $supersededInventory)
       Write-Log ("Loaded {0} active app object(s) from Intune after excluding {1} superseded overlap(s)." -f $all.Count, ($activeInventory.Count - $all.Count))
     } catch {
-      Write-Log ("Failed to load apps: {0}" -f $_.Exception.Message)
+      # Include the exception TYPE, not just the message: a binding error, a Graph error and a module
+      # race read very differently in a bug report, and the type is the fastest way to tell them apart.
+      Write-Log ("Failed to load apps [{0}]: {1}" -f $_.Exception.GetType().Name, $_.Exception.Message)
       Update-Status (Get-UiString 'LoadAppsFailedStatus')
       return
     }
@@ -1767,6 +1786,7 @@ $deployDiscoveredButton.Add_Click({
                 }
                 $successCount++
                 Write-Log "Successfully deployed new app: $packageId"
+                try { Add-SessionActivity -Kind 'Deployed' -Name ([string]$wingetApp.Name) -FromVersion ([string]$effVersion) -Detail (Get-UiString 'ActivityDeployed') } catch { }
             } catch {
                 $failedCount++
                 Write-Log "Failed to deploy $($wingetApp.Name): $($_.Exception.Message)"
@@ -2119,6 +2139,10 @@ if ($updateSelectedButton)  { $toolTip.SetToolTip($updateSelectedButton,  (Get-U
 if ($scanDiscoveredButton)  { $toolTip.SetToolTip($scanDiscoveredButton,  (Get-UiString 'TtScanDiscovered')) }
 if ($disconnectButton)      { $toolTip.SetToolTip($disconnectButton,      (Get-UiString 'TooltipDisconnect')) }
 if ($logoutButton)          { $toolTip.SetToolTip($logoutButton,          (Get-UiString 'TooltipLogout')) }
+
+# tabOwnPackage
+if ($detectMsiButton)    { $toolTip.SetToolTip($detectMsiButton,    (Get-UiString 'TtDetectMsi')) }
+if ($win32PackageButton) { $toolTip.SetToolTip($win32PackageButton, (Get-UiString 'TtWin32Package')) }
 
 # Header / Login area
 if ($loginButton)           { $toolTip.SetToolTip($loginButton,           (Get-UiString 'TooltipLogin')) }

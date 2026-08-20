@@ -36,6 +36,113 @@ function Test-WindowsSandboxAvailable {
   } catch { return $false }
 }
 
+# Windows Sandbox allows only ONE running instance. Starting a second while one is still initialising
+# is what returns "access denied (0x80070005)". The earlier UI freeze made users click the button
+# twice, which is exactly how they hit that error - so this pre-check turns a confusing Windows error
+# into a plain "one is already open" message.
+function Test-WindowsSandboxRunning {
+  try {
+    foreach ($n in @('WindowsSandbox','WindowsSandboxClient','WindowsSandboxServer','WindowsSandboxRemoteSession')) {
+      if (Get-Process -Name $n -ErrorAction SilentlyContinue) { return $true }
+    }
+    return $false
+  } catch { return $false }
+}
+
+# Runs the module's Test-WtSetupFile OUT OF PROCESS, with standard input redirected from an empty
+# file. Two module behaviours make a direct call unusable from a GUI:
+#   * it ends the run with a blocking "Press enter when you closed the sandbox" (a Console.ReadLine).
+#     On the UI thread that froze the whole window until the process was killed.
+#   * it writes progress from a background thread, which spams "WriteObject ... cannot be called from
+#     outside the overrides" into the host.
+# A child pwsh with closed stdin makes that ReadLine hit end-of-file immediately, so the module
+# launches the sandbox, cleans up and exits on its own; the sandbox window stays open for the user to
+# inspect. All of the module's noise stays inside the child. Returns
+# @{ Succeeded; ErrorMessage; AccessDenied; Output }.
+function Invoke-WtSandboxTest {
+  param(
+    [Parameter(Mandatory)][string]$SetupFile,
+    [string]$InstallerArguments = '',
+    [int]$TimeoutMinutes = 15
+  )
+  $out = @{ Succeeded = $false; ErrorMessage = $null; AccessDenied = $false; Output = '' }
+  $pwshExe = $null
+  try { $pwshExe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName } catch { }
+  if (-not $pwshExe -or ($pwshExe -notmatch '(?i)pwsh')) {
+    $cmd = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($cmd) { $pwshExe = $cmd.Source }
+  }
+  if (-not $pwshExe) { $out.ErrorMessage = 'PowerShell 7 (pwsh) executable not found.'; return $out }
+
+  $work = Join-Path ([IO.Path]::GetTempPath()) ("wtgui-sbx-" + [guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $work -Force -ErrorAction SilentlyContinue | Out-Null
+  $runner     = Join-Path $work 'run.ps1'
+  $stdinFile  = Join-Path $work 'in.txt'
+  $stdoutFile = Join-Path $work 'out.txt'
+  $stderrFile = Join-Path $work 'err.txt'
+  Set-Content -LiteralPath $stdinFile -Value '' -NoNewline -ErrorAction SilentlyContinue
+
+  # The runner reads the paths from environment variables the child inherits, so a setup path with
+  # spaces or parentheses ("OnVUE-26.15.172 (1).exe") needs no command-line escaping.
+  $runnerBody = @'
+$ErrorActionPreference = "Stop"
+try {
+  Import-Module WinTuner -ErrorAction Stop
+  $s = $env:WTGUI_SANDBOX_SETUP
+  $a = $env:WTGUI_SANDBOX_ARGS
+  if ([string]::IsNullOrWhiteSpace($a)) { Test-WtSetupFile -SetupFile $s }
+  else { Test-WtSetupFile -SetupFile $s -InstallerArguments $a }
+} catch {
+  Write-Error $_.Exception.Message
+  exit 1
+}
+'@
+  Set-Content -LiteralPath $runner -Value $runnerBody -Encoding utf8 -ErrorAction Stop
+
+  $env:WTGUI_SANDBOX_SETUP = $SetupFile
+  $env:WTGUI_SANDBOX_ARGS  = $InstallerArguments
+  $proc = $null
+  try {
+    $proc = Start-Process -FilePath $pwshExe `
+      -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File', $runner) `
+      -RedirectStandardInput $stdinFile -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile `
+      -WindowStyle Hidden -PassThru -ErrorAction Stop
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while (-not $proc.HasExited) {
+      [System.Windows.Forms.Application]::DoEvents()   # keep the window alive while the child works
+      Start-Sleep -Milliseconds 150
+      if ($sw.Elapsed.TotalMinutes -ge $TimeoutMinutes) {
+        try { $proc.Kill() } catch { }
+        $out.ErrorMessage = "Sandbox test timed out after $TimeoutMinutes minute(s)."
+        break
+      }
+    }
+    $stdout = try { [IO.File]::ReadAllText($stdoutFile) } catch { '' }
+    $stderr = try { [IO.File]::ReadAllText($stderrFile) } catch { '' }
+    $out.Output = ("$stdout`n$stderr").Trim()
+    if ($out.Output -match '0x80070005' -or $out.Output -match '(?i)access denied' -or $out.Output -match '(?i)Zugriff verweigert') {
+      $out.AccessDenied = $true
+    }
+    if (-not $out.ErrorMessage) {
+      if ($proc.ExitCode -eq 0) {
+        $out.Succeeded = $true
+      } else {
+        $firstErr = ($stderr -split "`r?`n" | Where-Object { $_ } | Select-Object -First 1)
+        $out.ErrorMessage = if ($firstErr) { $firstErr } else { "Sandbox helper exited with code $($proc.ExitCode)." }
+      }
+    }
+  } catch {
+    $out.ErrorMessage = $_.Exception.Message
+  } finally {
+    $env:WTGUI_SANDBOX_SETUP = $null
+    $env:WTGUI_SANDBOX_ARGS  = $null
+    # The child has finished and the sandbox already copied what it needed from its own temp folder,
+    # so nothing here needs to outlive the run.
+    try { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+  }
+  return $out
+}
+
 # True when the output folder is the source folder itself or sits inside it. Either way the packager
 # would be asked to write its result into the tree it is compressing, which it declines.
 # Non-existent destinations are fine: the caller creates them, and a folder that is not there yet
@@ -416,11 +523,14 @@ $ownBuildButton.Add_Click({
       return
     }
     Update-Status ((Get-UiString 'OwnPkgBuiltStatus') -f $result.PackagePath)
-    # Hand the fresh package straight to the replace card - that is the usual next step, and the
-    # "create a Win32 app" card reads the same field.
+    # Hand the fresh package to BOTH follow-up cards: step 3 (create a Win32 app) now has its own
+    # visible field, and the replace card keeps its field too. Full path in the Tag, file name in
+    # the box so the choice is visible at a glance.
     $replaceFileBox.Text = [string]$result.PackagePath
-    # ... and say so. The hand-off already happened silently before, two cards further down, so it
-    # looked as if the built package led nowhere and the next step had to be started from scratch.
+    $win32PackageBox.Tag = [string]$result.PackagePath
+    $win32PackageBox.Text = Split-Path $result.PackagePath -Leaf
+    # ... and say so. The hand-off used to happen silently, two cards further down, so it looked as
+    # if the built package led nowhere and the next step had to be started from scratch.
     $ownBuildHint.Text = (Get-UiString 'OwnPkgHandedOn') -f (Split-Path $result.PackagePath -Leaf)
     $ownBuildHint.ForeColor = $script:currentTheme.ForeColor
     Write-Log ("Package handed on to the cards below: {0}" -f $result.PackagePath)
@@ -922,21 +1032,41 @@ $detectSandboxButton.Add_Click({
     }
     return
   }
+  # One sandbox at a time (see Test-WindowsSandboxRunning): starting a second is what caused the
+  # "access denied" the user hit after the frozen UI made them click twice.
+  if (Test-WindowsSandboxRunning) {
+    Write-Log 'A Windows Sandbox instance is already running; not starting a second one.'
+    $detectResultBox.Text = Get-UiString 'DetectSandboxAlreadyRunning'
+    Update-Status (Get-UiString 'DetectSandboxAlreadyRunning')
+    return
+  }
   try {
+    # Disabled while it runs so a slow start cannot be double-clicked into a second sandbox.
+    $detectSandboxButton.Enabled = $false
     Update-Status (Get-UiString 'DetectSandboxRunning')
     [System.Windows.Forms.Application]::DoEvents()  # pumps the message loop; this work stays on the UI thread on purpose (see 70-Runtime)
     $arguments = $detectArgsBox.Text.Trim()
-    Write-Log ("Testing setup file in Windows Sandbox: '{0}' {1}" -f $setup, $arguments)
-    if ($arguments) {
-      Test-WtSetupFile -SetupFile $setup -InstallerArguments $arguments -ErrorAction Stop
+    Write-Log ("Testing setup file in Windows Sandbox (out of process): '{0}' {1}" -f $setup, $arguments)
+    $sbx = Invoke-WtSandboxTest -SetupFile $setup -InstallerArguments $arguments
+    if ($sbx.Output) { Write-Log ("Sandbox helper output: {0}" -f ($sbx.Output -replace '\s+', ' ')) }
+    if ($sbx.Succeeded) {
+      $detectResultBox.Text = Get-UiString 'DetectSandboxStarted'
+      Update-Status (Get-UiString 'DetectSandboxStarted')
+    } elseif ($sbx.AccessDenied) {
+      Write-Log ("Sandbox init access denied (0x80070005): {0}" -f $sbx.ErrorMessage)
+      $detectResultBox.Text = Get-UiString 'DetectSandboxAccessDenied'
+      Update-Status (Get-UiString 'DetectSandboxAccessDeniedStatus')
     } else {
-      Test-WtSetupFile -SetupFile $setup -ErrorAction Stop
+      Write-Log ("Sandbox test failed: {0}" -f $sbx.ErrorMessage)
+      $detectResultBox.Text = (Get-UiString 'DetectSandboxFailed') -f $sbx.ErrorMessage
+      Update-Status ((Get-UiString 'DetectFailed') -f $sbx.ErrorMessage)
     }
-    Update-Status (Get-UiString 'DetectSandboxStarted')
   } catch {
-    Write-Log ("Sandbox test failed: {0}" -f $_.Exception.Message)
+    Write-Log ("Sandbox test failed: {0}" -f (Format-ErrorDetail $_))
     $detectResultBox.Text = (Get-UiString 'DetectSandboxFailed') -f $_.Exception.Message
     Update-Status ((Get-UiString 'DetectFailed') -f $_.Exception.Message)
+  } finally {
+    $detectSandboxButton.Enabled = $true
   }
 })
 
@@ -1202,11 +1332,45 @@ $win32Field3Box.Width = 180
 $win32Field3Host = New-RoundedInput -Inner $win32Field3Box -X 532 -Y 280 -W 180 -H 32
 $cardWin32.Controls.Add($win32Field3Host)
 
+# --- package file for THIS app ---
+# Step 3 used to read its .intunewin silently from a field that lives in the "replace content" card
+# two rows further down, so the user could neither see which package would be used nor pick a
+# different one here. It now has its own visible, selectable field: filled automatically after
+# step 1, and a browse button to choose ANY existing .intunewin. The full path is kept in the box's
+# Tag; the box shows only the file name so a long path cannot overflow the field.
+$win32PackageButton = New-Object System.Windows.Forms.Button
+$win32PackageButton.Tag = 'btn-secondary'
+$win32PackageButton.Text = Get-UiString 'Win32PackageButton'
+$win32PackageButton.Location = New-Object System.Drawing.Point(14, 326)
+$win32PackageButton.Size = New-Object System.Drawing.Size(180, 32)
+$cardWin32.Controls.Add($win32PackageButton)
+
+$win32PackageBox = New-Object System.Windows.Forms.TextBox
+$win32PackageBox.ReadOnly = $true
+$win32PackageBox.Width = 240
+$win32PackageBox.PlaceholderText = Get-UiString 'Win32PackagePlaceholder'
+$win32PackageHost = New-RoundedInput -Inner $win32PackageBox -X 202 -Y 326 -W 240 -H 32
+$cardWin32.Controls.Add($win32PackageHost)
+
+# Keeps its original 260px width so the label never clips; sits at the right end of the row.
 $win32CreateButton = New-Object System.Windows.Forms.Button
 $win32CreateButton.Text = Get-UiString 'Win32CreateButton'
-$win32CreateButton.Location = New-Object System.Drawing.Point(14, 326)
+$win32CreateButton.Location = New-Object System.Drawing.Point(452, 326)
 $win32CreateButton.Size = New-Object System.Drawing.Size(260, 32)
 $cardWin32.Controls.Add($win32CreateButton)
+
+# Pick an existing .intunewin instead of the one built in step 1. Stores the full path in the box's
+# Tag and shows just the file name.
+$win32PackageButton.Add_Click({
+  $dlg = New-Object System.Windows.Forms.OpenFileDialog
+  $dlg.Filter = 'Intune package (*.intunewin)|*.intunewin|All files (*.*)|*.*'
+  $dlg.Title = Get-UiString 'Win32PackageButton'
+  if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    $win32PackageBox.Tag = $dlg.FileName
+    $win32PackageBox.Text = Split-Path $dlg.FileName -Leaf
+    Update-Status ((Get-UiString 'Win32PackageChosen') -f (Split-Path $dlg.FileName -Leaf))
+  }
+})
 
 $win32Hint = New-Object System.Windows.Forms.Label
 $win32Hint.Tag = 'hint'
@@ -1257,7 +1421,10 @@ $win32CreateButton.Add_Click({
   if (-not (Test-Connected)) { return }
   if (Test-UiBusy) { return }
 
-  $packageFile = $replaceFileBox.Text.Trim()
+  # Read from this card's own package field (Tag holds the full path). Falls back to the file name
+  # in the box only if the Tag was somehow lost.
+  $packageFile = ([string]$win32PackageBox.Tag).Trim()
+  if (-not $packageFile) { $packageFile = $win32PackageBox.Text.Trim() }
   $displayName = $win32NameBox.Text.Trim()
   $publisher = $win32PublisherBox.Text.Trim()
   $installCmd = $win32InstallBox.Text.Trim()
@@ -1317,6 +1484,7 @@ $win32CreateButton.Add_Click({
     }
     Update-Status ((Get-UiString 'Win32CreatedStatus') -f $displayName)
     Write-Log ("Win32 app '{0}' ({1}) created and content uploaded." -f $displayName, $appId)
+    try { Add-SessionActivity -Kind 'Deployed' -Name ([string]$displayName) -Detail (Get-UiString 'ActivityDeployed') } catch { }
   } catch {
     Write-Log ("Creating the Win32 app failed: {0}" -f $_.Exception.Message)
     Update-Status ((Get-UiString 'Win32CreateFailed') -f $_.Exception.Message)

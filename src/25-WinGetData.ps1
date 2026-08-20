@@ -557,6 +557,57 @@ function Invoke-LocalPackagePrune {
 $script:win32AppsCache = @{}
 $script:win32AppsCacheSeconds = 10
 
+# The WinTuner module hands back a live collection it is still filling and enumerates it internally
+# ("Getting list of published apps"). Under WinForms - where the UI thread pumps DoEvents while the
+# module works - that race surfaces as "Collection was modified; enumeration operation may not
+# execute" or "Value cannot be null". It is transient: the SAME call succeeds a moment later, which
+# is exactly why users saw packaging and cleanup fail on the first click and work on the second.
+# Test-WtConnected already treats these as retryable at sign-in; this does the same for every other
+# inventory read. Only the known race/throttle shapes are retried - a real error (missing
+# permission, no Intune license) still fails immediately, because retrying cannot fix it.
+function Test-IsTransientModuleRace {
+  param([string]$Message)
+  if ([string]::IsNullOrWhiteSpace($Message)) { return $false }
+  return (
+    $Message -match 'Collection was modified' -or
+    $Message -match 'Value cannot be null' -or
+    $Message -match 'timed out' -or
+    $Message -match 'ServiceUnavailable' -or
+    $Message -match 'temporarily unavailable' -or
+    $Message -match 'Too Many Requests' -or
+    $Message -match '\b(429|500|503|504)\b')
+}
+
+function Invoke-WithTransientRetry {
+  param(
+    [Parameter(Mandatory)][scriptblock]$Action,
+    [string]$Label = '',
+    [int]$MaxRetries = 3
+  )
+  $attempt = 0
+  while ($true) {
+    try { return (& $Action) }
+    catch {
+      $m = $_.Exception.Message
+      if (-not (Test-IsTransientModuleRace $m) -or $attempt -ge $MaxRetries) { throw }
+      $attempt++
+      Write-Log ("Transient module race{0} (attempt {1}/{2}): {3}. Retrying." -f `
+        $(if ($Label) { " for $Label" } else { '' }), $attempt, $MaxRetries, $m)
+      try { [System.Windows.Forms.Application]::DoEvents() } catch { }
+      Start-Sleep -Milliseconds (250 * $attempt)
+    }
+  }
+}
+
+# Inventory read with the transient-race retry above. Use this instead of a bare Get-WtWin32Apps for
+# any read that would otherwise abort a user action on the first attempt.
+function Get-Win32AppsResilient {
+  param([switch]$Superseded, [switch]$Update, [string]$Label = 'inventory read')
+  return @(Invoke-WithTransientRetry -Label $Label -Action {
+    Get-WtWin32Apps -Superseded:([bool]$Superseded) -Update:([bool]$Update) -ErrorAction Stop
+  })
+}
+
 function Get-CachedWin32Apps {
   param(
     [switch]$Superseded,

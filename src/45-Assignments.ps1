@@ -83,6 +83,10 @@ function Move-AppAssignments {
     $bodyOld = @{ mobileAppAssignments = @() } | ConvertTo-Json -Depth 4
     Invoke-RestMethod -Method POST -Uri "$base/$OldAppId/assign" -Headers $headers -Body $bodyOld -ErrorAction Stop | Out-Null
     Write-Log ("Assignments: removed {0} assignment(s) from superseded app {1} ({2}) [{3}]" -f $oldAssignments.Count, $OldAppId, $AppName, $desc)
+    # Record for the performance text: a hand-over is real work the automation did, and it was the
+    # one thing the record never mentioned. Only here, in the branch that actually moved something -
+    # the "old app has nothing to move" early return above must not be recorded as a change.
+    try { Add-SessionActivity -Kind 'AssignmentsChanged' -Name $AppName -Detail ((Get-UiString 'ActivityAssignmentMoved') -f $oldAssignments.Count) } catch { }
     return $true
   } catch {
     Write-Log ("Assignments: move failed for {0} (old {1} -> new {2}): {3}" -f $AppName, $OldAppId, $NewAppId, $_.Exception.Message)
@@ -377,6 +381,7 @@ function Set-AppAssignmentSettings {
     Invoke-RestMethod -Method POST -Uri "$base/$AppId/assign" -Headers $headers -Body $body -ErrorAction Stop | Out-Null
     $out.Changed = $payload.Count
     Write-Log ("Assignment settings applied to '{0}' ({1} assignment(s)): {2}" -f $AppName, $payload.Count, (Get-AssignmentSettingsSummary $Settings))
+    try { Add-SessionActivity -Kind 'AssignmentsChanged' -Name $AppName -Detail (Get-UiString 'ActivityAssignmentUpdated') } catch { }
     return $out
   } catch {
     $out.ErrorMessage = $_.Exception.Message
@@ -500,6 +505,7 @@ function New-AppAssignmentConfiguration {
     Invoke-RestMethod -Method POST -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assign" -Headers $headers -Body $body -ErrorAction Stop | Out-Null
     $out.Changed = $assignments.Count
     Write-Log ("Created {0} assignment(s) for '{1}' ({2}): intent={3}, mode={4}, target={5}, exclusionBase={6}, filter={7}, kind={8}, {9}" -f $assignments.Count, $AppName, $AppId, $Intent, $AssignmentMode, $TargetValue, $ExcludeBaseTarget, $FilterType, $AppKind, (Get-AssignmentSettingsSummary $Settings))
+    try { Add-SessionActivity -Kind 'AssignmentsChanged' -Name $AppName -Detail ((Get-UiString 'ActivityAssignmentCreated') -f $Intent, $TargetValue) } catch { }
   } catch {
     $out.ErrorMessage = $_.Exception.Message
     Write-Log ("Creating assignment FAILED for '{0}' ({1}): {2}" -f $AppName, $AppId, $out.ErrorMessage)

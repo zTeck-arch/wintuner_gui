@@ -135,13 +135,22 @@ function Invoke-PackageBuildWithThrottleRetry {
       } else {
         $message -match '(?i)Too Many Requests' -or $message -match '(?i)HTTP\s*429' -or $message -match '(?<![\d.])429(?![\d.])'
       }
-      if (-not $throttled -or $retry -ge $MaxRetries) { throw }
+      # "Collection was modified" / "Value cannot be null" is the module enumerating its own live
+      # app list while building - it failed the FIRST click and worked on the second. Retry it
+      # automatically with a short pause so the user never has to click twice. Kept distinct from
+      # throttling: a race clears in under a second, a 429 needs the longer server-directed backoff.
+      $raced = (-not $throttled) -and (Test-IsTransientModuleRace $message)
+      if ((-not $throttled -and -not $raced) -or $retry -ge $MaxRetries) { throw }
       $retry++
-      $delay = if ($retry -eq 1) { 5 } elseif ($retry -eq 2) { 15 } else { 30 }
-      if ($message -match '(?i)Retry-After\s*[:=]\s*(\d+)') {
+      $delay = if ($raced) { 2 } elseif ($retry -eq 1) { 5 } elseif ($retry -eq 2) { 15 } else { 30 }
+      if ($throttled -and $message -match '(?i)Retry-After\s*[:=]\s*(\d+)') {
         $delay = [Math]::Max(1, [Math]::Min(45, [int]$Matches[1]))
       }
-      Write-Log ("Package source throttled {0} (HTTP 429); retry {1}/{2} after {3}s." -f $Label, $retry, $MaxRetries, $delay)
+      if ($raced) {
+        Write-Log ("Package build hit a transient module race {0} (retry {1}/{2}) after {3}s: {4}" -f $Label, $retry, $MaxRetries, $delay, $message)
+      } else {
+        Write-Log ("Package source throttled {0} (HTTP 429); retry {1}/{2} after {3}s." -f $Label, $retry, $MaxRetries, $delay)
+      }
       for ($remaining = $delay; $remaining -gt 0; $remaining--) {
         if ($script:cancelBatch) { throw 'Cancelled by user while waiting for a rate-limit retry.' }
         Update-Status ((Get-UiString 'RateLimitRetryStatus') -f $retry, $remaining)

@@ -3,7 +3,12 @@
 # must not also appear as an active update candidate or active reuse target.
 function Remove-SupersededInventoryOverlap {
   param(
-    [Parameter(Mandatory)][object[]]$ActiveApps,
+    # AllowEmptyCollection is essential: a tenant whose apps are ALL superseded (managed=0,
+    # superseded>0) hands an empty active inventory here. Without it PowerShell rejected the empty
+    # array at binding time - "Cannot bind argument to parameter 'ActiveApps' because it is an empty
+    # array" - which aborted the whole "load apps" step, so the Updates section never loaded even
+    # though the tenant plainly had superseded apps to show.
+    [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$ActiveApps,
     [object[]]$SupersededApps = @()
   )
   $supersededIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)

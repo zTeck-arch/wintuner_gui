@@ -14,8 +14,11 @@ function Get-AppVersionGroups {
   # the group size decides whether a group is trimmed at all, and the duplicate occupied one of the
   # "keep newest N" slots, pushing a version that should have been kept into the delete list.
   $all = @()
-  $all += @(Get-WtWin32Apps -Superseded:$false -ErrorAction Stop)
-  $all += @(Get-WtWin32Apps -Superseded:$true  -ErrorAction SilentlyContinue)
+  $all += @(Get-Win32AppsResilient -Label 'version cleanup (active)')
+  # Superseded stays best-effort: a version is a trimming candidate whether or not it is marked
+  # superseded, so a failed superseded read must not abort the whole cleanup.
+  try { $all += @(Get-Win32AppsResilient -Superseded -Label 'version cleanup (superseded)') }
+  catch { Write-Log ("Version cleanup: superseded inventory read failed after retries: {0}" -f $_.Exception.Message) }
   $seenGraphIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
   $all = @($all | Where-Object {
     $_ -and $_.Name -and $_.GraphId -and $seenGraphIds.Add([string]$_.GraphId)
@@ -163,7 +166,7 @@ function Invoke-VersionCleanup {
       try { if ($supersededSearchButton -and $supersededSearchButton.Enabled) { $supersededSearchButton.PerformClick() } } catch {}
     }
   } catch {
-    Write-Log "Version cleanup error: $($_.Exception.Message)"
+    Write-Log ("Version cleanup error: {0}" -f (Format-ErrorDetail $_))
     Update-Status ((Get-UiString 'VersionCleanupErrorStatus') -f $_.Exception.Message)
   }
 }
@@ -550,8 +553,10 @@ function Update-SingleApp {
     }
 
   } catch {
+    # The user-facing message stays short; the log gets the full detail (type, inner exception,
+    # HTTP status, line) so a failed update can actually be diagnosed from the log afterwards.
     $result.Message = "Update failed for ${AppName}: $($_.Exception.Message)"
-    Write-Log $result.Message
+    Write-Log ("Update failed for {0}: {1}" -f $AppName, (Format-ErrorDetail $_))
   }
 
   return $result
@@ -576,7 +581,7 @@ function Get-SessionLeistungstext {
        HeadVersionRemoved = "Old versions removed:"
        HeadSupersededRemoved = "Superseded apps deleted:"
        HeadAssignments = "Assignments changed:"
-       Summary = "Summary: {0} app(s) updated, {1} old version(s) superseded during the update, {2} newly deployed, {3} old version(s) removed, {4} superseded app(s) deleted, {5} assignment change(s)." }
+       Summary = "Summary: {0} app(s) updated, {1} old version(s) superseded during the update, {2} newly deployed, {3} old version(s) removed, {4} superseded app(s) deleted." }
   } else {
     @{ Intro = "Folgende Anwendungen in der Intune Kundenumgebung aktualisiert und bereitgestellt sowie benötigte Zuweisungen und Ablöse von alten Anwendungen vorgenommen:"
        None = "Für diesen Tenant wurde in dieser Sitzung noch nichts erfasst."
@@ -587,7 +592,7 @@ function Get-SessionLeistungstext {
        HeadVersionRemoved = "Alte Versionen entfernt:"
        HeadSupersededRemoved = "Abgelöste Apps gelöscht:"
        HeadAssignments = "Zuweisungen geändert:"
-       Summary = "Zusammenfassung: {0} App(s) aktualisiert, {1} alte Version(en) beim Update abgelöst, {2} neu bereitgestellt, {3} alte Version(en) entfernt, {4} abgelöste App(s) gelöscht, {5} Zuweisungsänderung(en)." }
+       Summary = "Zusammenfassung: {0} App(s) aktualisiert, {1} alte Version(en) beim Update abgelöst, {2} neu bereitgestellt, {3} alte Version(en) entfernt, {4} abgelöste App(s) gelöscht." }
   }
 
   $lines = [System.Collections.Generic.List[string]]::new()
@@ -698,10 +703,14 @@ function Get-SessionLeistungstext {
     $lines.Add("")
   }
 
+  # The assignment tally used to be reported here too, but AssignmentsChanged is never recorded as a
+  # session activity, so it was always "0 assignment change(s)" - which read as "no assignments were
+  # made" even though a deployment always sets them. The intro sentence credits the assignments
+  # qualitatively; the summary now counts only what is actually tracked.
   $countOf = { param($k) @(if ($byKind.ContainsKey($k)) { $byKind[$k] } else { @() }).Count }
   $lines.Add(($tpl.Summary -f $updateGroupCount, $removedCount,
     (& $countOf 'Deployed'), (& $countOf 'VersionRemoved'),
-    (& $countOf 'SupersededRemoved'), (& $countOf 'AssignmentsChanged')))
+    (& $countOf 'SupersededRemoved')))
 
   return (($lines -join "`r`n").TrimEnd())
 }
