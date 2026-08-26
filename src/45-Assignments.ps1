@@ -1,3 +1,44 @@
+# The include baseline for an "exclude group X" assignment: "All Devices" or "All Users" (the
+# default). Shared by both writers so the choice from the UI ("Alle Geräte" vs "Alle Benutzer") is
+# honored everywhere - Set-AppAssignmentSettings used to hard-code All Users and silently dropped it.
+function New-AssignmentBaseTarget {
+  param([string]$ExcludeBaseTarget = 'AllUsers')
+  $type = if ($ExcludeBaseTarget -eq 'AllDevices') {
+    '#microsoft.graph.allDevicesAssignmentTarget'
+  } else {
+    '#microsoft.graph.allLicensedUsersAssignmentTarget'
+  }
+  return @{
+    '@odata.type' = $type
+    deviceAndAppManagementAssignmentFilterType = 'none'
+  }
+}
+
+# Turns a failed assignment write into a sentence that says what to do about it.
+#
+# Every one of these paths used to surface the raw Graph message. For a missing permission that reads
+# "Response status code does not indicate success: 403 (Forbidden)." in the middle of a batch, which
+# tells an admin nothing about the actual cause - the account is missing an Intune write role, and no
+# amount of retrying will change that. Get-ErrorHttpStatus already knows how to dig the status out of
+# the three shapes these exceptions arrive in; it was simply never used here.
+#
+# Returns the enriched text; the raw message is always kept on the end so nothing is hidden.
+function Get-AssignmentWriteErrorText {
+  param([Parameter(Mandatory)]$ErrorRecord)
+  $raw = try { [string]$ErrorRecord.Exception.Message } catch { [string]$ErrorRecord }
+  $status = try { Get-ErrorHttpStatus -ErrorRecord $ErrorRecord } catch { 0 }
+  $hint = switch ($status) {
+    401 { 'not signed in to Intune any more (HTTP 401) - the session expired; sign in again' }
+    403 { 'no permission to change assignments (HTTP 403) - the signed-in account needs an Intune role that may write app assignments; retrying will not help' }
+    404 { 'the app no longer exists in Intune (HTTP 404) - it was probably deleted in the portal meanwhile' }
+    429 { 'Intune is throttling the request (HTTP 429) - too many changes at once; it is worth retrying shortly' }
+    default { '' }
+  }
+  if ($hint) { return ('{0}. Graph said: {1}' -f $hint, $raw) }
+  if ($status -gt 0) { return ('HTTP {0}. Graph said: {1}' -f $status, $raw) }
+  return $raw
+}
+
 # Moves the group assignments from the OLD (now superseded) app to the NEW one, so only the newest
 # version stays in scope. Without this both versions remain assigned and someone has to unassign the
 # predecessor by hand in the portal.
@@ -11,6 +52,7 @@
 # NOTE: this REMOVES assignments in Intune – validate on a test app first.
 function Move-AppAssignments {
   param([Parameter(Mandatory)][string]$OldAppId, [Parameter(Mandatory)][string]$NewAppId, [string]$AppName = '')
+  $newAppWritten = $false
   $guid = '^[0-9a-fA-F-]{36}$'
   if ($OldAppId -notmatch $guid -or $NewAppId -notmatch $guid) { Write-Log "Assignments: invalid app id(s), aborting."; return $false }
   if ($OldAppId -eq $NewAppId) { Write-Log "Assignments: old and new app are identical, nothing to move."; return $false }
@@ -48,6 +90,15 @@ function Move-AppAssignments {
 
     # 1) put them on the new app (merged with whatever it already has, so nothing is lost)
     $existingNew = @(Get-GraphCollectionItems -Uri "$base/$NewAppId/assignments" -Headers $headers)
+    # The same policy-set/inherited check as for the source app, and for the same reason - it was
+    # only ever applied to the OLD app. Everything found here gets reposted below as a plain
+    # '#microsoft.graph.mobileAppAssignment', so an inherited assignment on the TARGET would either
+    # be rejected by Graph mid-write or silently rewritten into a direct one, detaching it from the
+    # policy that owns it. Refuse before the first write instead.
+    if (@($existingNew | Where-Object { $_.source -and [string]$_.source -ne 'direct' }).Count -gt 0) {
+      Write-Log ("Assignments: target app {0} ({1}) already carries policy-set/inherited assignments; hand-over is blocked because reposting them would detach them from their source." -f $NewAppId, $AppName)
+      return $false
+    }
     $merged = @($payload)
     foreach ($n in $existingNew) {
       $dupe = $false
@@ -77,19 +128,65 @@ function Move-AppAssignments {
     }
     $bodyNew = @{ mobileAppAssignments = @($merged) } | ConvertTo-Json -Depth 12
     Invoke-RestMethod -Method POST -Uri "$base/$NewAppId/assign" -Headers $headers -Body $bodyNew -ErrorAction Stop | Out-Null
+    # Tracks which of the two writes already landed. A failure after this point leaves BOTH versions
+    # assigned, which is a different situation from "nothing happened" and has to be reported as such.
+    $newAppWritten = $true
     Write-Log ("Assignments: new app {0} now has {1} assignment(s) [{2}]" -f $NewAppId, $merged.Count, $desc)
+    # Recorded as soon as it is true, not at the end: the successors really do carry the assignments
+    # from here on, and if step 2 fails the performance record would otherwise show nothing at all
+    # for work that was actually done.
+    try { Add-SessionActivity -Kind 'AssignmentsChanged' -Name $AppName -Detail ((Get-UiString 'ActivityAssignmentMoved') -f $oldAssignments.Count) } catch { }
 
     # 2) only now clear the old app
     $bodyOld = @{ mobileAppAssignments = @() } | ConvertTo-Json -Depth 4
     Invoke-RestMethod -Method POST -Uri "$base/$OldAppId/assign" -Headers $headers -Body $bodyOld -ErrorAction Stop | Out-Null
     Write-Log ("Assignments: removed {0} assignment(s) from superseded app {1} ({2}) [{3}]" -f $oldAssignments.Count, $OldAppId, $AppName, $desc)
-    # Record for the performance text: a hand-over is real work the automation did, and it was the
-    # one thing the record never mentioned. Only here, in the branch that actually moved something -
-    # the "old app has nothing to move" early return above must not be recorded as a change.
-    try { Add-SessionActivity -Kind 'AssignmentsChanged' -Name $AppName -Detail ((Get-UiString 'ActivityAssignmentMoved') -f $oldAssignments.Count) } catch { }
     return $true
   } catch {
-    Write-Log ("Assignments: move failed for {0} (old {1} -> new {2}): {3}" -f $AppName, $OldAppId, $NewAppId, $_.Exception.Message)
+    # Say WHICH step failed and what the tenant looks like now. "move failed" alone sent the reader
+    # looking for a lost assignment when in fact the new version had it and the old one had not been
+    # cleared - two very different repairs.
+    $detail = Get-AssignmentWriteErrorText -ErrorRecord $_
+    if ($newAppWritten) {
+      Write-Log ("Assignments: hand-over for {0} PARTIALLY applied - the new version {1} carries the assignments, but clearing the superseded app {2} failed: {3}. Both versions are assigned right now; remove the assignment from the old version in Intune, or run the update again." -f $AppName, $NewAppId, $OldAppId, $detail)
+    } else {
+      Write-Log ("Assignments: hand-over for {0} did not happen; nothing was changed (old {1} -> new {2}): {3}" -f $AppName, $OldAppId, $NewAppId, $detail)
+    }
+    return $false
+  }
+}
+
+# Removes ALL direct assignments from one app by posting an empty assignment list.
+#
+# Needed for the "hand-over OFF" update path: the WinTuner module ALWAYS copies the predecessor's
+# assignments onto the new version during a supersedence deploy (-KeepAssignments only stops it from
+# emptying the OLD app afterwards). So with "move assignments" switched off the new version would
+# come up assigned too - the opposite of what the option promises. Emptying the new app here makes
+# reality match "the new one is deployed unassigned". Returns $true only when Intune accepted it.
+function Clear-AppAssignments {
+  param([Parameter(Mandatory)][string]$AppId, [string]$AppName = '')
+  if ($AppId -notmatch '^[0-9a-fA-F-]{36}$') { Write-Log "Assignments: invalid app id, cannot clear."; return $false }
+  $token = $null
+  try { $token = Get-WtToken -ErrorAction Stop } catch { Write-Log "Assignments: could not obtain WinTuner token: $($_.Exception.Message)"; return $false }
+  if ([string]::IsNullOrWhiteSpace($token)) { Write-Log "Assignments: empty token, cannot clear."; return $false }
+  $headers = @{ Authorization = "Bearer $token"; 'Content-Type' = 'application/json' }
+  $base = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps"
+  try {
+    $existing = @(Get-GraphCollectionItems -Uri "$base/$AppId/assignments" -Headers $headers)
+    if ($existing.Count -eq 0) {
+      Write-Log ("Assignments: {0} ({1}) already has none - nothing to clear." -f $AppId, $AppName)
+      return $true
+    }
+    if (@($existing | Where-Object { $_.source -and [string]$_.source -ne 'direct' }).Count -gt 0) {
+      Write-Log ("Assignments: {0} ({1}) contains policy-set/inherited assignments; not clearing to preserve their source policy." -f $AppId, $AppName)
+      return $false
+    }
+    $body = @{ mobileAppAssignments = @() } | ConvertTo-Json -Depth 4
+    Invoke-RestMethod -Method POST -Uri "$base/$AppId/assign" -Headers $headers -Body $body -ErrorAction Stop | Out-Null
+    Write-Log ("Assignments: cleared {0} assignment(s) from {1} ({2})." -f $existing.Count, $AppId, $AppName)
+    return $true
+  } catch {
+    Write-Log ("Assignments: clearing failed for {0} ({1}): {2}" -f $AppId, $AppName, (Get-AssignmentWriteErrorText -ErrorRecord $_))
     return $false
   }
 }
@@ -114,8 +211,11 @@ function Test-SuccessorAssignmentsConfirmed {
   )
   for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
     $probe = Get-AppAssignmentProbe -AppId $NewAppId -AppName $AppName
-    if ($probe.Succeeded -and $probe.HasAssignments) {
-      Write-Log ("Assignment hand-over verified: successor {0} ({1}) carries {2} assignment(s)." -f $NewAppId, $AppName, $probe.Count)
+    # Require an INSTALLING assignment, not just any assignment: a standalone exclusion or an
+    # uninstall intent reaches nobody, so confirming the hand-over on that basis and then deleting
+    # the predecessor would leave the app installed on no one it was scoped to.
+    if ($probe.Succeeded -and $probe.HasInstallingAssignment) {
+      Write-Log ("Assignment hand-over verified: successor {0} ({1}) carries an installing assignment ({2} assignment(s) total)." -f $NewAppId, $AppName, $probe.Count)
       return $true
     }
     if ($attempt -lt $Attempts) {
@@ -367,10 +467,7 @@ function Set-AppAssignmentSettings {
           $payload += @{
             '@odata.type' = '#microsoft.graph.mobileAppAssignment'
             intent = [string]$exclusion.intent
-            target = @{
-              '@odata.type' = '#microsoft.graph.allLicensedUsersAssignmentTarget'
-              deviceAndAppManagementAssignmentFilterType = 'none'
-            }
+            target = (New-AssignmentBaseTarget -ExcludeBaseTarget ([string]$TargetChanges.ExcludeBaseTarget))
             settings = $exclusion.settings
           }
         }
@@ -380,11 +477,16 @@ function Set-AppAssignmentSettings {
     $body = @{ mobileAppAssignments = @($payload) } | ConvertTo-Json -Depth 12
     Invoke-RestMethod -Method POST -Uri "$base/$AppId/assign" -Headers $headers -Body $body -ErrorAction Stop | Out-Null
     $out.Changed = $payload.Count
-    Write-Log ("Assignment settings applied to '{0}' ({1} assignment(s)): {2}" -f $AppName, $payload.Count, (Get-AssignmentSettingsSummary $Settings))
+    $baseNote = if ($TargetChanges.ContainsKey('AssignmentMode') -and [string]$TargetChanges.AssignmentMode -eq 'exclude') {
+      " [exclude base: $([string]$(if ($TargetChanges.ExcludeBaseTarget) { $TargetChanges.ExcludeBaseTarget } else { 'AllUsers' }))]"
+    } else { '' }
+    Write-Log ("Assignment settings applied to '{0}' ({1} assignment(s)): {2}{3}" -f $AppName, $payload.Count, (Get-AssignmentSettingsSummary $Settings), $baseNote)
     try { Add-SessionActivity -Kind 'AssignmentsChanged' -Name $AppName -Detail (Get-UiString 'ActivityAssignmentUpdated') } catch { }
     return $out
   } catch {
-    $out.ErrorMessage = $_.Exception.Message
+    # Enriched, not raw: a 403 here means the account may not write app assignments, and this text is
+    # what the user sees in the status bar.
+    $out.ErrorMessage = Get-AssignmentWriteErrorText -ErrorRecord $_
     Write-Log ("Assignment settings FAILED for '{0}': {1}" -f $AppName, $out.ErrorMessage)
     return $out
   }
@@ -482,15 +584,7 @@ function New-AppAssignmentConfiguration {
     if ($AssignmentMode -eq 'exclude') {
       # A standalone exclusion assignment targets nobody. Pair it with the include baseline in the
       # same atomic assign request; the selected custom group remains the exclusion target.
-      $includeType = if ($ExcludeBaseTarget -eq 'AllDevices') {
-        '#microsoft.graph.allDevicesAssignmentTarget'
-      } else {
-        '#microsoft.graph.allLicensedUsersAssignmentTarget'
-      }
-      $includeTarget = @{
-        '@odata.type' = $includeType
-        deviceAndAppManagementAssignmentFilterType = 'none'
-      }
+      $includeTarget = New-AssignmentBaseTarget -ExcludeBaseTarget $ExcludeBaseTarget
       $assignments = @(
         @{
           '@odata.type' = '#microsoft.graph.mobileAppAssignment'
@@ -507,7 +601,7 @@ function New-AppAssignmentConfiguration {
     Write-Log ("Created {0} assignment(s) for '{1}' ({2}): intent={3}, mode={4}, target={5}, exclusionBase={6}, filter={7}, kind={8}, {9}" -f $assignments.Count, $AppName, $AppId, $Intent, $AssignmentMode, $TargetValue, $ExcludeBaseTarget, $FilterType, $AppKind, (Get-AssignmentSettingsSummary $Settings))
     try { Add-SessionActivity -Kind 'AssignmentsChanged' -Name $AppName -Detail ((Get-UiString 'ActivityAssignmentCreated') -f $Intent, $TargetValue) } catch { }
   } catch {
-    $out.ErrorMessage = $_.Exception.Message
+    $out.ErrorMessage = Get-AssignmentWriteErrorText -ErrorRecord $_
     Write-Log ("Creating assignment FAILED for '{0}' ({1}): {2}" -f $AppName, $AppId, $out.ErrorMessage)
   }
   return $out
@@ -528,6 +622,8 @@ function Remove-AppWithUnlinkFallback {
     [ValidateSet('VersionRemoved','SupersededRemoved')][string]$RecordAs = 'VersionRemoved'
   )
   try {
+    $null = Save-AppScopeSnapshot -AppId $GraphId -AppName $AppName -Version $Version `
+      -Reason (Get-UiString 'ScopeSnapshotReasonVersionCleanup')
     Invoke-WtRemoveWin32App -AppId $GraphId
     Add-SessionActivity -Kind $RecordAs -Name $AppName -FromVersion $Version
     return $true
@@ -547,3 +643,124 @@ function Remove-AppWithUnlinkFallback {
   }
 }
 
+# Intune's per-app "auto update" is NOT a property of the app. The module's -EnableAutoUpdate reaches
+# EnableAppAutoUpdateOnExistingAssignmentsAsync, so the flag is written onto the assignments the app
+# ALREADY has. Deploy an app without an assignment and the call still succeeds while changing nothing
+# at all - and the GUI used to log "Enabled Intune auto-update", which tells the admin something
+# about the tenant that is not true. Worse, this GUI deliberately deploys unassigned in some flows.
+#
+# Pure so the decision can be tested without Graph: given what the assignment probe found, what did
+# turning auto-update on actually achieve?
+function Get-AutoUpdateEffectVerdict {
+  param(
+    [Parameter(Mandatory)][bool]$ProbeSucceeded,
+    [Parameter(Mandatory)][bool]$HasAssignments
+  )
+  # A failed probe must not be reported as either success or failure - we simply do not know, and
+  # claiming certainty in a log is how 0.15.8 stayed invisible for two releases.
+  if (-not $ProbeSucceeded) { return 'unknown' }
+  if (-not $HasAssignments) { return 'noAssignments' }
+  return 'applied'
+}
+
+# Turns auto-update on and reports what it actually accomplished. Returns an object with
+# Verdict ('applied' | 'noAssignments' | 'unknown' | 'failed') and, when the caller should tell the
+# user something, Problem - shaped to slot into the existing $assignmentProblem chain.
+function Enable-AppAutoUpdateChecked {
+  param(
+    [Parameter(Mandatory)][string]$AppId,
+    [string]$AppName = ''
+  )
+  $label = if ($AppName) { $AppName } else { $AppId }
+  $probe = Get-AppAssignmentProbe -AppId $AppId -AppName $AppName
+  try {
+    Update-WtIntuneApp -AppId $AppId -EnableAutoUpdate -ErrorAction Stop | Out-Null
+  } catch {
+    $message = "Auto-update enable failed for ${label}: $($_.Exception.Message)"
+    Write-Log $message
+    return [pscustomobject]@{ Verdict = 'failed'; Problem = $message }
+  }
+
+  $verdict = Get-AutoUpdateEffectVerdict -ProbeSucceeded ([bool]$probe.Succeeded) -HasAssignments ([bool]$probe.HasAssignments)
+  switch ($verdict) {
+    'applied' {
+      Write-Log ("Enabled Intune auto-update for {0} (app {1}) on {2} existing assignment(s)." -f $label, $AppId, $probe.Count)
+      return [pscustomobject]@{ Verdict = $verdict; Problem = $null }
+    }
+    'noAssignments' {
+      $message = "Auto-update was requested for ${label}, but the app has no assignment yet. Intune stores this setting on the assignments, so nothing was changed - assign the app first, then enable auto-update."
+      Write-Log $message
+      return [pscustomobject]@{ Verdict = $verdict; Problem = $message }
+    }
+    default {
+      $message = "Auto-update was requested for ${label}, but its assignments could not be read, so it is unknown whether the setting took effect."
+      Write-Log $message
+      return [pscustomobject]@{ Verdict = 'unknown'; Problem = $message }
+    }
+  }
+}
+# ---------------------------------------------------------------------------------------------
+# Safety net: what was this app assigned to, before we deleted it?
+#
+# Once an app object is gone from Intune its assignments are gone with it. If a deletion turns out
+# to have been wrong - the version cleanup removed something that was still needed, an update
+# deleted a predecessor whose scope nobody had written down - there is no way back to "Google Chrome
+# was available for X and required for Y". This records exactly that, per session, before the
+# deletion happens, so the scope can be rebuilt by hand.
+#
+# Deliberately best-effort: a failed probe is recorded AS a failed probe and never blocks the
+# deletion the caller decided on. Its job is to remember, not to veto.
+# ---------------------------------------------------------------------------------------------
+$script:scopeSnapshots = [System.Collections.Generic.List[object]]::new()
+
+function Save-AppScopeSnapshot {
+  param(
+    [Parameter(Mandatory)][string]$AppId,
+    [string]$AppName = '',
+    [string]$Version = '',
+    [string]$Reason = ''
+  )
+  if (-not $script:settings.SaveScopeBeforeRemoval) { return $null }
+  if ($null -eq $script:scopeSnapshots) { return $null }
+  $probe = $null
+  try { $probe = Get-AppAssignmentScopeProbe -AppId $AppId -AppName $AppName } catch { $probe = $null }
+  $ok = [bool]($probe -and $probe.Succeeded)
+  $scopeText = if ($ok) {
+    if ([string]$probe.Signature -eq '<none>') { Get-UiString 'ScopeSnapshotNone' } else { [string]$probe.Summary }
+  } else {
+    Get-UiString 'ScopeSnapshotUnreadable'
+  }
+  $entry = [pscustomobject]@{
+    Time      = Get-Date
+    Tenant    = [string]$script:currentUserUpn
+    AppName   = [string]$AppName
+    Version   = [string]$Version
+    AppId     = [string]$AppId
+    Reason    = [string]$Reason
+    Succeeded = $ok
+    Scope     = [string]$scopeText
+  }
+  [void]$script:scopeSnapshots.Add($entry)
+  Write-Log ("Scope kept before removal | {0} {1} ({2}) | reason: {3} | scope: {4}" -f
+    $AppName, $Version, $AppId, $Reason, $scopeText)
+  return $entry
+}
+
+# Renders the session's snapshots for the viewer dialog. Newest first - the interesting one is
+# almost always the deletion that just happened.
+function Get-ScopeSnapshotText {
+  param([string]$Lang)
+  if ([string]::IsNullOrWhiteSpace($Lang)) { $Lang = $script:uiLanguage }
+  $all = @(if ($script:scopeSnapshots) { $script:scopeSnapshots } else { @() })
+  if ($all.Count -eq 0) { return (Get-UiString 'ScopeSnapshotEmpty') }
+  $lines = [System.Collections.Generic.List[string]]::new()
+  $lines.Add((Get-UiString 'ScopeSnapshotIntro'))
+  $lines.Add("")
+  foreach ($e in @($all | Sort-Object -Property Time -Descending)) {
+    $lines.Add(("[{0:HH:mm:ss}] {1} {2}" -f $e.Time, $e.AppName, $e.Version))
+    $lines.Add(("    {0}" -f $e.Scope))
+    $lines.Add(("    {0} | {1}" -f $e.Reason, $e.AppId))
+    $lines.Add("")
+  }
+  return (($lines -join "`r`n").TrimEnd())
+}

@@ -49,23 +49,150 @@ function Test-WindowsSandboxRunning {
   } catch { return $false }
 }
 
+# Why a Windows Sandbox will not start on THIS machine, asked before starting one.
+#
+# Measured on a real device: Virtualisation-Based Security running with Credential Guard active makes
+# Windows Sandbox fail at initialisation with "Zugriff verweigert (0x80070005)" - every time, for any
+# installer. Without this check the user picks a file, waits, and gets a Windows dialog that names an
+# error code but not a cause; the app knew nothing and could only guess in its own message afterwards.
+#
+# Win32_DeviceGuard is readable WITHOUT administrator rights, so the diagnosis costs nothing.
+#
+# Deliberately advisory, never a hard block: this is an environment fact, Microsoft changes the
+# interaction between these features between builds, and the same package works fine on a machine
+# without those policies. The user is told and decides.
+#
+# Returns @{ Blocked; Reason; Detail } - Detail is the raw state, so a log line is enough to settle
+# the question next time instead of measuring again.
+$script:sandboxBlockerCache = $null
+
+function Get-SandboxBlockerDiagnosis {
+  # Cached for the session: the state cannot change without a reboot, and the card asks on every
+  # click plus once at start-up.
+  param([switch]$Refresh)
+  if (-not $Refresh -and $null -ne $script:sandboxBlockerCache) { return $script:sandboxBlockerCache }
+  $out = @{ Blocked = $false; Reason = ''; Detail = '' }
+  try {
+    $dg = Get-CimInstance -ClassName Win32_DeviceGuard -Namespace 'root\Microsoft\Windows\DeviceGuard' -ErrorAction Stop
+    $vbs = [int]$dg.VirtualizationBasedSecurityStatus
+    $running = @(@($dg.SecurityServicesRunning) | ForEach-Object { [int]$_ })
+    # 1 = Credential Guard, 2 = HVCI / memory integrity. Named rather than left as numbers, because
+    # a bare "SecurityServicesRunning: 1,2" in a log means nothing to the next reader.
+    $names = @()
+    if ($running -contains 1) { $names += 'Credential Guard' }
+    if ($running -contains 2) { $names += 'HVCI / memory integrity' }
+    $out.Detail = ('VBS={0}, running=[{1}], codeIntegrityEnforcement={2}' -f
+      $vbs, ($names -join ', '), [int]$dg.CodeIntegrityPolicyEnforcementStatus)
+    if ($vbs -eq 2 -and ($running -contains 1)) {
+      $out.Blocked = $true
+      $out.Reason = 'CredentialGuard'
+    }
+  } catch {
+    # Not knowing is not a blocker. An unreadable WMI class must never stop a test that might work.
+    $out.Detail = ('device guard state could not be read: {0}' -f $_.Exception.Message)
+  }
+  $script:sandboxBlockerCache = $out
+  return $out
+}
+
+# Closes a running Windows Sandbox.
+#
+# There is no supported API for this and nothing to click in the GUI: the sandbox runs as
+# WindowsSandboxClient (the window) plus WindowsSandboxServer (the VM), and a leftover instance -
+# after a crash, a timeout, or a test that was never closed - blocks every further test with
+# "only one can run at a time". Sending people to Task Manager to hunt for a process name is not an
+# answer.
+#
+# Graceful first: CloseMainWindow on the client is the same thing as clicking its X. Only if that is
+# ignored are the processes killed. Nothing of value is lost either way - a sandbox discards its
+# whole state when it closes, by design.
+#
+# Returns @{ Stopped = <bool>; Killed = <bool> }. Killed matters to the caller: a sandbox that had to
+# be terminated leaves more for Windows to clean up than one that closed itself, and starting the next
+# one too early is answered with 0x80070005.
+function Stop-WindowsSandbox {
+  param([int]$TimeoutSeconds = 20)
+  $names = @('WindowsSandboxClient', 'WindowsSandbox', 'WindowsSandboxServer', 'WindowsSandboxRemoteSession')
+  Write-Log 'Closing the running Windows Sandbox on request.'
+
+  # 1) Ask the window to close.
+  foreach ($name in @('WindowsSandboxClient', 'WindowsSandbox')) {
+    foreach ($p in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
+      try { [void]$p.CloseMainWindow() } catch { }
+    }
+  }
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  while ($sw.Elapsed.TotalSeconds -lt ($TimeoutSeconds / 2)) {
+    if (-not (Test-WindowsSandboxRunning)) {
+      Write-Log 'Windows Sandbox closed on request.'
+      return @{ Stopped = $true; Killed = $false }
+    }
+    [System.Windows.Forms.Application]::DoEvents()
+    Start-Sleep -Milliseconds 300
+  }
+
+  # 2) Still there - end it. The VM keeps no state worth saving.
+  foreach ($name in $names) {
+    foreach ($p in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
+      try { $p.Kill() } catch { Write-Log ("Could not end {0} (PID {1}): {2}" -f $name, $p.Id, $_.Exception.Message) }
+    }
+  }
+  while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+    if (-not (Test-WindowsSandboxRunning)) {
+      Write-Log 'Windows Sandbox was ended.'
+      return @{ Stopped = $true; Killed = $true }
+    }
+    [System.Windows.Forms.Application]::DoEvents()
+    Start-Sleep -Milliseconds 300
+  }
+  Write-Log 'A Windows Sandbox process is still running after the attempt to close it.'
+  return @{ Stopped = $false; Killed = $true }
+}
+
+# Waits for Windows to actually release the sandbox container after one was stopped.
+#
+# "No process left" is not the same as "ready for the next one": the log of a real run showed a
+# sandbox ended at 11:53:00, the next started at 11:53:02, and Windows answered 0x80070005. The
+# processes were gone by then - the container was not. A terminated sandbox needs noticeably longer
+# than one that closed itself, because nothing got to tidy up on the way out.
+function Wait-WindowsSandboxSettled {
+  param([switch]$AfterKill)
+  $graceSeconds = if ($AfterKill) { 15 } else { 5 }
+  Write-Log ("Waiting {0}s for Windows to release the sandbox before starting the next one." -f $graceSeconds)
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  while ($sw.Elapsed.TotalSeconds -lt $graceSeconds) {
+    # A process reappearing here means something else started a sandbox meanwhile - stop waiting and
+    # let the caller's own guard deal with it rather than racing it.
+    if (Test-WindowsSandboxRunning) {
+      Write-Log 'A sandbox process appeared again while waiting; not starting another one.'
+      return $false
+    }
+    [System.Windows.Forms.Application]::DoEvents()
+    Start-Sleep -Milliseconds 250
+  }
+  return $true
+}
+
 # Runs the module's Test-WtSetupFile OUT OF PROCESS, with standard input redirected from an empty
 # file. Two module behaviours make a direct call unusable from a GUI:
-#   * it ends the run with a blocking "Press enter when you closed the sandbox" (a Console.ReadLine).
-#     On the UI thread that froze the whole window until the process was killed.
+#   * it ends the run with a blocking "Press enter when you closed the sandbox" (a Read-Host). On the
+#     UI thread that froze the whole window until the process was killed.
 #   * it writes progress from a background thread, which spams "WriteObject ... cannot be called from
 #     outside the overrides" into the host.
-# A child pwsh with closed stdin makes that ReadLine hit end-of-file immediately, so the module
-# launches the sandbox, cleans up and exits on its own; the sandbox window stays open for the user to
-# inspect. All of the module's noise stays inside the child. Returns
-# @{ Succeeded; ErrorMessage; AccessDenied; Output }.
+# A child pwsh with stdin redirected from an empty file makes that Read-Host read end-of-file and
+# return at once, so the module launches the sandbox, cleans up and exits on its own; the sandbox
+# window stays open for the user to inspect. All of the module's noise stays inside the child. The
+# child keeps interactive mode - under -NonInteractive that Read-Host throws instead of reading EOF.
+# Returns @{ Succeeded; ErrorMessage; AccessDenied; Output }.
 function Invoke-WtSandboxTest {
   param(
     [Parameter(Mandatory)][string]$SetupFile,
     [string]$InstallerArguments = '',
     [int]$TimeoutMinutes = 15
   )
-  $out = @{ Succeeded = $false; ErrorMessage = $null; AccessDenied = $false; Output = '' }
+  # SandboxStarted: did a sandbox process actually come up? It decides whether the wait below has
+  # anything to wait FOR, and the caller can tell "the VM ran" from "it never started".
+  $out = @{ Succeeded = $false; ErrorMessage = $null; AccessDenied = $false; Output = ''; SandboxStarted = $false }
   $pwshExe = $null
   try { $pwshExe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName } catch { }
   if (-not $pwshExe -or ($pwshExe -notmatch '(?i)pwsh')) {
@@ -74,16 +201,59 @@ function Invoke-WtSandboxTest {
   }
   if (-not $pwshExe) { $out.ErrorMessage = 'PowerShell 7 (pwsh) executable not found.'; return $out }
 
+  # Stage the installer in a clean folder under LocalAppData, and run the test from THERE. Windows
+  # Sandbox maps the folder that holds the installer into the guest; the Downloads/Desktop/Documents
+  # folders are usually covered by Controlled Folder Access, and mapping one of those is a common
+  # cause of "access denied (0x80070005)" at sandbox start. LocalAppData is not a protected folder,
+  # so the map succeeds. Old stage folders from previous runs are swept first.
+  $stageBase = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'WinTunerGUI\SandboxTest'
+  try {
+    if (Test-Path -LiteralPath $stageBase) {
+      foreach ($d in @(Get-ChildItem -LiteralPath $stageBase -Directory -ErrorAction SilentlyContinue)) {
+        if ($d.LastWriteTime -lt (Get-Date).AddDays(-1)) { try { Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction SilentlyContinue } catch { } }
+      }
+    }
+  } catch { }
+  $stageDir = Join-Path $stageBase ([guid]::NewGuid().ToString('N'))
+  $stagedSetup = $SetupFile
+  try {
+    [void][System.IO.Directory]::CreateDirectory($stageDir)
+    $dest = Join-Path $stageDir (Split-Path $SetupFile -Leaf)
+    Copy-Item -LiteralPath $SetupFile -Destination $dest -Force -ErrorAction Stop
+    $stagedSetup = $dest
+    Write-Log ("Sandbox: installer staged into a clean folder and handed over as '{0}'." -f $dest)
+  } catch {
+    # Fall back to the original location; the test may still work if that folder is mappable.
+    Write-Log ("Sandbox: could not stage the installer into a clean folder ({0}); using the original path." -f $_.Exception.Message)
+  }
+
   $work = Join-Path ([IO.Path]::GetTempPath()) ("wtgui-sbx-" + [guid]::NewGuid().ToString('N'))
-  New-Item -ItemType Directory -Path $work -Force -ErrorAction SilentlyContinue | Out-Null
-  $runner     = Join-Path $work 'run.ps1'
-  $stdinFile  = Join-Path $work 'in.txt'
-  $stdoutFile = Join-Path $work 'out.txt'
-  $stderrFile = Join-Path $work 'err.txt'
-  Set-Content -LiteralPath $stdinFile -Value '' -NoNewline -ErrorAction SilentlyContinue
+  try { [void][System.IO.Directory]::CreateDirectory($work) } catch { }
+  $runner = Join-Path $work 'run.ps1'
 
   # The runner reads the paths from environment variables the child inherits, so a setup path with
   # spaces or parentheses ("OnVUE-26.15.172 (1).exe") needs no command-line escaping.
+  #
+  # The child runs WITHOUT -NonInteractive on purpose: the module ends with a Read-Host ("Press enter
+  # when you closed the sandbox"), and under -NonInteractive that throws outright ("Read and Prompt
+  # not available").
+  #
+  # That Read-Host is NOT a nuisance to be silenced - it is what keeps the sandbox alive. The module
+  # writes the .wsb and its mapped folders into its own temp directory and deletes them as soon as
+  # the prompt returns, while WindowsSandbox.exe is only a launcher that returns immediately and
+  # leaves the VM still booting. Feeding the prompt an empty stdin (which is what 0.15.7 did to stop
+  # the GUI freezing) therefore pulled those folders away mid-boot, and the sandbox died with
+  # "Das System kann den angegebenen Pfad nicht finden. (0x80070003)".
+  #
+  # So stdin stays OPEN here and the newline is written only once the sandbox has actually closed.
+  # The window stays responsive because the wait loop pumps DoEvents, not because the prompt was
+  # short-circuited.
+  #
+  # Output is captured on the PROCESS level by the parent, not with a PowerShell redirection inside
+  # the runner. The module writes its "INFO: [WindowsSandbox] ..." lines straight to the console, not
+  # through a PowerShell stream, so "*> file" caught nothing and the log lost exactly the lines needed
+  # to tell why a sandbox refused to start. The parent reads both pipes ASYNCHRONOUSLY - reading them
+  # synchronously while also holding stdin open is a deadlock waiting to happen.
   $runnerBody = @'
 $ErrorActionPreference = "Stop"
 try {
@@ -92,24 +262,84 @@ try {
   $a = $env:WTGUI_SANDBOX_ARGS
   if ([string]::IsNullOrWhiteSpace($a)) { Test-WtSetupFile -SetupFile $s }
   else { Test-WtSetupFile -SetupFile $s -InstallerArguments $a }
+  exit 0
 } catch {
-  Write-Error $_.Exception.Message
+  $m = "$($_.Exception.Message)"
+  if ($m -match "(?i)Press enter" -or $m -match "(?i)NonInteractive" -or $m -match "(?i)Read and Prompt" -or $m -match "(?i)Cannot read keys" -or $m -match "(?i)console input") {
+    exit 0
+  }
+  Write-Error $m
   exit 1
 }
 '@
   Set-Content -LiteralPath $runner -Value $runnerBody -Encoding utf8 -ErrorAction Stop
 
-  $env:WTGUI_SANDBOX_SETUP = $SetupFile
-  $env:WTGUI_SANDBOX_ARGS  = $InstallerArguments
+  # Environment on the start info rather than on $env:, so two runs can never read each other's
+  # values and nothing has to be nulled out afterwards.
+  $psi = [System.Diagnostics.ProcessStartInfo]::new()
+  $psi.FileName = $pwshExe
+  foreach ($a in @('-NoProfile','-ExecutionPolicy','Bypass','-File', $runner)) { [void]$psi.ArgumentList.Add($a) }
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.RedirectStandardInput = $true
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+  $psi.EnvironmentVariables['WTGUI_SANDBOX_SETUP'] = [string]$stagedSetup
+  $psi.EnvironmentVariables['WTGUI_SANDBOX_ARGS']  = [string]$InstallerArguments
   $proc = $null
+  $stdoutTask = $null
+  $stderrTask = $null
   try {
-    $proc = Start-Process -FilePath $pwshExe `
-      -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File', $runner) `
-      -RedirectStandardInput $stdinFile -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile `
-      -WindowStyle Hidden -PassThru -ErrorAction Stop
+    $proc = [System.Diagnostics.Process]::new()
+    $proc.StartInfo = $psi
+    [void]$proc.Start()
+    # ReadToEndAsync, NOT an OutputDataReceived handler: a PowerShell scriptblock attached to that
+    # event is invoked on a threadpool thread, where there is no runspace, and the whole application
+    # dies with "There is no Runspace available to run scripts in this thread". Letting .NET do the
+    # reading keeps every line of PowerShell on the UI thread.
+    #
+    # Both pipes are drained continuously, so holding stdin open cannot deadlock on a full buffer.
+    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+    # Phase 1: wait for the sandbox to come up. If it never does, there is nothing to wait for and
+    # the prompt is released so the module can report whatever went wrong.
+    $sandboxSeen = $false
+    while (-not $proc.HasExited -and $sw.Elapsed.TotalSeconds -lt 120) {
+      if (Test-WindowsSandboxRunning) { $sandboxSeen = $true; break }
+      [System.Windows.Forms.Application]::DoEvents()
+      Start-Sleep -Milliseconds 200
+    }
+    if ($sandboxSeen) {
+      Write-Log 'Sandbox is up. Waiting for it to be closed before letting the module clean up its mapped folders.'
+      $out.SandboxStarted = $true
+    } else {
+      Write-Log 'No sandbox process appeared; releasing the module prompt so it can report the reason.'
+    }
+
+    # Phase 2: while it runs, keep waiting - and keep the window alive. The module must NOT clean up
+    # yet: its temp folder holds the .wsb and every mapped folder the running VM depends on.
+    while ($sandboxSeen -and -not $proc.HasExited) {
+      if (-not (Test-WindowsSandboxRunning)) {
+        Write-Log 'Sandbox was closed; releasing the module prompt so it can collect the results.'
+        break
+      }
+      [System.Windows.Forms.Application]::DoEvents()
+      Start-Sleep -Milliseconds 400
+      if ($sw.Elapsed.TotalMinutes -ge $TimeoutMinutes) { break }
+    }
+
+    # Release the Read-Host. Closing the stream is what actually ends it; the newline is for the case
+    # where the module reads a line rather than to end-of-file.
+    if (-not $proc.HasExited) {
+      try { $proc.StandardInput.WriteLine(''); $proc.StandardInput.Flush() } catch { }
+      try { $proc.StandardInput.Close() } catch { }
+    }
+
     while (-not $proc.HasExited) {
-      [System.Windows.Forms.Application]::DoEvents()   # keep the window alive while the child works
+      [System.Windows.Forms.Application]::DoEvents()
       Start-Sleep -Milliseconds 150
       if ($sw.Elapsed.TotalMinutes -ge $TimeoutMinutes) {
         try { $proc.Kill() } catch { }
@@ -117,27 +347,31 @@ try {
         break
       }
     }
-    $stdout = try { [IO.File]::ReadAllText($stdoutFile) } catch { '' }
-    $stderr = try { [IO.File]::ReadAllText($stderrFile) } catch { '' }
-    $out.Output = ("$stdout`n$stderr").Trim()
-    if ($out.Output -match '0x80070005' -or $out.Output -match '(?i)access denied' -or $out.Output -match '(?i)Zugriff verweigert') {
+    # The reader tasks complete when the child closes its pipes, which happens as it exits.
+    $stdout = ''
+    $stderr = ''
+    try { if ($stdoutTask) { [void]$stdoutTask.Wait(5000); if ($stdoutTask.IsCompletedSuccessfully) { $stdout = [string]$stdoutTask.Result } } } catch { }
+    try { if ($stderrTask) { [void]$stderrTask.Wait(5000); if ($stderrTask.IsCompletedSuccessfully) { $stderr = [string]$stderrTask.Result } } } catch { }
+    # Strip ANSI colour escapes so the log and the error box show plain text, not "[31;1m...".
+    $clean = (("$stdout`n$stderr") -replace '\x1b\[[0-9;]*[A-Za-z]', '').Trim()
+    $out.Output = $clean
+    if ($clean -match '0x80070005' -or $clean -match '(?i)access denied' -or $clean -match '(?i)Zugriff verweigert') {
       $out.AccessDenied = $true
     }
     if (-not $out.ErrorMessage) {
       if ($proc.ExitCode -eq 0) {
         $out.Succeeded = $true
       } else {
-        $firstErr = ($stderr -split "`r?`n" | Where-Object { $_ } | Select-Object -First 1)
-        $out.ErrorMessage = if ($firstErr) { $firstErr } else { "Sandbox helper exited with code $($proc.ExitCode)." }
+        $firstErr = (($stderr -replace '\x1b\[[0-9;]*[A-Za-z]', '') -split "`r?`n" | Where-Object { $_ -and $_.Trim() } | Select-Object -First 1)
+        $out.ErrorMessage = if ($firstErr) { $firstErr.Trim() } else { "Sandbox helper exited with code $($proc.ExitCode)." }
       }
     }
   } catch {
     $out.ErrorMessage = $_.Exception.Message
   } finally {
-    $env:WTGUI_SANDBOX_SETUP = $null
-    $env:WTGUI_SANDBOX_ARGS  = $null
-    # The child has finished and the sandbox already copied what it needed from its own temp folder,
-    # so nothing here needs to outlive the run.
+    try { if ($proc) { $proc.Dispose() } } catch { }
+    # Only the runner/redirect scratch is safe to delete now. The staged installer under $stageDir is
+    # left in place: the sandbox may still be reading it, so it is swept on a later run instead.
     try { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue } catch { }
   }
   return $out
@@ -190,7 +424,7 @@ function New-OwnIntuneWinPackage {
   }
   try {
     if (-not (Test-Path -LiteralPath $DestinationPath -PathType Container)) {
-      New-Item -ItemType Directory -Path $DestinationPath -Force -ErrorAction Stop | Out-Null
+      [void][System.IO.Directory]::CreateDirectory($DestinationPath)
     }
     Write-Log ("Packaging own installer: source '{0}', setup '{1}' -> '{2}'" -f $srcFull, (Split-Path $setupFull -Leaf), $DestinationPath)
 
@@ -278,7 +512,7 @@ $tabOwnPackage.Controls.Add($ownTitle)
 [void](Add-SectionInfoBadge -Parent $tabOwnPackage -AfterLabel $ownTitle -TextKey 'InfoOwnPackage')
 
 # --- Card 1: build an .intunewin from any folder ---
-$cardOwnBuild = New-Card -X 16 -Y 48 -W 726 -H 268
+$cardOwnBuild = New-Card -X 16 -Y 48 -W 726 -H 288
 $tabOwnPackage.Controls.Add($cardOwnBuild)
 
 $ownBuildLabel = New-Object System.Windows.Forms.Label
@@ -287,6 +521,10 @@ $ownBuildLabel.Location = New-Object System.Drawing.Point(14, 10)
 $ownBuildLabel.AutoSize = $true
 $ownBuildLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 $cardOwnBuild.Controls.Add($ownBuildLabel)
+# Die drei Schrittkarten waren die einzigen im Programm ganz ohne Info-Badge - deshalb musste der
+# Absatz darunter beides tragen: die Bedienung UND den Hintergrund. Jetzt: ein Satz inline, der
+# Rest hier.
+[void](Add-SectionInfoBadge -Parent $cardOwnBuild -AfterLabel $ownBuildLabel -TextKey 'InfoOwnStep1')
 
 $ownSourceLabel = New-Object System.Windows.Forms.Label
 $ownSourceLabel.Text = Get-UiString 'OwnPkgSourceLabel'
@@ -355,11 +593,15 @@ $ownBuildHint = New-Object System.Windows.Forms.Label
 $ownBuildHint.Tag = 'hint'
 $ownBuildHint.Text = Get-UiString 'OwnPkgHint'
 $ownBuildHint.Location = New-Object System.Drawing.Point(14, 204)
-$ownBuildHint.Size = New-Object System.Drawing.Size(698, 48)   # two wrapped lines; 32 px clipped the second
+# 68 px: the German text runs to three wrapped lines and 48 clipped the last one mid-sentence
+# ("...kann unten auch den Inhalt einer v").
+# Hoehe aus dem Text statt aus einer handgezaehlten Zahl - siehe Update-StackedCards.
+$ownBuildHint.AutoSize = $true
+$ownBuildHint.MaximumSize = New-Object System.Drawing.Size(698, 0)
 $cardOwnBuild.Controls.Add($ownBuildHint)
 
 # --- Card 2: replace the content of an existing Intune app ---
-$cardContentReplace = New-Card -X 16 -Y 1168 -W 726 -H 296
+$cardContentReplace = New-Card -X 16 -Y 1248 -W 726 -H 296
 $tabOwnPackage.Controls.Add($cardContentReplace)
 
 $replaceLabel = New-Object System.Windows.Forms.Label
@@ -418,7 +660,9 @@ $replaceHint = New-Object System.Windows.Forms.Label
 $replaceHint.Tag = 'hint'
 $replaceHint.Text = Get-UiString 'ContentReplaceHint'
 $replaceHint.Location = New-Object System.Drawing.Point(14, 166)
-$replaceHint.Size = New-Object System.Drawing.Size(698, 108)   # four wrapped lines; 62 px clipped the last
+# Hoehe aus dem Text statt aus einer handgezaehlten Zahl - siehe Update-StackedCards.
+$replaceHint.AutoSize = $true
+$replaceHint.MaximumSize = New-Object System.Drawing.Size(698, 0)
 $cardContentReplace.Controls.Add($replaceHint)
 
 $script:contentReplaceApps = @()
@@ -515,7 +759,11 @@ $ownBuildButton.Add_Click({
     if (-not $destText)   { Update-Status (Get-UiString 'OwnPkgDestMissing');   return }
 
     $ownBuildButton.Enabled = $false
+    # Said out loud before it happens: the packaging tool runs to completion without yielding, so the
+    # window stops repainting for as long as it takes - measured at over four minutes for a large
+    # installer. Without a word up front that looks like a hang, and people click again or kill it.
     Update-Status (Get-UiString 'OwnPkgBuildingStatus')
+    Write-Log ("Packaging '{0}' into '{1}' - this can take several minutes for a large installer, and the window will not repaint while it runs. This is expected; do not close it." -f (Split-Path $setupText -Leaf), $destText)
     [System.Windows.Forms.Application]::DoEvents()  # pumps the message loop; this work stays on the UI thread on purpose (see 70-Runtime)
     $result = New-OwnIntuneWinPackage -SourcePath $sourceText -SetupFile $setupText -DestinationPath $destText
     if ($result.ErrorMessage) {
@@ -550,7 +798,12 @@ $replaceLoadButton.Add_Click({
     Update-Status (Get-UiString 'ContentReplaceLoadingStatus')
     [System.Windows.Forms.Application]::DoEvents()  # pumps the message loop; this work stays on the UI thread on purpose (see 70-Runtime)
     # Only Win32 apps: a content version cannot be pushed into a Store or Office app.
-    $script:contentReplaceApps = @(Get-CachedWin32Apps | Sort-Object Name)
+    #
+    # Read straight from Graph, not through Get-CachedWin32Apps: the module's inventory only contains
+    # apps carrying its own '[WinTuner|' notes marker, so apps created by the card above this one
+    # were missing from this very list - and the user's only way out was to create a duplicate app,
+    # which is what this feature exists to avoid.
+    $script:contentReplaceApps = @(Get-TenantWin32Apps | Sort-Object Name)
     $replaceAppCombo.Items.Clear()
     foreach ($a in $script:contentReplaceApps) {
       [void]$replaceAppCombo.Items.Add(('{0}  ({1})' -f [string]$a.Name, [string]$a.CurrentVersion))
@@ -586,12 +839,10 @@ $replaceRunButton.Add_Click({
   $file = $replaceFileBox.Text.Trim()
   if (-not $file) { Update-Status (Get-UiString 'ContentReplaceNoFile'); return }
 
-  $confirm = [System.Windows.Forms.MessageBox]::Show(
-    ((Get-UiString 'ContentReplaceConfirm') -f $app.Name, $app.CurrentVersion, (Split-Path $file -Leaf)),
-    (Get-UiString 'ConfirmTitle'),
-    [System.Windows.Forms.MessageBoxButtons]::YesNo,
-    [System.Windows.Forms.MessageBoxIcon]::Warning)
-  if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+  if (-not (Confirm-ChangeAction `
+      -Text ((Get-UiString 'ContentReplaceConfirm') -f $app.Name, $app.CurrentVersion, (Split-Path $file -Leaf)) `
+      -Title (Get-UiString 'ConfirmTitle') `
+      -LogContext ("content replacement of '{0}'" -f $app.Name))) { return }
 
   try {
     $replaceRunButton.Enabled = $false
@@ -654,6 +905,35 @@ function Get-UninstallSnapshot {
   return $entries
 }
 
+# What changed between two snapshots. Split out of the compare button so it can be tested without a
+# machine to install on - the button is a UI handler, this is the actual answer.
+#
+# "New" alone is not enough: an application that is already installed is upgraded in place, its
+# uninstall key is rewritten rather than added, and the comparison then reports nothing on exactly
+# the machines people test on. Changed entries carry PreviousVersion so the result can say so.
+function Compare-UninstallSnapshot {
+  param(
+    [Parameter(Mandatory)][hashtable]$Before,
+    [Parameter(Mandatory)][hashtable]$After
+  )
+  $new = [System.Collections.Generic.List[object]]::new()
+  $changed = [System.Collections.Generic.List[object]]::new()
+  foreach ($k in $After.Keys) {
+    if (-not $Before.ContainsKey($k)) { $new.Add($After[$k]); continue }
+    # Only the version is compared. Display name and publisher can be rewritten by unrelated
+    # servicing without anything being installed; a changed version means an installer ran.
+    # Named $prev, not $before: PowerShell variable names are case-insensitive, so `$before = ...`
+    # would assign into the [hashtable]$Before parameter and fail the cast on the first entry.
+    $prev = $Before[$k]
+    if ($After[$k].DisplayVersion -and $prev.DisplayVersion -ne $After[$k].DisplayVersion) {
+      $entry = $After[$k].PSObject.Copy()
+      Add-Member -InputObject $entry -NotePropertyName 'PreviousVersion' -NotePropertyValue ([string]$prev.DisplayVersion)
+      $changed.Add($entry)
+    }
+  }
+  return [pscustomobject]@{ New = @($new); Changed = @($changed) }
+}
+
 # Turns the newly appeared entries into text that can be pasted into an Intune detection rule.
 # Holds what the last comparison (or MSI read) found, so "apply to the form" has something to work
 # with. Everything the detection step discovers used to end up as text to retype by hand.
@@ -708,12 +988,26 @@ function Get-MsiProperties {
   }
 }
 
+# Changed entries are listed after the new ones, never mixed in: an app that was already installed
+# updates its existing key in place instead of adding one, so a plain "what is new" comparison finds
+# nothing at all on exactly the machines people test on. Measured case: the Firefox installer ran for
+# 45 seconds, returned 0, and the key count stayed at 161 - because 'Mozilla Firefox' carries no
+# version in its key name. The entry is still a perfectly good detection rule, so it is offered,
+# just labelled for what it is.
 function Format-DetectionSuggestion {
-  param([Parameter(Mandatory)][AllowEmptyCollection()][array]$NewEntries)
-  if ($NewEntries.Count -eq 0) { return (Get-UiString 'DetectNoChange') }
+  param(
+    [Parameter(Mandatory)][AllowEmptyCollection()][array]$NewEntries,
+    [AllowEmptyCollection()][array]$ChangedEntries = @()
+  )
+  if ($NewEntries.Count -eq 0 -and $ChangedEntries.Count -eq 0) { return (Get-UiString 'DetectNoChange') }
   $lines = [System.Collections.Generic.List[string]]::new()
-  foreach ($e in $NewEntries) {
+  foreach ($e in (@($NewEntries) + @($ChangedEntries))) {
     $lines.Add('--- {0} ---' -f ([string]$e.DisplayName))
+    if ($null -ne $e.PreviousVersion) {
+      # Doubly parenthesised on purpose: inside a method call the comma would be read as an argument
+      # separator, so -f would receive only the first value and throw.
+      $lines.Add((((Get-UiString 'DetectUpdatedNote') -f ([string]$e.PreviousVersion), ([string]$e.DisplayVersion))))
+    }
     if ($e.Publisher)       { $lines.Add(('  {0}: {1}' -f (Get-UiString 'DetectPublisher'), $e.Publisher)) }
     if ($e.DisplayVersion)  { $lines.Add(('  {0}: {1}' -f (Get-UiString 'DetectVersion'), $e.DisplayVersion)) }
     if ($e.InstallLocation) { $lines.Add(('  {0}: {1}' -f (Get-UiString 'DetectInstallLocation'), $e.InstallLocation)) }
@@ -734,7 +1028,7 @@ function Format-DetectionSuggestion {
   return ($lines -join "`r`n")
 }
 
-$cardDetect = New-Card -X 16 -Y 328 -W 726 -H 370
+$cardDetect = New-Card -X 16 -Y 348 -W 726 -H 430
 $tabOwnPackage.Controls.Add($cardDetect)
 
 $detectLabel = New-Object System.Windows.Forms.Label
@@ -743,25 +1037,102 @@ $detectLabel.Location = New-Object System.Drawing.Point(14, 10)
 $detectLabel.AutoSize = $true
 $detectLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 $cardDetect.Controls.Add($detectLabel)
+[void](Add-SectionInfoBadge -Parent $cardDetect -AfterLabel $detectLabel -TextKey 'InfoOwnStep2')
+
+# One-click path for this whole card: primary (not 'btn-secondary') so it reads as the recommended
+# action, sitting at the top-right of the card. The handler further down orchestrates the manual
+# step buttons below. Placed on the title row - the shortened title ends near x=230, this starts at
+# x=430, so they never overlap.
+$detectAutoButton = New-Object System.Windows.Forms.Button
+$detectAutoButton.Text = Get-UiString 'DetectAutoButton'
+$detectAutoButton.Location = New-Object System.Drawing.Point(430, 6)
+$detectAutoButton.Size = New-Object System.Drawing.Size(282, 30)
+$cardDetect.Controls.Add($detectAutoButton)
+
+# Step 2 stands on its own: the installer can be picked HERE.
+#
+# Everything in this card works off the installer chosen in step 1 - and it never needed step 1 to
+# have BUILT anything, only to have a file selected. That was invisible: the card read as if
+# "Paket erstellen" had to run first, so users sat through a package build (Logi Tune: over four
+# minutes) purely to get to the detection rule.
+#
+# Note what this does NOT offer, on purpose: picking an .intunewin here. A detection rule can only
+# be found by installing the software, and an .intunewin is a packaged archive - it cannot be
+# installed. For an existing package the way in is step 3 ("Paketdatei wählen..."), which does take
+# an .intunewin.
+$detectSetupLabel = New-Object System.Windows.Forms.Label
+$detectSetupLabel.Text = Get-UiString 'DetectInstallerLabel'
+$detectSetupLabel.Location = New-Object System.Drawing.Point(14, 47)
+$detectSetupLabel.AutoSize = $true
+$cardDetect.Controls.Add($detectSetupLabel)
+
+$detectSetupBox = New-Object System.Windows.Forms.TextBox
+$detectSetupBox.ReadOnly = $true
+$detectSetupBox.Width = 336
+$detectSetupBox.PlaceholderText = Get-UiString 'DetectInstallerNone'
+$detectSetupHost = New-RoundedInput -Inner $detectSetupBox -X 200 -Y 40 -W 336 -H 32
+$cardDetect.Controls.Add($detectSetupHost)
+
+$detectSetupPickButton = New-Object System.Windows.Forms.Button
+$detectSetupPickButton.Tag = 'btn-secondary'
+$detectSetupPickButton.Text = Get-UiString 'DetectInstallerPickButton'
+$detectSetupPickButton.Location = New-Object System.Drawing.Point(546, 40)
+$detectSetupPickButton.Size = New-Object System.Drawing.Size(166, 32)
+$cardDetect.Controls.Add($detectSetupPickButton)
+
+# One source of truth: the installer path lives in step 1's box, this only mirrors it. Otherwise the
+# two cards could disagree about which file the detection ran against - and the rule would be
+# derived from one installer while the package contained another.
+function Update-DetectInstallerDisplay {
+  try {
+    $path = [string]$ownSetupBox.Text.Trim()
+    $detectSetupBox.Text = if ($path) { Split-Path $path -Leaf } else { '' }
+    try { $toolTip.SetToolTip($detectSetupBox, $path) } catch { Write-LogDebug 'detect installer tooltip' }
+  } catch { }   # class 3: a mirrored label must never break the card
+}
+
+$detectSetupPickButton.Add_Click({
+  $dlg = New-Object System.Windows.Forms.OpenFileDialog
+  $dlg.Filter = 'Installer (*.exe;*.msi)|*.exe;*.msi|All files (*.*)|*.*'
+  $current = [string]$ownSetupBox.Text.Trim()
+  if ($current) {
+    $dir = try { Split-Path -LiteralPath $current -Parent } catch { '' }
+    if ($dir -and (Test-Path -LiteralPath $dir -PathType Container)) { $dlg.InitialDirectory = $dir }
+  }
+  if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+  $ownSetupBox.Text = $dlg.FileName
+  # Deriving the source folder as well, exactly as step 1 does: the detection only needs the
+  # installer, but filling it in means step 1 is ready too if a package IS wanted afterwards.
+  try {
+    $parent = Split-Path -LiteralPath $dlg.FileName -Parent
+    if ($parent -and -not $ownSourceBox.Text.Trim()) { $ownSourceBox.Text = $parent }
+  } catch { }
+  Update-DetectInstallerDisplay
+  Update-Status ((Get-UiString 'DetectInstallerChosenStatus') -f (Split-Path $dlg.FileName -Leaf))
+})
+
+# Keeps the mirror honest when the file is picked in step 1 instead.
+$ownSetupBox.Add_TextChanged({ Update-DetectInstallerDisplay })
+Update-DetectInstallerDisplay
 
 $detectStep1Button = New-Object System.Windows.Forms.Button
 $detectStep1Button.Tag = 'btn-secondary'
 $detectStep1Button.Text = Get-UiString 'DetectSnapshotButton'
-$detectStep1Button.Location = New-Object System.Drawing.Point(14, 40)
+$detectStep1Button.Location = New-Object System.Drawing.Point(14, 80)
 $detectStep1Button.Size = New-Object System.Drawing.Size(220, 32)
 $cardDetect.Controls.Add($detectStep1Button)
 
 $detectStep2Button = New-Object System.Windows.Forms.Button
 $detectStep2Button.Tag = 'btn-secondary'
 $detectStep2Button.Text = Get-UiString 'DetectInstallButton'
-$detectStep2Button.Location = New-Object System.Drawing.Point(246, 40)
+$detectStep2Button.Location = New-Object System.Drawing.Point(246, 80)
 $detectStep2Button.Size = New-Object System.Drawing.Size(220, 32)
 $detectStep2Button.Enabled = $false
 $cardDetect.Controls.Add($detectStep2Button)
 
 $detectStep3Button = New-Object System.Windows.Forms.Button
 $detectStep3Button.Text = Get-UiString 'DetectCompareButton'
-$detectStep3Button.Location = New-Object System.Drawing.Point(478, 40)
+$detectStep3Button.Location = New-Object System.Drawing.Point(478, 80)
 $detectStep3Button.Size = New-Object System.Drawing.Size(234, 32)
 $detectStep3Button.Enabled = $false
 $cardDetect.Controls.Add($detectStep3Button)
@@ -769,27 +1140,27 @@ $cardDetect.Controls.Add($detectStep3Button)
 $detectMsiButton = New-Object System.Windows.Forms.Button
 $detectMsiButton.Tag = 'btn-secondary'
 $detectMsiButton.Text = Get-UiString 'DetectMsiButton'
-$detectMsiButton.Location = New-Object System.Drawing.Point(14, 80)
+$detectMsiButton.Location = New-Object System.Drawing.Point(14, 120)
 $detectMsiButton.Size = New-Object System.Drawing.Size(220, 32)
 $cardDetect.Controls.Add($detectMsiButton)
 
 $detectSandboxButton = New-Object System.Windows.Forms.Button
 $detectSandboxButton.Tag = 'btn-secondary'
 $detectSandboxButton.Text = Get-UiString 'DetectSandboxButton'
-$detectSandboxButton.Location = New-Object System.Drawing.Point(246, 80)
+$detectSandboxButton.Location = New-Object System.Drawing.Point(246, 120)
 $detectSandboxButton.Size = New-Object System.Drawing.Size(220, 32)
 $cardDetect.Controls.Add($detectSandboxButton)
 
 $detectArgsLabel = New-Object System.Windows.Forms.Label
 $detectArgsLabel.Text = Get-UiString 'DetectArgsLabel'
-$detectArgsLabel.Location = New-Object System.Drawing.Point(478, 87)
+$detectArgsLabel.Location = New-Object System.Drawing.Point(478, 127)
 $detectArgsLabel.AutoSize = $true
 $cardDetect.Controls.Add($detectArgsLabel)
 
 $detectArgsBox = New-Object System.Windows.Forms.TextBox
 $detectArgsBox.Width = 150
 $detectArgsBox.PlaceholderText = Get-UiString 'DetectArgsPlaceholder'
-$detectArgsHost = New-RoundedInput -Inner $detectArgsBox -X 562 -Y 80 -W 150 -H 32
+$detectArgsHost = New-RoundedInput -Inner $detectArgsBox -X 562 -Y 120 -W 150 -H 32
 $cardDetect.Controls.Add($detectArgsHost)
 
 $detectResultBox = New-Object System.Windows.Forms.TextBox
@@ -797,13 +1168,13 @@ $detectResultBox.Multiline = $true
 $detectResultBox.ReadOnly = $true
 $detectResultBox.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
 $detectResultBox.Font = New-Object System.Drawing.Font("Consolas", 9)
-$detectResultBox.Location = New-Object System.Drawing.Point(14, 122)
+$detectResultBox.Location = New-Object System.Drawing.Point(14, 162)
 $detectResultBox.Size = New-Object System.Drawing.Size(698, 150)
 $cardDetect.Controls.Add($detectResultBox)
 
 $detectApplyButton = New-Object System.Windows.Forms.Button
 $detectApplyButton.Text = Get-UiString 'DetectApplyButton'
-$detectApplyButton.Location = New-Object System.Drawing.Point(14, 280)
+$detectApplyButton.Location = New-Object System.Drawing.Point(14, 320)
 $detectApplyButton.Size = New-Object System.Drawing.Size(280, 32)
 $detectApplyButton.Enabled = $false
 $cardDetect.Controls.Add($detectApplyButton)
@@ -860,9 +1231,24 @@ $detectApplyButton.Add_Click({
 $detectHint = New-Object System.Windows.Forms.Label
 $detectHint.Tag = 'hint'
 $detectHint.Text = Get-UiString 'DetectHint'
-$detectHint.Location = New-Object System.Drawing.Point(14, 320)
-$detectHint.Size = New-Object System.Drawing.Size(698, 44)
+$detectHint.Location = New-Object System.Drawing.Point(14, 360)
+# 64 px: the German text needs four wrapped lines and 44 cut it off at
+# "...die .intunewin-Datei kann man nicht installieren".
+# Hoehe aus dem Text statt aus einer handgezaehlten Zahl - siehe Update-StackedCards.
+$detectHint.AutoSize = $true
+$detectHint.MaximumSize = New-Object System.Drawing.Size(698, 0)
 $cardDetect.Controls.Add($detectHint)
+
+# When the chosen installer changes, the previous detection result no longer belongs to it. Without
+# this, an MSI's product code stayed in the result box and the "apply to form" candidate stayed
+# armed after switching to an EXE, so the wrong data could be applied. Cleared here; the snapshot is
+# left alone because it describes the machine, not a specific installer. Added after the detection
+# controls exist; the handler itself runs later, when everything is loaded.
+$ownSetupBox.Add_TextChanged({
+  if ($detectResultBox) { $detectResultBox.Text = '' }
+  $script:detectionCandidate = $null
+  if ($detectApplyButton) { $detectApplyButton.Enabled = $false }
+})
 
 $detectStep1Button.Add_Click({
   try {
@@ -919,22 +1305,27 @@ $detectStep3Button.Add_Click({
   try {
     Update-Status (Get-UiString 'DetectCompareRunning')
     [System.Windows.Forms.Application]::DoEvents()  # pumps the message loop; this work stays on the UI thread on purpose (see 70-Runtime)
-    $after = Get-UninstallSnapshot
-    $new = [System.Collections.Generic.List[object]]::new()
-    foreach ($k in $after.Keys) {
-      if (-not $script:detectionSnapshot.ContainsKey($k)) { $new.Add($after[$k]) }
-    }
+    $diff = Compare-UninstallSnapshot -Before $script:detectionSnapshot -After (Get-UninstallSnapshot)
+    $new = $diff.New
+    $changed = $diff.Changed
     # Entries without a display name are components, not the application itself.
     $named = @($new | Where-Object { $_.DisplayName })
-    $detectResultBox.Text = Format-DetectionSuggestion -NewEntries $named
+    $namedChanged = @($changed | Where-Object { $_.DisplayName })
+    $detectResultBox.Text = Format-DetectionSuggestion -NewEntries $named -ChangedEntries $namedChanged
     # Keep the first named entry: with several, it is the one carrying the application's own name,
-    # the rest are usually runtimes pulled in alongside.
-    $script:detectionCandidate = if ($named.Count -gt 0) {
-      [pscustomobject]@{ Kind = 'Registry'; Entry = $named[0] }
+    # the rest are usually runtimes pulled in alongside. A genuinely new entry outranks an updated
+    # one - if the installer registered something new, that is the application.
+    $candidateEntry = if ($named.Count -gt 0) { $named[0] } elseif ($namedChanged.Count -gt 0) { $namedChanged[0] } else { $null }
+    $script:detectionCandidate = if ($candidateEntry) {
+      [pscustomobject]@{ Kind = 'Registry'; Entry = $candidateEntry }
     } else { $null }
     $detectApplyButton.Enabled = [bool]$script:detectionCandidate
-    Write-Log ("Detection comparison: {0} new uninstall entr(y/ies), {1} with a display name." -f $new.Count, $named.Count)
-    Update-Status ((Get-UiString 'DetectCompareDone') -f $named.Count)
+    Write-Log ("Detection comparison: {0} new uninstall entr(y/ies), {1} with a display name; {2} updated in place, {3} with a display name." -f $new.Count, $named.Count, $changed.Count, $namedChanged.Count)
+    if ($namedChanged.Count -gt 0) {
+      Update-Status ((Get-UiString 'DetectCompareDoneUpdated') -f $named.Count, $namedChanged.Count)
+    } else {
+      Update-Status ((Get-UiString 'DetectCompareDone') -f $named.Count)
+    }
   } catch {
     Write-Log ("Detection comparison failed: {0}" -f $_.Exception.Message)
     Update-Status ((Get-UiString 'DetectFailed') -f $_.Exception.Message)
@@ -982,6 +1373,47 @@ $detectMsiButton.Add_Click({
   } catch {
     Write-Log ("Reading MSI information failed: {0}" -f $_.Exception.Message)
     Update-Status ((Get-UiString 'DetectFailed') -f $_.Exception.Message)
+  }
+})
+
+# Auto mode: does the whole of step 2 in one click by driving the existing manual buttons, so the
+# logic lives in exactly one place. MSI is non-destructive (reads the file). EXE really installs on
+# THIS machine - the step-2 button keeps its own confirmation, which becomes the single gate of the
+# automatic run; declining it simply ends with "nothing detected". The result is applied to the
+# Win32 card with the same code as the manual "Apply to the form" button.
+$detectAutoButton.Add_Click({
+  $setup = $ownSetupBox.Text.Trim()
+  if (-not $setup -or -not (Test-Path -LiteralPath $setup -PathType Leaf)) {
+    Update-Status (Get-UiString 'OwnPkgSetupMissing'); return
+  }
+  $isMsi = ([IO.Path]::GetExtension($setup) -ieq '.msi')
+  try {
+    $detectAutoButton.Enabled = $false
+    if ($isMsi) {
+      Update-Status (Get-UiString 'DetectAutoMsiStatus')
+      [System.Windows.Forms.Application]::DoEvents()
+      $detectMsiButton.PerformClick()      # reads properties, sets $script:detectionCandidate
+    } else {
+      Update-Status (Get-UiString 'DetectAutoExeStatus')
+      [System.Windows.Forms.Application]::DoEvents()
+      $detectStep1Button.PerformClick()    # snapshot (also enables steps 2 and 3)
+      [System.Windows.Forms.Application]::DoEvents()
+      $detectStep2Button.PerformClick()    # install locally - asks the user to confirm once
+      [System.Windows.Forms.Application]::DoEvents()
+      $detectStep3Button.PerformClick()    # compare; sets or clears the candidate
+      [System.Windows.Forms.Application]::DoEvents()
+    }
+    if ($script:detectionCandidate -and $detectApplyButton.Enabled) {
+      $detectApplyButton.PerformClick()
+      Update-Status (Get-UiString 'DetectAutoDone')
+    } else {
+      Update-Status (Get-UiString 'DetectAutoNothing')
+    }
+  } catch {
+    Write-Log ("Automatic detection failed: {0}" -f (Format-ErrorDetail $_))
+    Update-Status ((Get-UiString 'DetectFailed') -f $_.Exception.Message)
+  } finally {
+    $detectAutoButton.Enabled = $true
   }
 })
 
@@ -1035,10 +1467,59 @@ $detectSandboxButton.Add_Click({
   # One sandbox at a time (see Test-WindowsSandboxRunning): starting a second is what caused the
   # "access denied" the user hit after the frozen UI made them click twice.
   if (Test-WindowsSandboxRunning) {
-    Write-Log 'A Windows Sandbox instance is already running; not starting a second one.'
-    $detectResultBox.Text = Get-UiString 'DetectSandboxAlreadyRunning'
-    Update-Status (Get-UiString 'DetectSandboxAlreadyRunning')
-    return
+    Write-Log 'A Windows Sandbox instance is already running.'
+    # Offer to close it instead of just refusing. The old message told the user to close a window they
+    # often cannot find - a leftover instance after a crash or a timeout has no visible window at all,
+    # only a WindowsSandboxServer process.
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+      (Get-UiString 'DetectSandboxCloseRunningDialog'),
+      (Get-UiString 'DetectSandboxCloseRunningTitle'),
+      [System.Windows.Forms.MessageBoxButtons]::YesNo,
+      [System.Windows.Forms.MessageBoxIcon]::Question)
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
+      $detectResultBox.Text = Get-UiString 'DetectSandboxAlreadyRunning'
+      Update-Status (Get-UiString 'DetectSandboxAlreadyRunning')
+      return
+    }
+    Update-Status (Get-UiString 'DetectSandboxClosingStatus')
+    [System.Windows.Forms.Application]::DoEvents()
+    $stopResult = Stop-WindowsSandbox
+    if (-not $stopResult.Stopped) {
+      $detectResultBox.Text = Get-UiString 'DetectSandboxCloseFailed'
+      Update-Status (Get-UiString 'DetectSandboxCloseFailed')
+      return
+    }
+    # Waiting properly, not for a token two seconds: starting straight after a kill is exactly what
+    # produced "Zugriff verweigert (0x80070005)".
+    Update-Status (Get-UiString 'DetectSandboxSettlingStatus')
+    if (-not (Wait-WindowsSandboxSettled -AfterKill:([bool]$stopResult.Killed))) {
+      $detectResultBox.Text = Get-UiString 'DetectSandboxAlreadyRunning'
+      Update-Status (Get-UiString 'DetectSandboxAlreadyRunning')
+      return
+    }
+  }
+  # Asked and logged BEFORE anything is started, so the log answers "why 0x80070005" by itself.
+  $blocker = Get-SandboxBlockerDiagnosis
+  Write-Log ("Sandbox prerequisites: {0}" -f $blocker.Detail)
+  if ($blocker.Blocked) {
+    # Three real options instead of a yes/no on a doomed start. Credential Guard is active on most
+    # managed devices, so for most users the sandbox is simply not available - and then the useful
+    # answer is the path that DOES work, which sits in this same card.
+    $choice = Show-SandboxBlockedDialog
+    if ($choice -eq 'local') {
+      Write-Log 'Sandbox unavailable (Credential Guard); switching to the local three-step detection instead.'
+      $detectResultBox.Text = Get-UiString 'DetectSandboxBlockedResult'
+      Update-Status (Get-UiString 'DetectSandboxUseLocalStatus')
+      # The local route installs on THIS machine and asks for its own confirmation before doing so.
+      $detectAutoButton.PerformClick()
+      return
+    }
+    if ($choice -ne 'sandbox') {
+      $detectResultBox.Text = Get-UiString 'DetectSandboxBlockedResult'
+      Update-Status (Get-UiString 'DetectSandboxBlockedStatus')
+      return
+    }
+    Write-Log 'Sandbox test started anyway on the user''s decision, despite Credential Guard being active.'
   }
   try {
     # Disabled while it runs so a slow start cannot be double-clicked into a second sandbox.
@@ -1046,6 +1527,8 @@ $detectSandboxButton.Add_Click({
     Update-Status (Get-UiString 'DetectSandboxRunning')
     [System.Windows.Forms.Application]::DoEvents()  # pumps the message loop; this work stays on the UI thread on purpose (see 70-Runtime)
     $arguments = $detectArgsBox.Text.Trim()
+    # The ORIGINAL path used to be logged here while the staged copy was what actually got handed
+    # over - which made a real diagnosis look like the Downloads folder was being mapped.
     Write-Log ("Testing setup file in Windows Sandbox (out of process): '{0}' {1}" -f $setup, $arguments)
     $sbx = Invoke-WtSandboxTest -SetupFile $setup -InstallerArguments $arguments
     if ($sbx.Output) { Write-Log ("Sandbox helper output: {0}" -f ($sbx.Output -replace '\s+', ' ')) }
@@ -1200,12 +1683,16 @@ function New-Win32AppViaGraph {
   $json = $body | ConvertTo-Json -Depth 10
   Write-Log ("Creating Win32 app over Graph: '{0}' ({1}), runAs {2}, detection {3}." -f $DisplayName, $Publisher, $RunAsAccount, $DetectionRule['@odata.type'])
   $created = Invoke-RestMethod -Method POST -Uri 'https://graph.microsoft.com/beta/deviceAppManagement/mobileApps' -Headers $headers -Body $json -ErrorAction Stop
-  Clear-Win32AppsCache   # a new app exists; a cached inventory would not contain it
+  # A new app exists, so any cached inventory is stale. Note that the module's inventory would not
+  # list THIS app at any point - it carries no '[WinTuner|' notes marker - which is why the
+  # content-replacement list reads the tenant directly (Get-TenantWin32Apps). Clearing the cache
+  # still matters for everything else that app count feeds.
+  Clear-Win32AppsCache
   Write-Log ("Win32 app created: {0}" -f [string]$created.id)
   return $created
 }
 
-$cardWin32 = New-Card -X 16 -Y 710 -W 726 -H 446
+$cardWin32 = New-Card -X 16 -Y 790 -W 726 -H 446
 $tabOwnPackage.Controls.Add($cardWin32)
 
 $win32Label = New-Object System.Windows.Forms.Label
@@ -1214,6 +1701,7 @@ $win32Label.Location = New-Object System.Drawing.Point(14, 10)
 $win32Label.AutoSize = $true
 $win32Label.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
 $cardWin32.Controls.Add($win32Label)
+[void](Add-SectionInfoBadge -Parent $cardWin32 -AfterLabel $win32Label -TextKey 'InfoOwnStep3')
 
 # --- identity ---
 $win32NameLabel = New-Object System.Windows.Forms.Label
@@ -1376,7 +1864,9 @@ $win32Hint = New-Object System.Windows.Forms.Label
 $win32Hint.Tag = 'hint'
 $win32Hint.Text = Get-UiString 'Win32Hint'
 $win32Hint.Location = New-Object System.Drawing.Point(14, 366)
-$win32Hint.Size = New-Object System.Drawing.Size(698, 68)
+# Hoehe aus dem Text statt aus einer handgezaehlten Zahl - siehe Update-StackedCards.
+$win32Hint.AutoSize = $true
+$win32Hint.MaximumSize = New-Object System.Drawing.Size(698, 0)
 $cardWin32.Controls.Add($win32Hint)
 
 # The three detection kinds need different inputs; relabelling three fields keeps the card compact
@@ -1494,4 +1984,11 @@ $win32CreateButton.Add_Click({
 })
 
 
-Add-Section -Key 'ownpackage' -Panel $tabOwnPackage -Label (Get-UiString 'TabOwnPackage')
+Add-Section -Key 'ownpackage' -Panel $tabOwnPackage -Label (Get-UiString 'TabOwnPackage') -Group 'deploy'
+
+# Die vier Karten dieser Sektion bekommen ihre Hoehe aus dem Inhalt (siehe Update-StackedCards).
+# Die Y- und H-Werte an den New-Card-Aufrufen sind damit nur noch Startwerte fuer den Aufbau.
+function Update-OwnPackageLayout {
+  if (-not $cardOwnBuild) { return }
+  Update-StackedCards -Panel $tabOwnPackage -Cards @($cardOwnBuild, $cardDetect, $cardWin32, $cardContentReplace)
+}

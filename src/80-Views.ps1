@@ -1,7 +1,7 @@
 ﻿# Stat tiles: big number + caption inside a rounded card. Numbers load on connect.
 function New-DashTile {
-  param([int]$X, [string]$Caption, [string]$Target)
-  $card = New-Card -X $X -Y 56 -W 170 -H 96
+  param([int]$X, [int]$Y = 56, [string]$Caption, [string]$Target)
+  $card = New-Card -X $X -Y $Y -W 170 -H 96
   $tabDashboard.Controls.Add($card)
   $num = New-Object System.Windows.Forms.Label
   $num.Text = [System.Char]::ConvertFromUtf32(0x2014)   # em dash placeholder
@@ -24,9 +24,27 @@ function New-DashTile {
   # tile click. The target is carried on the control's .Name and read back from the sender instead
   # (same proven pattern as the sidebar nav buttons). .Name is free; .Tag is taken by the themer.
   if ($Target) {
+    # Hover: die Kachel hebt sich leicht ab, solange der Zeiger darauf steht. Der Handcursor allein
+    # verraet die Klickbarkeit erst, wenn man schon darauf zeigt - und nie im Screenshot.
+    $enter = {
+      param($sender, $e)
+      try {
+        $tile = if ($sender -is [System.Windows.Forms.Panel]) { $sender } else { $sender.Parent }
+        if ($tile) { $tile.BackColor = Get-DimmedColor -Fore $script:currentTheme.ForeColor -Back (Get-CardBackColor $script:currentTheme) -Ratio 0.10 }
+      } catch { }
+    }
+    $leave = {
+      param($sender, $e)
+      try {
+        $tile = if ($sender -is [System.Windows.Forms.Panel]) { $sender } else { $sender.Parent }
+        if ($tile) { $tile.BackColor = Get-CardBackColor $script:currentTheme }
+      } catch { }
+    }
     foreach ($c in @($card, $num, $cap)) {
       $c.Cursor = [System.Windows.Forms.Cursors]::Hand
       $c.Name = "dashtile_$Target"
+      $c.Add_MouseEnter($enter)
+      $c.Add_MouseLeave($leave)
       $c.Add_Click({
         param($sender, $e)
         try { Show-Section ($sender.Name.Substring(9)) }   # strip "dashtile_"
@@ -36,12 +54,36 @@ function New-DashTile {
   }
   return $num
 }
-$script:dashManagedVal    = New-DashTile -X 16  -Caption (Get-UiString 'DashManaged')    -Target 'updates'
-$script:dashUpdatesVal    = New-DashTile -X 198 -Caption (Get-UiString 'DashUpdates')    -Target 'updates'
-$script:dashSupersededVal = New-DashTile -X 380 -Caption (Get-UiString 'DashSuperseded') -Target 'updates'
-# Fourth tile, and the only one that needs no tenant: the package folder grows quietly over months
-# and nothing ever pointed at it. Clicking lands in the settings, where the prune button lives.
-$script:dashPackagesVal = New-DashTile -X 562 -Caption (Get-UiString 'DashLocalPackages') -Target 'settings'
+# Zwei Gruppen, nicht eine Reihe aus vier gleichen Kacheln.
+#
+# Drei der Kacheln zaehlen im verbundenen Tenant, die vierte misst Speicherplatz auf DIESEM Rechner.
+# In derselben Reihe und derselben Form gelesen, sah das nach vier Zahlen derselben Art aus - und die
+# lokale Kachel war die einzige, die auch ohne Anmeldung schon einen Wert zeigte, direkt neben dem
+# Hinweis, man muesse sich erst verbinden. Die Beschriftung darueber trennt die zwei Welten, die
+# Einstellungsseite ordnet inzwischen nach derselben Grenze.
+$dashTenantGroupLabel = New-Object System.Windows.Forms.Label
+$dashTenantGroupLabel.Tag = 'hint'
+$dashTenantGroupLabel.Text = Get-UiString 'DashGroupTenant'
+$dashTenantGroupLabel.Location = New-Object System.Drawing.Point(18, 46)
+$dashTenantGroupLabel.AutoSize = $true
+$tabDashboard.Controls.Add($dashTenantGroupLabel)
+
+$dashLocalGroupLabel = New-Object System.Windows.Forms.Label
+$dashLocalGroupLabel.Tag = 'hint'
+$dashLocalGroupLabel.Text = Get-UiString 'DashGroupLocal'
+$dashLocalGroupLabel.Location = New-Object System.Drawing.Point(586, 46)
+$dashLocalGroupLabel.AutoSize = $true
+$tabDashboard.Controls.Add($dashLocalGroupLabel)
+
+$script:dashManagedVal    = New-DashTile -X 16  -Y 68 -Caption (Get-UiString 'DashManaged')    -Target 'updates'
+$script:dashUpdatesVal    = New-DashTile -X 198 -Y 68 -Caption (Get-UiString 'DashUpdates')    -Target 'updates'
+$script:dashSupersededVal = New-DashTile -X 380 -Y 68 -Caption (Get-UiString 'DashSuperseded') -Target 'updates'
+# Die Kachel wurde als "Apps, die ein Update brauchen" gelesen und stand direkt neben genau dieser
+# Kachel. Sie zaehlt ABGELOESTE Versionen - eine Zahl, die mit jedem Update waechst.
+# Die vierte Kachel braucht keinen Tenant: der Paketordner waechst ueber Monate still mit, und
+# nichts zeigte je darauf. Ein Klick landet in den Einstellungen, wo der Aufraeum-Knopf steht.
+# 24 px Abstand statt 12 - der Sprung ist die Grenze zwischen den beiden Gruppen.
+$script:dashPackagesVal = New-DashTile -X 574 -Y 68 -Caption (Get-UiString 'DashLocalPackages') -Target 'settings'
 
 # Size of the local package folder, formatted for the tile. Deliberately cheap to fail: an
 # unreadable or missing folder shows a dash rather than blocking the dashboard.
@@ -63,20 +105,42 @@ Update-LocalPackagesTile
 
 $dashHint = New-Object System.Windows.Forms.Label
 $dashHint.Text = Get-UiString 'DashConnectHint'
-$dashHint.Location = New-Object System.Drawing.Point(18, 160)
+$dashHint.Location = New-Object System.Drawing.Point(18, 172)
 $dashHint.AutoSize = $true
 $tabDashboard.Controls.Add($dashHint)
 
+# Der Stand gehoert neben die Zahlen, nicht ins Protokoll: die Kacheln werden nicht mehr bei jedem
+# Besuch neu geladen (das war das kurze Einfrieren), also muss die Oberflaeche sagen, WANN sie
+# gemessen wurden.
+#
+# Einen Knopf "Jetzt aktualisieren" gab es hier kurz; er ist auf Wunsch wieder weg. Neu geladen wird
+# ohnehin bei der Anmeldung und nach jedem Eingriff (siehe $script:dashboardStale) - der Knopf haette
+# nur die Zeile verbreitert, ohne eine Frage zu beantworten, die die Zeile nicht schon beantwortet.
+function Update-DashboardFreshness {
+  if (-not $dashHint) { return }
+  if (-not $script:isConnected) {
+    $dashHint.Text = Get-UiString 'DashConnectHint'
+    return
+  }
+  if ($script:dashboardLastRefresh -eq [datetime]::MinValue) {
+    $dashHint.Text = Get-UiString 'LoadingAppsStatus'
+  } else {
+    $local = $script:dashboardLastRefresh.ToLocalTime().ToString('HH:mm')
+    $key = if ($script:dashboardStale) { 'DashStaleHint' } else { 'DashAsOfLabel' }
+    $dashHint.Text = (Get-UiString $key) -f $local
+  }
+}
+
 $dashActionsLabel = New-Object System.Windows.Forms.Label
 $dashActionsLabel.Text = Get-UiString 'DashQuickActions'
-$dashActionsLabel.Location = New-Object System.Drawing.Point(16, 196)
+$dashActionsLabel.Location = New-Object System.Drawing.Point(16, 208)
 $dashActionsLabel.AutoSize = $true
 $dashActionsLabel.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
 $tabDashboard.Controls.Add($dashActionsLabel)
 
 $dashAddBtn = New-Object System.Windows.Forms.Button
 $dashAddBtn.Text = Get-UiString 'DashAddApp'
-$dashAddBtn.Location = New-Object System.Drawing.Point(16, 228)
+$dashAddBtn.Location = New-Object System.Drawing.Point(16, 240)
 $dashAddBtn.Size = New-Object System.Drawing.Size(224, 40)
 $dashAddBtn.Add_Click({ Show-Section 'winget' })
 $tabDashboard.Controls.Add($dashAddBtn)
@@ -84,7 +148,7 @@ $tabDashboard.Controls.Add($dashAddBtn)
 $dashUpdBtn = New-Object System.Windows.Forms.Button
 $dashUpdBtn.Tag = 'btn-secondary'
 $dashUpdBtn.Text = Get-UiString 'DashCheckUpdates'
-$dashUpdBtn.Location = New-Object System.Drawing.Point(256, 228)
+$dashUpdBtn.Location = New-Object System.Drawing.Point(256, 240)
 $dashUpdBtn.Size = New-Object System.Drawing.Size(224, 40)
 $dashUpdBtn.Add_Click({ Show-Section 'updates' })
 $tabDashboard.Controls.Add($dashUpdBtn)
@@ -92,7 +156,7 @@ $tabDashboard.Controls.Add($dashUpdBtn)
 $dashScanBtn = New-Object System.Windows.Forms.Button
 $dashScanBtn.Tag = 'btn-secondary'
 $dashScanBtn.Text = Get-UiString 'DashScanDiscovered'
-$dashScanBtn.Location = New-Object System.Drawing.Point(496, 228)
+$dashScanBtn.Location = New-Object System.Drawing.Point(496, 240)
 $dashScanBtn.Size = New-Object System.Drawing.Size(224, 40)
 $dashScanBtn.Add_Click({ Show-Section 'discovered' })
 $tabDashboard.Controls.Add($dashScanBtn)
@@ -103,11 +167,11 @@ $tabDashboard.Controls.Add($dashScanBtn)
 $dashFavBtn = New-Object System.Windows.Forms.Button
 $dashFavBtn.Tag = 'btn-secondary'
 $dashFavBtn.Text = Get-UiString 'DashCheckFavorites'
-$dashFavBtn.Location = New-Object System.Drawing.Point(16, 276)
+$dashFavBtn.Location = New-Object System.Drawing.Point(16, 288)
 $dashFavBtn.Size = New-Object System.Drawing.Size(224, 40)
 $dashFavBtn.Add_Click({
   # Switch first, so the run is visible where its results appear - the way the login auto-check does.
-  Show-Section 'winget'
+  Show-Section 'localpackages'
   [System.Windows.Forms.Application]::DoEvents()
   try { if ($favoriteRefreshButton -and $favoriteRefreshButton.Enabled) { $favoriteRefreshButton.PerformClick() } }
   catch { Write-Log ("Dashboard favourite check failed: {0}" -f $_.Exception.Message) }
@@ -117,10 +181,10 @@ $tabDashboard.Controls.Add($dashFavBtn)
 $dashLocalBtn = New-Object System.Windows.Forms.Button
 $dashLocalBtn.Tag = 'btn-secondary'
 $dashLocalBtn.Text = Get-UiString 'DashUpdateLocal'
-$dashLocalBtn.Location = New-Object System.Drawing.Point(256, 276)
+$dashLocalBtn.Location = New-Object System.Drawing.Point(256, 288)
 $dashLocalBtn.Size = New-Object System.Drawing.Size(224, 40)
 $dashLocalBtn.Add_Click({
-  Show-Section 'winget'
+  Show-Section 'localpackages'
   [System.Windows.Forms.Application]::DoEvents()
   try { if ($favoriteAllLocalButton -and $favoriteAllLocalButton.Enabled) { $favoriteAllLocalButton.PerformClick() } }
   catch { Write-Log ("Dashboard local update failed: {0}" -f $_.Exception.Message) }
@@ -130,17 +194,24 @@ $tabDashboard.Controls.Add($dashLocalBtn)
 $dashRecordBtn = New-Object System.Windows.Forms.Button
 $dashRecordBtn.Tag = 'btn-secondary'
 $dashRecordBtn.Text = Get-UiString 'DashShowRecord'
-$dashRecordBtn.Location = New-Object System.Drawing.Point(496, 276)
+$dashRecordBtn.Location = New-Object System.Drawing.Point(496, 288)
 $dashRecordBtn.Size = New-Object System.Drawing.Size(224, 40)
 $dashRecordBtn.Add_Click({
   try { Show-LeistungstextDialog } catch { Write-Log ("Dashboard record dialog failed: {0}" -f $_.Exception.Message) }
 })
 $tabDashboard.Controls.Add($dashRecordBtn)
 
-# Loads the tile numbers in the background (safe no-op when not connected).
+# Loads the tile numbers (safe no-op when not connected). Runs SYNCHRONOUSLY on the UI thread -
+# the comment inside says why a worker thread cannot do it. The cooldown is what keeps that from
+# being felt on every navigation.
 $script:dashboardLastRefresh = [datetime]::MinValue
 $script:dashboardRefreshing = $false
 $script:dashboardRefreshCooldownSeconds = 30
+# Gesetzt von allem, was die Kachelzahlen aendert (Update-Lauf, Versionsbereinigung, Loeschen einer
+# abgeloesten App, neue Bereitstellung). Der naechste Besuch des Dashboards laedt dann neu - ohne
+# diesen Merker zeigte es nach einem Lauf die Zahlen von vorher, und genau das war die Beschwerde
+# "8 veraltete Apps stimmt nicht mehr".
+$script:dashboardStale = $false
 
 function Refresh-Dashboard {
   param(
@@ -162,10 +233,10 @@ function Refresh-Dashboard {
     if ($age -lt $script:dashboardRefreshCooldownSeconds) { return }
   }
   $script:dashboardRefreshing = $true
-  # Fetch the counts synchronously on the UI thread. Running these through Invoke-AsyncOperation
-  # (a BackgroundWorker) fails silently because the Graph/WinTuner auth session lives only in the
-  # main runspace – a worker thread has no runspace/Graph context, so Get-WtWin32Apps returns
-  # nothing and the tiles stayed on "—". The managed-apps queries are quick enough to run inline.
+  # Die Kachel-Zahlen kommen aus Get-CachedWin32Apps, und die Inventar-Abfrage darunter laeuft
+  # inzwischen im Paket-Runspace (Get-Win32AppsOffThread) - das Fenster zeichnet also waehrend des
+  # Ladens. Der frueher hier stehende Satz, der Graph-Kontext lebe nur im Haupt-Runspace, war
+  # falsch: die GraphSession ist ein prozessweites Singleton (siehe die Notiz in 70-Runtime).
   try {
     Update-Status (Get-UiString 'LoadingAppsStatus')
     [System.Windows.Forms.Application]::DoEvents()
@@ -173,13 +244,70 @@ function Refresh-Dashboard {
     # per visit. -Force honours the explicit refresh after sign-in.
     $all = @(Get-CachedWin32Apps -Force:$Force)
     $sup = @(Get-CachedWin32Apps -Superseded -Force:$Force)
-    $upd = @(Get-WtWin32Apps -Update $true -Superseded $false -ErrorAction SilentlyContinue)
+    # "0 verwaltete Apps, aber 6 abgeloeste" ist unmoeglich - so stand es aber im Protokoll, nachdem
+    # die Modul-Abfrage in ihren Wettlauf gelaufen war. Die Kacheln haetten die 0 als Tatsache
+    # hingeschrieben. Also: einmal erzwungen nachlesen, und wenn der Widerspruch bleibt, KEINE Zahl
+    # behaupten, sondern es sagen.
+    # 0 verwaltete Apps neben abgeloesten Versionen ist auffaellig - aber nicht zwingend falsch:
+    # wurden die neuesten Versionen geloescht, bleiben die alten mit ihrer Ablöse-Markierung stehen.
+    # Belastbar geprueft wird das eine Stufe tiefer (Get-Win32AppsResilient liest bei einer leeren
+    # Antwort erneut und holt eine zweite Meinung direkt von Graph). Hier wird deshalb nur noch
+    # erklaert, statt die Kacheln zu verweigern.
+    if (Test-InventoryContradiction -ActiveCount $all.Count -SupersededCount $sup.Count) {
+      Write-Log ("Dashboard: 0 WinTuner-managed active app(s) next to {0} superseded one(s). Both answers were cross-checked against Graph. The usual cause is that the newest versions were deleted while their predecessors kept the supersedence mark; apps built by hand or by another tool never appear here at all." -f $sup.Count)
+    }
+    # Two ways to fill the "Updates available" tile, and they answer different questions.
+    #
+    # Full scan (opt-in): the real version comparison, the same verdict per app that the update scan
+    # reaches, via Measure-AvailableUpdates. Costs one package lookup per app, so it is a setting and
+    # not the default - but when it is on, the tile and the scan agree, which is the whole point.
+    #
+    # Otherwise: Intune's own UpdateAvailable flag. One query, instant, and honest about being
+    # Intune's opinion rather than a comparison. The tooltip says which of the two produced the number.
+    #
+    # Either way through the resilient wrapper: this used to be the last bare inventory call in the
+    # dashboard, so the module's "Collection was modified" race took the whole refresh down with it
+    # and produced "Laden der Apps aus Intune fehlgeschlagen" right after signing in.
+    $updateCount = 0
+    $tileTooltipKey = 'TtDashUpdatesFlag'
+    if ($all.Count -eq 0) {
+      # Ohne verwaltete App kann es kein Update geben - die dritte Tenant-Abfrage (und bei leerem
+      # Inventar ihre Gegenprobe) war beim Anmelden reine Wartezeit fuer eine garantierte Null.
+      $tileTooltipKey = if ($script:settings.DashboardUpdatesFullScan) { 'TtDashUpdatesScan' } else { 'TtDashUpdatesFlag' }
+      Write-Log 'Dashboard tile: no WinTuner-managed apps, so there is nothing that could have an update - skipping the update query.'
+    } elseif ($script:settings.DashboardUpdatesFullScan) {
+      Update-Status (Get-UiString 'DashUpdatesScanning')
+      [System.Windows.Forms.Application]::DoEvents()
+      $measured = Measure-AvailableUpdates -Apps $all
+      $updateCount = [int]$measured.Outdated
+      $tileTooltipKey = 'TtDashUpdatesScan'
+      Write-Log ("Dashboard tile (full scan): {0} outdated, {1} up to date, {2} newer version already in the tenant, {3} without a WinGet id, {4} lookup failed, of {5} checked." -f
+        $measured.Outdated, $measured.UpToDate, $measured.AlreadyNewerInTenant, $measured.NoWingetId, $measured.Failed, $measured.Checked)
+    } else {
+      $upd = @(Get-Win32AppsResilient -UpdateAvailable $true -Label 'dashboard tile (updates)')
+      $updateCount = $upd.Count
+      # Named, not just counted. "updates=1" while the update scan reports no candidates is a
+      # perfectly consistent pair of answers to two different questions - Intune flags an app whose
+      # newer version ALREADY sits in the tenant, the scan asks whether there is work left to do -
+      # but with only a number in the log there is no way to see which app it was, and the two
+      # figures look like a contradiction. This line ends that guessing.
+      if ($updateCount -gt 0) {
+        foreach ($u in $upd) {
+          Write-Log ("  Intune flags an update for: {0} {1} ({2})" -f [string]$u.Name, [string]$u.CurrentVersion, [string]$u.GraphId)
+        }
+        Write-Log 'Note: the update scan may still report no candidates - a newer version that is already deployed needs no work. Switch on the full version comparison in Settings (Searching for app updates) to make the tile answer the same question as the scan.'
+      }
+    }
+    try { if ($toolTip -and $script:dashUpdatesVal) { $toolTip.SetToolTip($script:dashUpdatesVal, (Get-UiString $tileTooltipKey)) } } catch { Write-LogDebug 'dashboard tile tooltip' }
     if ($script:dashManagedVal)    { $script:dashManagedVal.Text    = "$($all.Count)" }
-    if ($script:dashUpdatesVal)    { $script:dashUpdatesVal.Text    = "$($upd.Count)" }
+    if ($script:dashUpdatesVal)    { $script:dashUpdatesVal.Text    = "$updateCount" }
     if ($script:dashSupersededVal) { $script:dashSupersededVal.Text = "$($sup.Count)" }
-    Write-Log ("Dashboard refreshed: managed={0} updates={1} superseded={2}" -f $all.Count, $upd.Count, $sup.Count)
+    Write-Log ("Dashboard refreshed: managed={0} updates={1} superseded={2} (updates from {3})" -f $all.Count, $updateCount, $sup.Count,
+      $(if ($script:settings.DashboardUpdatesFullScan) { 'full version scan' } else { "Intune's UpdateAvailable flag" }))
     Update-Status (Get-UiString 'DashLoadedStatus')
     $script:dashboardLastRefresh = [datetime]::UtcNow
+    $script:dashboardStale = $false
+    try { Update-DashboardFreshness } catch { Write-LogDebug 'dashboard freshness' }
   } catch {
     Write-Log ("Dashboard refresh failed: {0}" -f $_.Exception.Message)
     Update-Status (Get-UiString 'LoadAppsFailedStatus')
@@ -190,7 +318,7 @@ function Refresh-Dashboard {
 
 # Section: WinGet Apps
 $tabCreate = New-Object System.Windows.Forms.Panel
-Add-Section -Key 'winget' -Panel $tabCreate -Label (Get-UiString 'TabWinGetApps')
+Add-Section -Key 'winget' -Panel $tabCreate -Label (Get-UiString 'TabWinGetApps') -Group 'deploy'
 
 # Section title
 $wingetTitle = New-Object System.Windows.Forms.Label
@@ -202,7 +330,8 @@ $tabCreate.Controls.Add($wingetTitle)
 [void](Add-SectionInfoBadge -Parent $tabCreate -AfterLabel $wingetTitle -TextKey 'InfoWinget')
 
 # --- Card 1: Find package ---
-$cardFind = New-Card -X 16 -Y 48 -W 726 -H 118
+# 162 statt 118: die Zeile mit "Auf diesem PC installieren..." kam dazu.
+$cardFind = New-Card -X 16 -Y 48 -W 726 -H 162
 $tabCreate.Controls.Add($cardFind)
 
 $step1Label = New-Object System.Windows.Forms.Label
@@ -246,6 +375,74 @@ $dropdown.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
 $dropdown.Location = New-Object System.Drawing.Point(14, 84)
 $cardFind.Controls.Add($dropdown)
 
+# Links und abgesetzt: die beiden Knoepfe rechts betreffen nur die AUSWAHL, dieser installiert
+# Software auf dem Rechner, an dem man gerade sitzt.
+$localInstallButton = New-Object System.Windows.Forms.Button
+$localInstallButton.Tag = 'btn-secondary'
+$localInstallButton.Text = Get-UiString 'LocalInstallButton'
+$localInstallButton.Location = New-Object System.Drawing.Point(14, 116)
+$localInstallButton.Width = 210
+$localInstallButton.Height = 32
+$cardFind.Controls.Add($localInstallButton)
+
+$localInstallButton.Add_Click({
+  if (Test-UiBusy) { return }
+  if (-not $dropdown.SelectedItem) { Update-Status (Get-UiString 'SelectPackageFirstStatus'); return }
+  $package = $script:packageMap[[string]$dropdown.SelectedItem]
+  $packageId = if ($package) { [string]$package.PackageID } else { '' }
+  if ([string]::IsNullOrWhiteSpace($packageId)) { Update-Status (Get-UiString 'InvalidSelectionStatus'); return }
+
+  # winget kommt mit dem App-Installer und fehlt auf frisch aufgesetzten oder abgespeckten
+  # Systemen. Das vorher zu pruefen ist ehrlicher als eine Fehlermeldung aus einem Prozess, den es
+  # nicht gibt.
+  $wingetCmd = $null
+  try { $wingetCmd = (Get-Command winget.exe -ErrorAction SilentlyContinue).Source } catch { }
+  if (-not $wingetCmd) {
+    Write-Log 'Local install: winget.exe was not found on this machine.'
+    [void][System.Windows.Forms.MessageBox]::Show(
+      (Get-UiString 'LocalInstallNoWinget'), (Get-UiString 'InfoTitle'),
+      [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+    return
+  }
+
+  $confirm = [System.Windows.Forms.MessageBox]::Show(
+    ((Get-UiString 'LocalInstallConfirm') -f $packageId, $env:COMPUTERNAME),
+    (Get-UiString 'ConfirmTitle'),
+    [System.Windows.Forms.MessageBoxButtons]::YesNo,
+    [System.Windows.Forms.MessageBoxIcon]::Warning,
+    [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
+  if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+
+  try {
+    $localInstallButton.Enabled = $false
+    Update-Status ((Get-UiString 'LocalInstallRunning') -f $packageId)
+    [System.Windows.Forms.Application]::DoEvents()   # pumps the message loop; see 70-Runtime
+    # --exact: der Bezeichner steht fest, winget soll nicht auf einen aehnlichen Namen ausweichen.
+    # Die beiden Zustimmungen sind noetig, weil winget sonst auf eine Eingabe wartet, die in einem
+    # Fenster ohne Konsole niemand geben kann - der Aufruf haenge sonst bis zum Zeitueberlauf.
+    $wingetArgs = @('install', '--id', $packageId, '--exact', '--source', 'winget',
+                    '--accept-package-agreements', '--accept-source-agreements')
+    Write-Log ("Local install on this machine: winget {0}" -f ($wingetArgs -join ' '))
+    $proc = Start-Process -FilePath $wingetCmd -ArgumentList $wingetArgs -Wait -PassThru -ErrorAction Stop
+    $code = [int]$proc.ExitCode
+    Write-Log ("Local install of '{0}' finished with winget exit code {1}." -f $packageId, $code)
+    if ($code -eq 0) {
+      Update-Status ((Get-UiString 'LocalInstallDone') -f $packageId)
+    } elseif ($code -eq -1978335189) {
+      # APPINSTALLER_CLI_ERROR_UPDATE_NOT_APPLICABLE: schon installiert und aktuell. Kein Fehler,
+      # sondern die haeufigste Antwort, wenn man ein Paket zweimal anklickt.
+      Update-Status ((Get-UiString 'LocalInstallNoChange') -f $packageId)
+    } else {
+      Update-Status ((Get-UiString 'LocalInstallFailed') -f $packageId, $code)
+    }
+  } catch {
+    Write-Log ("Local install of '{0}' failed: {1}" -f $packageId, $_.Exception.Message)
+    Update-Status ((Get-UiString 'LocalInstallFailed') -f $packageId, $_.Exception.Message)
+  } finally {
+    $localInstallButton.Enabled = $true
+  }
+})
+
 $favoriteAddButton = New-Object System.Windows.Forms.Button
 $favoriteAddButton.Tag = 'btn-secondary'
 $favoriteAddButton.Text = Get-UiString 'FavoriteAddButton'
@@ -274,7 +471,7 @@ $selectedVersionLabel.AutoEllipsis = $true
 $cardFind.Controls.Add($selectedVersionLabel)
 
 # --- Card 2: Package & deploy ---
-$cardDeploy = New-Card -X 16 -Y 178 -W 726 -H 214
+$cardDeploy = New-Card -X 16 -Y 222 -W 726 -H 214
 $tabCreate.Controls.Add($cardDeploy)
 
 $step2Label = New-Object System.Windows.Forms.Label
@@ -337,15 +534,17 @@ $assignFavButton = New-Object System.Windows.Forms.Button
 $assignFavButton.Tag = 'btn-secondary'
 $assignFavButton.Text = Get-UiString 'FavAddButton'
 $assignFavButton.Location = New-Object System.Drawing.Point(558, 82)
-$assignFavButton.Size = New-Object System.Drawing.Size(32, 32)
-$assignFavButton.Visible = $false
+$assignFavButton.Size = New-Object System.Drawing.Size(96, 32)
+# IMMER sichtbar. Der Knopf war nur eingeblendet, wenn "Bestimmte Gruppe" gewaehlt war - damit war
+# die einzige Stelle, an der man Gruppen-Favoriten eines Kunden pflegt, praktisch unfindbar (genau
+# so gemeldet). Er oeffnet die Verwaltung auch dann, wenn gerade keine Gruppen-ID im Feld steht.
+$assignFavButton.Visible = $true
 $assignFavButton.Add_Click({ Show-GroupFavoriteDialog -GroupIdBox $assignGroupIdBox })
 $cardDeploy.Controls.Add($assignFavButton)
 
 $assignTargetCombo.Add_SelectedIndexChanged({
   $isCustom = ($assignTargetCombo.SelectedItem -eq (Get-UiString 'AssignCustomGroup'))
   $assignGroupIdHost.Visible = $isCustom
-  $assignFavButton.Visible = $isCustom
 })
 Register-AssignTargetCombo -TargetCombo $assignTargetCombo
 
@@ -541,7 +740,7 @@ $deployExcludeBaseLabel.Text = Get-UiString 'DeployExcludeBaseLabel'
 $deployExcludeBaseLabel.Location = New-Object System.Drawing.Point(14, 480)
 $deployExcludeBaseLabel.AutoSize = $true
 $deployExcludeBaseLabel.Visible = $false
-$deployExcludeBaseLabel.Enabled = $false
+Set-LabelDimmed -Label $deployExcludeBaseLabel -Dimmed $true
 $cardDeploy.Controls.Add($deployExcludeBaseLabel)
 $script:deployExcludeBaseCombo = New-Object System.Windows.Forms.ComboBox
 $script:deployExcludeBaseCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
@@ -554,7 +753,7 @@ $script:deployExcludeBaseCombo.Enabled = $false
 $cardDeploy.Controls.Add($script:deployExcludeBaseCombo)
 $script:deployGroupModeCombo.Add_SelectedIndexChanged({
   $isExcluded = ($script:deployGroupModeCombo.SelectedIndex -eq 1)
-  $deployExcludeBaseLabel.Enabled = $isExcluded
+  Set-LabelDimmed -Label $deployExcludeBaseLabel -Dimmed (-not $isExcluded)
   $script:deployExcludeBaseCombo.Enabled = $isExcluded
 })
 
@@ -692,7 +891,7 @@ $deployRestartGraceLabel.Text = Get-UiString 'AppSettingsRestartGrace'
 $deployRestartGraceLabel.Location = New-Object System.Drawing.Point(32, 762)
 $deployRestartGraceLabel.AutoSize = $true
 $deployRestartGraceLabel.Visible = $false
-$deployRestartGraceLabel.Enabled = $false
+Set-LabelDimmed -Label $deployRestartGraceLabel -Dimmed $true
 $cardDeploy.Controls.Add($deployRestartGraceLabel)
 $script:deployRestartGraceValue = New-Object System.Windows.Forms.NumericUpDown
 $script:deployRestartGraceValue.Location = New-Object System.Drawing.Point(240, 759)
@@ -709,7 +908,7 @@ $deployRestartCountdownLabel.Text = Get-UiString 'AppSettingsRestartCountdown'
 $deployRestartCountdownLabel.Location = New-Object System.Drawing.Point(32, 794)
 $deployRestartCountdownLabel.AutoSize = $true
 $deployRestartCountdownLabel.Visible = $false
-$deployRestartCountdownLabel.Enabled = $false
+Set-LabelDimmed -Label $deployRestartCountdownLabel -Dimmed $true
 $cardDeploy.Controls.Add($deployRestartCountdownLabel)
 $script:deployRestartCountdownValue = New-Object System.Windows.Forms.NumericUpDown
 $script:deployRestartCountdownValue.Location = New-Object System.Drawing.Point(240, 791)
@@ -734,7 +933,7 @@ $deployRestartSnoozeLabel.Text = Get-UiString 'AppSettingsRestartSnoozeMinutes'
 $deployRestartSnoozeLabel.Location = New-Object System.Drawing.Point(380, 794)
 $deployRestartSnoozeLabel.AutoSize = $true
 $deployRestartSnoozeLabel.Visible = $false
-$deployRestartSnoozeLabel.Enabled = $false
+Set-LabelDimmed -Label $deployRestartSnoozeLabel -Dimmed $true
 $cardDeploy.Controls.Add($deployRestartSnoozeLabel)
 $script:deployRestartSnoozeValue = New-Object System.Windows.Forms.NumericUpDown
 $script:deployRestartSnoozeValue.Location = New-Object System.Drawing.Point(570, 791)
@@ -747,9 +946,12 @@ $script:deployRestartSnoozeValue.Enabled = $false
 $cardDeploy.Controls.Add($script:deployRestartSnoozeValue)
 $script:deployRestartEnableCheck.Add_CheckedChanged({
   $enabled = [bool]$script:deployRestartEnableCheck.Checked
-  $deployRestartGraceLabel.Enabled = $enabled; $script:deployRestartGraceValue.Enabled = $enabled
-  $deployRestartCountdownLabel.Enabled = $enabled; $script:deployRestartCountdownValue.Enabled = $enabled
-  $script:deployRestartSnoozeCheck.Enabled = $enabled; $deployRestartSnoozeLabel.Enabled = $enabled
+  Set-LabelDimmed -Label $deployRestartGraceLabel -Dimmed (-not $enabled)
+  Set-LabelDimmed -Label $deployRestartCountdownLabel -Dimmed (-not $enabled)
+  Set-LabelDimmed -Label $deployRestartSnoozeLabel -Dimmed (-not $enabled)
+  $script:deployRestartGraceValue.Enabled = $enabled
+  $script:deployRestartCountdownValue.Enabled = $enabled
+  $script:deployRestartSnoozeCheck.Enabled = $enabled
   $script:deployRestartSnoozeValue.Enabled = ($enabled -and $script:deployRestartSnoozeCheck.Checked)
 })
 $script:deployRestartSnoozeCheck.Add_CheckedChanged({
@@ -772,20 +974,37 @@ $script:deployDeliveryCombo.Visible = $false
 $cardDeploy.Controls.Add($script:deployDeliveryCombo)
 
 # Builds the settings object from the deploy card, or $null when the user changed nothing.
-function Get-DeployAssignmentSettings {
+# Liest einen Satz Zuweisungs-Steuerelemente in ein Settings-Objekt.
+#
+# Beide Bereitstellungswege - WinGet und Microsoft Store - benutzen dieselben Regeln; nur der Umfang
+# unterscheidet sich. Die Steuerelemente werden als Hashtable uebergeben, fehlende Schluessel sind
+# schlicht "gibt es in dieser Variante nicht".
+#
+# Wirft bei einer unzulaessigen Neustart-Kombination, so wie es die beiden Vorgaenger taten: ein
+# Countdown oder ein Aufschub laenger als die Kulanzzeit ergibt in Intune eine Frist, die vor ihrer
+# eigenen Ankuendigung ablaeuft.
+function Read-AssignmentSettingsControls {
+  param([Parameter(Mandatory)][hashtable]$Controls)
+
   $a = @{}
-  switch ($script:deployNotifyCombo.SelectedIndex) {
-    1 { $a.Notifications = 'showAll' }
-    2 { $a.Notifications = 'showReboot' }
-    3 { $a.Notifications = 'hideAll' }
+  if ($Controls.NotifyCombo) {
+    switch ($Controls.NotifyCombo.SelectedIndex) {
+      1 { $a.Notifications = 'showAll' }
+      2 { $a.Notifications = 'showReboot' }
+      3 { $a.Notifications = 'hideAll' }
+    }
   }
-  if ($script:deployAvailCheck.Checked)    { $a.AvailableFrom = $script:deployAvailPicker.Value }
-  if ($script:deployDeadlineCheck.Checked) { $a.Deadline      = $script:deployDeadlinePicker.Value }
-  $a.UseLocalTime = [bool]$script:deployLocalTimeCheck.Checked
-  if ($script:deployRestartEnableCheck.Checked) {
-    $grace = [int]$script:deployRestartGraceValue.Value
-    $countdown = [int]$script:deployRestartCountdownValue.Value
-    $snooze = if ($script:deployRestartSnoozeCheck.Checked) { [int]$script:deployRestartSnoozeValue.Value } else { 0 }
+  if ($Controls.AvailCheck -and $Controls.AvailCheck.Checked -and $Controls.AvailPicker) {
+    $a.AvailableFrom = $Controls.AvailPicker.Value
+  }
+  if ($Controls.DeadlineCheck -and $Controls.DeadlineCheck.Checked -and $Controls.DeadlinePicker) {
+    $a.Deadline = $Controls.DeadlinePicker.Value
+  }
+  if ($Controls.LocalTimeCheck) { $a.UseLocalTime = [bool]$Controls.LocalTimeCheck.Checked }
+  if ($Controls.RestartEnableCheck -and $Controls.RestartEnableCheck.Checked) {
+    $grace = [int]$Controls.RestartGraceValue.Value
+    $countdown = [int]$Controls.RestartCountdownValue.Value
+    $snooze = if ($Controls.RestartSnoozeCheck -and $Controls.RestartSnoozeCheck.Checked) { [int]$Controls.RestartSnoozeValue.Value } else { 0 }
     if ($countdown -gt $grace -or $snooze -gt $grace) { throw (Get-UiString 'AppSettingsRestartInvalid') }
     $a.RestartGraceMinutes = $grace
     $a.RestartCountdownMinutes = $countdown
@@ -793,12 +1012,34 @@ function Get-DeployAssignmentSettings {
   }
   # Background/normal is Intune's default and is represented by omitting the property. This also
   # keeps new-app assignments compatible with national clouds where DO priority is unsupported.
-  if ($script:deployDeliveryCombo.SelectedIndex -eq 1) { $a.DeliveryOptimizationPriority = 'foreground' }
-  # The existing "Enable Intune auto-update" checkbox already covers auto-update for new apps via
-  # Update-WtIntuneApp, so it is not duplicated here.
+  if ($Controls.DeliveryCombo -and $Controls.DeliveryCombo.SelectedIndex -eq 1) {
+    $a.DeliveryOptimizationPriority = 'foreground'
+  }
   $s = New-AssignmentSettingsObject @a
+  # "Nichts zu aendern" heisst: gar nichts schicken. Ein leeres Settings-Objekt wuerde in Intune die
+  # bestehenden Werte ueberschreiben, statt sie in Ruhe zu lassen.
   if ((Get-AssignmentSettingsSummary $s) -eq '(nothing to change)') { return $null }
   return $s
+}
+
+# Der WinGet-Weg: voller Umfang.
+# Die vorhandene "Intune-Auto-Update"-Checkbox deckt das Auto-Update neuer Apps ueber
+# Update-WtIntuneApp bereits ab, deshalb steht es hier nicht noch einmal.
+function Get-DeployAssignmentSettings {
+  return (Read-AssignmentSettingsControls -Controls @{
+    NotifyCombo            = $script:deployNotifyCombo
+    AvailCheck             = $script:deployAvailCheck
+    AvailPicker            = $script:deployAvailPicker
+    DeadlineCheck          = $script:deployDeadlineCheck
+    DeadlinePicker         = $script:deployDeadlinePicker
+    LocalTimeCheck         = $script:deployLocalTimeCheck
+    RestartEnableCheck     = $script:deployRestartEnableCheck
+    RestartGraceValue      = $script:deployRestartGraceValue
+    RestartCountdownValue  = $script:deployRestartCountdownValue
+    RestartSnoozeCheck     = $script:deployRestartSnoozeCheck
+    RestartSnoozeValue     = $script:deployRestartSnoozeValue
+    DeliveryCombo          = $script:deployDeliveryCombo
+  })
 }
 
 function Get-DeployAssignmentTargetChanges {
@@ -849,7 +1090,47 @@ $advToggle.Add_Click({
 # titled "Package and deploy" and users could not tell that setting a target there was what governed
 # the Store deployment. The assignment controls below belong to this section alone.
 $tabStore = New-Object System.Windows.Forms.Panel
-Add-Section -Key 'store' -Panel $tabStore -Label (Get-UiString 'TabStore')
+Add-Section -Key 'store' -Panel $tabStore -Label (Get-UiString 'TabStore') -Group 'deploy'
+
+# Die Liste der bereitgestellten Store-Apps stand auf festen 126 px - vier Zeilen, egal wie gross
+# das Fenster war. Sie bekommt jetzt, was zwischen ihrer Karte und der Zuweisungskarte darunter
+# uebrig ist.
+function Update-StoreLayout {
+  try {
+    if (-not $tabStore -or -not $cardStore -or -not $storeTenantListView) { return }
+    $avail = $tabStore.ClientSize.Height
+    if ($avail -lt 200) { return }
+    $topY = 48; $gap = 12; $bottomPad = 6
+    # Unter der Liste steht der Knopf "Zuweisungen dieser App verwalten...".
+    $btnGap = 8; $btnH = 32
+    # Erst die Zuweisungskarte anordnen (sie bestimmt ihre eigene Hoehe aus dem Inhalt), dann den
+    # Rest darauf ausrichten.
+    if (Get-Command Update-StoreAssignLayout -ErrorAction SilentlyContinue) { Update-StoreAssignLayout }
+    $assignH = if ($cardStoreAssign) { $cardStoreAssign.Height } else { 180 }
+    # 170 ueber der Liste (Suchzeile, Knoepfe, Hinweis), Knopf + Rand darunter.
+    $storeH = $avail - $topY - $gap - $assignH - $bottomPad
+    $minStoreH = 170 + 80 + $btnGap + $btnH + 16
+    if ($storeH -lt $minStoreH) { $storeH = $minStoreH }
+    # + Scrollversatz: sonst wandert die Karte bei jeder Neuanordnung im gescrollten Zustand nach
+    # unten (siehe Get-ScrollOffsetY).
+    $cardStore.Top = $topY + (Get-ScrollOffsetY $tabStore)
+    $cardStore.Height = $storeH
+    $inner = [Math]::Max(698, $cardStore.ClientSize.Width - 28)
+    $storeTenantListView.Size = New-Object System.Drawing.Size($inner, ($storeH - 170 - 16 - $btnGap - $btnH))
+    if ($storeManageAssignmentsButton) {
+      $storeManageAssignmentsButton.Location = New-Object System.Drawing.Point($storeTenantListView.Left, ($storeTenantListView.Bottom + $btnGap))
+    }
+    $listInner = $inner - [System.Windows.Forms.SystemInformation]::VerticalScrollBarWidth - 2
+    $extra = $listInner - 670
+    if ($extra -gt 0 -and $storeTenantListView.Columns.Count -ge 4) {
+      $storeTenantListView.Columns[0].Width = 230 + [int]($extra * 0.40)
+      $storeTenantListView.Columns[1].Width = 210 + [int]($extra * 0.30)
+      $storeTenantListView.Columns[2].Width = 95  + [int]($extra * 0.12)
+      $storeTenantListView.Columns[3].Width = 135 + [int]($extra * 0.18)
+    }
+    if ($cardStoreAssign) { $cardStoreAssign.Top = $cardStore.Bottom + $gap }
+  } catch { Write-LogDebug 'store layout' }
+}
 $tabStore.AutoScroll = $true
 
 $storeSectionTitle = New-Object System.Windows.Forms.Label
@@ -864,7 +1145,8 @@ $tabStore.Controls.Add($storeSectionTitle)
 # Only the options a Store app actually honours. Availability date, delivery optimisation and Intune
 # auto-update are deliberately absent: the deploy path already reported them as unsupported, so
 # offering them here would only invite settings that silently do nothing.
-$cardStoreAssign = New-Card -X 16 -Y 48 -W 726 -H 180
+# Y=366: unter der App-Karte. Diese Karte stand oben und musste ihre Lage im Text erklaeren.
+$cardStoreAssign = New-Card -X 16 -Y 366 -W 726 -H 180
 $tabStore.Controls.Add($cardStoreAssign)
 
 $storeAssignTitle = New-Object System.Windows.Forms.Label
@@ -904,15 +1186,14 @@ $storeAssignFavButton = New-Object System.Windows.Forms.Button
 $storeAssignFavButton.Tag = 'btn-secondary'
 $storeAssignFavButton.Text = Get-UiString 'FavAddButton'
 $storeAssignFavButton.Location = New-Object System.Drawing.Point(656, 62)
-$storeAssignFavButton.Size = New-Object System.Drawing.Size(32, 32)
-$storeAssignFavButton.Visible = $false
+$storeAssignFavButton.Size = New-Object System.Drawing.Size(96, 32)
+$storeAssignFavButton.Visible = $true
 $storeAssignFavButton.Add_Click({ Show-GroupFavoriteDialog -GroupIdBox $script:storeAssignGroupIdBox })
 $cardStoreAssign.Controls.Add($storeAssignFavButton)
 
 $script:storeAssignTargetCombo.Add_SelectedIndexChanged({
   $isCustom = ($script:storeAssignTargetCombo.SelectedItem -eq (Get-UiString 'AssignCustomGroup'))
   $storeAssignGroupIdHost.Visible = $isCustom
-  $storeAssignFavButton.Visible = $isCustom
 })
 Register-AssignTargetCombo -TargetCombo $script:storeAssignTargetCombo
 
@@ -1118,16 +1399,119 @@ $script:storeAdvExpanded = $false
 $storeAdvToggle.Add_Click({
   $script:storeAdvExpanded = -not $script:storeAdvExpanded
   foreach ($c in $script:storeAdvControls) { $c.Visible = $script:storeAdvExpanded }
-  $cardStoreAssign.Height = if ($script:storeAdvExpanded) { 664 } else { 180 }
+  # Die Hoehe kommt aus dem Inhalt (Update-StoreAssignLayout), nicht aus zwei Konstanten.
   $chev = if ($script:storeAdvExpanded) { [System.Char]::ConvertFromUtf32(0x25B4) } else { [System.Char]::ConvertFromUtf32(0x25BE) }
   $storeAdvToggle.Text = (Get-UiString 'StoreAdvancedOptions') + "  " + $chev
-  # Keep the deployment card directly below the (now taller/shorter) assignment card.
-  if ($cardStore) { $cardStore.Top = $cardStoreAssign.Bottom + 12 }
+  # Hier stand: "$cardStore.Top = $cardStoreAssign.Bottom + 12". Das war richtig, solange die
+  # Zuweisungskarte OBEN stand - seit sie unter die App-Karte gewandert ist, schob diese Zeile die
+  # App-Karte unter die Zuweisungskarte und die beiden tauschten beim Aufklappen die Plaetze.
+  #
+  # Die Anordnung gehoert an EINE Stelle, und die heisst Update-StoreLayout. Der Aufklapper aendert
+  # nur noch die Hoehe seiner eigenen Karte und laesst neu anordnen.
+  if (Get-Command Update-StoreLayout -ErrorAction SilentlyContinue) { Update-StoreLayout }
 })
+
+
+# --- Anordnung der Zuweisungskarte: gemessen, und ab genuegend Breite zweispaltig ---------------
+#
+# Die erweiterten Optionen standen als eine lange Spalte untereinander: Beschriftungen bei x=14,
+# Bedienelemente bei x=240, dazwischen Kaestchen, die aus der Reihe fielen, und ein Datumsfeld, das
+# ganz rechts klebte. Das las sich wie eine Liste ohne Ordnung, obwohl es drei Themen sind:
+# WER (Gruppenmodus, Ausschlussbasis, Filter), WIE (Benachrichtigung, Stichtag) und NEUSTART.
+#
+# Diese Funktion ordnet die Karte in genau diesen Bloecken an - mit gemessener Beschriftungsspalte,
+# damit kein Text unter einem Bedienelement verschwindet, und ab genuegend Breite in zwei Spalten,
+# weil die Karte breit ist und die Liste sonst unnoetig tief wird.
+function Update-StoreAssignLayout {
+  if (-not $cardStoreAssign) { return }
+  try {
+    $m = 14
+    $gap = 6
+    $contentW = [Math]::Max(400, $cardStoreAssign.ClientSize.Width - (2 * $m))
+
+    # Kopf: Titel, Hinweis, Ziel, Intent, Aufklapper - immer sichtbar, immer einspaltig.
+    $storeAssignTitle.Left = $m
+    $storeAssignCardHint.Left = $m
+    $storeAssignCardHint.Width = $contentW
+    $storeAssignCardHint.Top = $storeAssignTitle.Bottom + 6
+    $headRows = @(
+      @{ Cells = @(@{ L = $storeAssignTargetLabel; C = $script:storeAssignTargetCombo; W = 250 },
+                   @{ L = $null; C = $storeAssignGroupIdHost; W = 250 },
+                   @{ L = $null; C = $storeAssignFavButton; W = 96 }) }
+      @{ Cells = @(@{ L = $storeAssignIntentLabel; C = $script:storeAssignIntentCombo; W = 250 }) }
+    )
+    $y = $storeAssignCardHint.Bottom + 8
+    $y = Set-AppSettingsRowBlock -Rows $headRows -X $m -Y $y -Width $contentW -Gap $gap
+    $storeAdvToggle.Left = $m
+    $storeAdvToggle.Top = $y + 2
+    $y = $storeAdvToggle.Bottom + 10
+
+    if (-not $script:storeAdvExpanded) {
+      $cardStoreAssign.Height = $y + 8
+      return
+    }
+
+    # WER bekommt die App - und WIE sie geliefert wird.
+    $rowsWho = @(
+      @{ Cells = @(@{ L = $storeGroupModeLabel;   C = $script:storeGroupModeCombo;   W = 250 }) }
+      @{ Cells = @(@{ L = $storeExcludeBaseLabel; C = $script:storeExcludeBaseCombo; W = 250 }) }
+      @{ Cells = @(@{ L = $storeFilterModeLabel;  C = $script:storeFilterModeCombo;  W = 250 }) }
+      @{ Cells = @(@{ L = $storeFilterIdLabel;    C = $storeFilterIdHost;            W = 250 }) }
+      @{ Cells = @(@{ L = $storeCategoriesLabel;  C = $storeCategoriesHost;          W = 250 }) }
+    )
+    $rowsHow = @(
+      @{ Cells = @(@{ L = $storeNotifyLabel; C = $script:storeNotifyCombo; W = 250 }) }
+      @{ FullWidth = $true; Cells = @(@{ L = $null; C = $script:storeDeadlineCheck; W = (Get-ControlTextWidth $script:storeDeadlineCheck) + 24 },
+                   @{ L = $null; C = $script:storeDeadlinePicker; W = 190 }) }
+      @{ FullWidth = $true; Cells = @(@{ L = $null; C = $script:storeLocalTimeCheck; W = (Get-ControlTextWidth $script:storeLocalTimeCheck) + 24 }) }
+      @{ FullWidth = $true; Cells = @(@{ L = $null; C = $script:storeRestartEnableCheck; W = (Get-ControlTextWidth $script:storeRestartEnableCheck) + 24 }) }
+      @{ Indent = 20; Cells = @(@{ L = $storeRestartGraceLabel;     C = $script:storeRestartGraceValue;     W = 110 }) }
+      @{ Indent = 20; Cells = @(@{ L = $storeRestartCountdownLabel; C = $script:storeRestartCountdownValue; W = 110 }) }
+      @{ Indent = 20; FullWidth = $true; Cells = @(@{ L = $null; C = $script:storeRestartSnoozeCheck; W = (Get-ControlTextWidth $script:storeRestartSnoozeCheck) + 24 },
+                                @{ L = $null; C = $script:storeRestartSnoozeValue; W = 110 }) }
+    )
+
+    # Zweispaltig, sobald beide Spalten wirklich hineinpassen - gemessen an den Beschriftungen
+    # dieser Sprache, nicht an einer Pixelschwelle.
+    $needWho = (Get-AppSettingsLabelColumn -Rows $rowsWho -Width $contentW) + 250
+    $needHow = (Get-AppSettingsLabelColumn -Rows $rowsHow -Width $contentW) + 250 + 24 + 190
+    $twoColumns = ($contentW -ge ($needWho + $needHow + 24))
+    if ($twoColumns) {
+      $colGap = 24
+      $leftW = [int](($contentW - $colGap) * 0.46)
+      $rightW = $contentW - $colGap - $leftW
+      $endLeft  = Set-AppSettingsRowBlock -Rows $rowsWho -X $m -Y $y -Width $leftW -Gap $gap
+      $endRight = Set-AppSettingsRowBlock -Rows $rowsHow -X ($m + $leftW + $colGap) -Y $y -Width $rightW -Gap $gap
+      $y = [Math]::Max($endLeft, $endRight)
+    } else {
+      $sharedLabel = [Math]::Max((Get-AppSettingsLabelColumn -Rows $rowsWho -Width $contentW),
+                                 (Get-AppSettingsLabelColumn -Rows $rowsHow -Width $contentW))
+      $y = Set-AppSettingsRowBlock -Rows $rowsWho -X $m -Y $y -Width $contentW -Gap $gap -LabelWidth $sharedLabel
+      $y = Set-AppSettingsRowBlock -Rows $rowsHow -X $m -Y $y -Width $contentW -Gap $gap -LabelWidth $sharedLabel
+    }
+
+    # Der Hinweis auf die NICHT unterstuetzten Einstellungen steht am Ende, ueber die volle Breite.
+    if ($storeNotifyDefaultHint) {
+      $storeNotifyDefaultHint.Left = $m
+      $storeNotifyDefaultHint.Top = $y + 2
+      $storeNotifyDefaultHint.Width = $contentW
+      $storeNotifyDefaultHint.Height = Get-ControlTextHeight $storeNotifyDefaultHint $contentW
+      $y = $storeNotifyDefaultHint.Bottom + 4
+    }
+    if ($storeUnsupportedNote) {
+      $storeUnsupportedNote.Left = $m
+      $storeUnsupportedNote.Top = $y + 2
+      $storeUnsupportedNote.Width = $contentW
+      $storeUnsupportedNote.Height = Get-ControlTextHeight $storeUnsupportedNote $contentW
+      $y = $storeUnsupportedNote.Bottom
+    }
+    $cardStoreAssign.Height = $y + 12
+  } catch { Write-LogDebug 'store assign layout' }
+}
 
 # --- Card B: Microsoft Store app (deployed directly, no packaging) ---
 # Includes a tenant inventory so duplicate Store package IDs are visible before deployment.
-$cardStore = New-Card -X 16 -Y 240 -W 726 -H 310
+$cardStore = New-Card -X 16 -Y 48 -W 726 -H 310
 $tabStore.Controls.Add($cardStore)
 
 $storeTitle = New-Object System.Windows.Forms.Label
@@ -1193,27 +1577,21 @@ $cardStore.Controls.Add($storeHintLabel)
 # Builds the assignment settings object from THIS section's controls, or $null when nothing was
 # changed. Deliberately narrower than Get-DeployAssignmentSettings: no availability date and no
 # delivery optimisation, because Microsoft Store apps do not honour either.
+# Der Store-Weg ist BEWUSST schmaler: kein Verfuegbarkeitsdatum und keine Zustellprioritaet - der
+# Store-Pfad des Moduls traegt sie nicht. Vorher war dieser Unterschied nur daran zu erkennen, dass
+# in der Kopie zwei Zeilen fehlten; jetzt steht er als fehlender Schluessel da.
 function Get-StoreAssignmentSettings {
-  $a = @{}
-  switch ($script:storeNotifyCombo.SelectedIndex) {
-    1 { $a.Notifications = 'showAll' }
-    2 { $a.Notifications = 'showReboot' }
-    3 { $a.Notifications = 'hideAll' }
-  }
-  if ($script:storeDeadlineCheck.Checked) { $a.Deadline = $script:storeDeadlinePicker.Value }
-  $a.UseLocalTime = [bool]$script:storeLocalTimeCheck.Checked
-  if ($script:storeRestartEnableCheck.Checked) {
-    $grace = [int]$script:storeRestartGraceValue.Value
-    $countdown = [int]$script:storeRestartCountdownValue.Value
-    $snooze = if ($script:storeRestartSnoozeCheck.Checked) { [int]$script:storeRestartSnoozeValue.Value } else { 0 }
-    if ($countdown -gt $grace -or $snooze -gt $grace) { throw (Get-UiString 'AppSettingsRestartInvalid') }
-    $a.RestartGraceMinutes = $grace
-    $a.RestartCountdownMinutes = $countdown
-    $a.RestartSnoozeMinutes = $snooze
-  }
-  $s = New-AssignmentSettingsObject @a
-  if ((Get-AssignmentSettingsSummary $s) -eq '(nothing to change)') { return $null }
-  return $s
+  return (Read-AssignmentSettingsControls -Controls @{
+    NotifyCombo            = $script:storeNotifyCombo
+    DeadlineCheck          = $script:storeDeadlineCheck
+    DeadlinePicker         = $script:storeDeadlinePicker
+    LocalTimeCheck         = $script:storeLocalTimeCheck
+    RestartEnableCheck     = $script:storeRestartEnableCheck
+    RestartGraceValue      = $script:storeRestartGraceValue
+    RestartCountdownValue  = $script:storeRestartCountdownValue
+    RestartSnoozeCheck     = $script:storeRestartSnoozeCheck
+    RestartSnoozeValue     = $script:storeRestartSnoozeValue
+  })
 }
 
 function Get-StoreAssignmentTargetChanges {
@@ -1274,6 +1652,36 @@ $storeTenantListView.HeaderStyle = [System.Windows.Forms.ColumnHeaderStyle]::Non
 [void]$storeTenantListView.Columns.Add((Get-UiString 'StoreColAssigned'), 95)
 [void]$storeTenantListView.Columns.Add((Get-UiString 'StoreColState'), 135)
 $cardStore.Controls.Add($storeTenantListView)
+
+# Bis hierhin hatte die Liste keinen einzigen Klick-Handler: Markieren einer Zeile bewirkte nichts.
+# Der Knopf oeffnet fuer die markierte, bereits im Tenant vorhandene App denselben
+# Zuweisungs-Manager wie bei "Alle Tenant-Apps" (Show-AssignmentManagerDialog).
+$storeManageAssignmentsButton = New-Object System.Windows.Forms.Button
+$storeManageAssignmentsButton.Tag = 'btn-secondary'
+$storeManageAssignmentsButton.Text = Get-UiString 'StoreManageAssignmentsButton'
+$storeManageAssignmentsButton.Location = New-Object System.Drawing.Point(14, 304)
+$storeManageAssignmentsButton.Size = New-Object System.Drawing.Size(260, 32)
+$storeManageAssignmentsButton.Enabled = $false
+$cardStore.Controls.Add($storeManageAssignmentsButton)
+
+$storeTenantListView.Add_SelectedIndexChanged({
+  $storeManageAssignmentsButton.Enabled = ($storeTenantListView.SelectedItems.Count -gt 0)
+})
+
+$storeManageAssignmentsButton.Add_Click({
+  if (-not (Test-Connected)) { return }
+  if (Test-UiBusy) { return }
+  if ($storeTenantListView.SelectedItems.Count -eq 0) { return }
+  $app = $storeTenantListView.SelectedItems[0].Tag
+  if (-not $app -or -not $app.Id) { return }
+  $changed = Show-AssignmentManagerDialog -AppId ([string]$app.Id) -AppName ([string]$app.DisplayName)
+  if ($changed) {
+    # Der Zuweisungs-Manager schreibt gegen den Tenant, nicht gegen dieses Cache-Objekt - die
+    # Spalte "Zugewiesen" muss also neu gelesen werden, sonst zeigt sie den alten Stand.
+    try { Refresh-TenantStoreApps -Query $storeQueryBox.Text.Trim() } catch { }
+  }
+})
+
 $script:tenantStoreApps = @()
 
 function Update-TenantStoreListView {
@@ -1400,9 +1808,7 @@ $storeDeployButton.Add_Click({
   if ([string]::IsNullOrWhiteSpace($q)) { Update-Status (Get-UiString 'StoreQueryEmptyStatus'); return }
   try {
     $storeDeployButton.Enabled = $false
-    $script:progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
-    $script:progressBar.MarqueeAnimationSpeed = 30
-    $script:progressBar.Visible = $true
+    Show-Progress
     Update-Status ((Get-UiString 'StoreDeployingStatus') -f $q)
     [System.Windows.Forms.Application]::DoEvents()
 
@@ -1528,17 +1934,69 @@ $storeDeployButton.Add_Click({
       Write-Log "Store deploy failed for '$q': $m"
     }
   } finally {
-    $script:progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
-    $script:progressBar.Visible = $false
-    $script:progressBar.Value = 0
+    Hide-Progress
     $storeDeployButton.Enabled = $true
   }
 })
 
-# --- Card 4: Persisted local package favorites ---
-# Y follows the deploy card directly now that the Microsoft Store card no longer sits between them.
-$cardFavorites = New-Card -X 16 -Y 404 -W 726 -H 230
-$tabCreate.Controls.Add($cardFavorites)
+# ==================================================
+# Section: Local packages
+# ==================================================
+#
+# War bis hierher die dritte Karte in "Apps aus WinGet hinzufuegen" - und legt nichts in Intune an.
+# Sie pflegt lokale Paketkopien: pruefen, herunterladen, alle lokalen Apps aktualisieren, plus eine
+# Autostart-Option. Mit dem Bereitstellen teilt sie nur, dass beides WinGet benutzt. In einer Seite,
+# deren Info-Text erklaeren muss, dass sie fuer Apps ist, die es in Intune noch NICHT gibt, war das
+# eine dritte Bedeutung auf derselben Flaeche.
+#
+# "Favorit hinzufuegen" bleibt absichtlich drueben bei der Suche: aufgenommen wird ein Paket dort,
+# wo man es gerade gefunden hat. Verwaltet wird die Liste hier.
+$tabLocalPackages = New-Object System.Windows.Forms.Panel
+$tabLocalPackages.AutoScroll = $true
+Add-Section -Key 'localpackages' -Panel $tabLocalPackages -Label (Get-UiString 'TabLocalPackages') -Group 'local'
+
+# Eine Karte, Hoehe aus dem Inhalt - sonst bliebe dort die Luecke stehen, wo die Autostart-Option
+# stand, bevor sie in die Einstellungen umgezogen ist.
+#
+# Die Liste selbst waechst mit: sie stand auf festen 108 px, also gut vier Zeilen, waehrend darunter
+# auf einem normalen Bildschirm 350 px leer blieben und man in einer halbleeren Seite scrollte.
+function Update-LocalPackagesLayout {
+  if (-not $cardFavorites -or -not $favoriteListView) { return }
+  try {
+    $inner = [Math]::Max(400, $cardFavorites.ClientSize.Width - 28)
+    $favoriteListView.Width = $inner
+    # Zusaetzliche Breite geht an die Statusspalte - dort stehen ganze Saetze.
+    $extra = $inner - [System.Windows.Forms.SystemInformation]::VerticalScrollBarWidth - 2 - 692
+    if ($extra -gt 0 -and $favoriteListView.Columns.Count -ge 4) {
+      $favoriteListView.Columns[0].Width = 280 + [int]($extra * 0.35)
+      $favoriteListView.Columns[3].Width = 202 + [int]($extra * 0.65)
+    }
+    # Hoehe aus dem, was die Sektion hergibt: Kartenrand oben (48), Listenanfang (36), darunter
+    # Knopfreihe und Kartenrand. Gemessen statt gezaehlt, damit ein Designwechsel nichts verschiebt.
+    $avail = $tabLocalPackages.ClientSize.Height
+    if ($avail -ge 300) {
+      $buttonH = [Math]::Max(28, $favoriteRefreshButton.Height)
+      $listH = $avail - 48 - 36 - 10 - $buttonH - 16 - 6
+      if ($listH -lt 108) { $listH = 108 }
+      $favoriteListView.Height = $listH
+      foreach ($b in @($favoriteRefreshButton, $favoriteRemoveButton, $favoriteAllLocalButton)) {
+        if ($b) { $b.Top = $favoriteListView.Bottom + 10 }
+      }
+    }
+  } catch { Write-LogDebug 'local packages layout' }
+  Update-StackedCards -Panel $tabLocalPackages -Cards @($cardFavorites)
+}
+
+$localPackagesHeaderLabel = New-Object System.Windows.Forms.Label
+$localPackagesHeaderLabel.Text = Get-UiString 'LocalPackagesHeaderLabel'
+$localPackagesHeaderLabel.Location = New-Object System.Drawing.Point(16, 12)
+$localPackagesHeaderLabel.AutoSize = $true
+$localPackagesHeaderLabel.Font = New-Object System.Drawing.Font("Segoe UI", 13, [System.Drawing.FontStyle]::Bold)
+$tabLocalPackages.Controls.Add($localPackagesHeaderLabel)
+[void](Add-SectionInfoBadge -Parent $tabLocalPackages -AfterLabel $localPackagesHeaderLabel -TextKey 'InfoLocalPackages')
+
+$cardFavorites = New-Card -X 16 -Y 48 -W 726 -H 230
+$tabLocalPackages.Controls.Add($cardFavorites)
 
 $favoriteTitle = New-Object System.Windows.Forms.Label
 $favoriteTitle.Text = Get-UiString 'FavoriteCardTitle'
@@ -1581,12 +2039,9 @@ $favoriteAllLocalButton.Location = New-Object System.Drawing.Point(444, 154)
 $favoriteAllLocalButton.Size = New-Object System.Drawing.Size(268, 32)
 $cardFavorites.Controls.Add($favoriteAllLocalButton)
 
-$favoriteAutoCheckbox = New-Object System.Windows.Forms.CheckBox
-$favoriteAutoCheckbox.Text = Get-UiString 'FavoriteAutoCheckbox'
-$favoriteAutoCheckbox.Location = New-Object System.Drawing.Point(14, 198)
-$favoriteAutoCheckbox.AutoSize = $true
-$favoriteAutoCheckbox.Checked = [bool]$script:settings.AutoUpdateFavoritesOnStartup
-$cardFavorites.Controls.Add($favoriteAutoCheckbox)
+# Die Autostart-Option stand hier und speicherte sich beim Klick. Sie ist eine Startup-Entscheidung
+# wie "nach der Anmeldung nach Updates suchen" und liegt jetzt bei den anderen, auf der
+# Einstellungsseite in der Karte "Paketierung auf diesem Rechner" (siehe 85-Rows).
 
 function Get-FavoriteListRow {
   param([Parameter(Mandatory)][string]$PackageId)
@@ -1635,11 +2090,7 @@ function Invoke-LocalPackageSetUpdate {
   $favoriteAddButton.Enabled = $false
   $favoriteRemoveButton.Enabled = $false
   $favoriteAllLocalButton.Enabled = $false
-  $script:progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
-  $script:progressBar.Minimum = 0
-  $script:progressBar.Maximum = [Math]::Max(1, $packages.Count)
-  $script:progressBar.Value = 0
-  $script:progressBar.Visible = $true
+  Show-Progress -Total ([Math]::Max(1, $packages.Count))
   try {
     foreach ($packageId in $packages) {
       $index++
@@ -1656,7 +2107,7 @@ function Invoke-LocalPackageSetUpdate {
         $failed++
         if ($row) { $row.SubItems[2].Text = '-'; $row.SubItems[3].Text = Get-UiString 'FavoriteLookupFailed' }
         Write-Log "Favorite update: no current online version for $packageId."
-        $script:progressBar.Value = $index
+        Set-ProgressValue $index
         continue
       }
       if ($row) { $row.SubItems[2].Text = $latest }
@@ -1664,14 +2115,18 @@ function Invoke-LocalPackageSetUpdate {
       if ($local -and -not (Test-IsNewerVersion -Latest $latest -Current $local)) {
         $current++
         if ($row) { $row.SubItems[3].Text = Get-UiString 'FavoriteUpToDate' }
-        $script:progressBar.Value = $index
+        Set-ProgressValue $index
         continue
       }
 
       if ($row) { $row.SubItems[3].Text = (Get-UiString 'FavoriteDownloading') -f $latest }
       [System.Windows.Forms.Application]::DoEvents()
+      # Automatisch heisst: niemand sieht zu, und der Lauf haelt die Busy-Sperre. Eine 429-Sperre
+      # wird deshalb genau einmal abgewartet (5 s) statt dreimal (50 s) - sonst wartet die Anmeldung
+      # mit. Von Hand angestossen bleibt es bei drei Versuchen.
       $build = New-WingetPackageWithFallback -PackageId $packageId -PackageFolder $root `
         -DesiredVersion $latest -LatestVersion $latest -InstalledVersion $local `
+        -ThrottleRetries $(if ($Automatic) { 1 } else { 3 }) `
         -AllowUserRetry:(-not $Automatic) -ErrorAction SilentlyContinue
       if ($build -and $build.Succeeded) {
         $effective = if ($build.EffectiveVersion) { [string]$build.EffectiveVersion } else { $latest }
@@ -1687,13 +2142,12 @@ function Invoke-LocalPackageSetUpdate {
         $detail = if ($build -and $build.ErrorMessage) { $build.ErrorMessage } else { 'unknown package build error' }
         Write-Log "Favorite update failed for ${packageId}: $detail"
       }
-      $script:progressBar.Value = $index
+      Set-ProgressValue $index
     }
     $doneKey = if ($Mode -eq 'AllLocal') { 'LocalPackageBatchDoneStatus' } else { 'FavoriteBatchDoneStatus' }
     Update-Status ((Get-UiString $doneKey) -f $downloaded, $current, $failed)
   } finally {
-    $script:progressBar.Visible = $false
-    $script:progressBar.Value = 0
+    Hide-Progress
     $favoriteRefreshButton.Enabled = $true
     $favoriteAddButton.Enabled = $true
     $favoriteRemoveButton.Enabled = $true
@@ -1756,18 +2210,12 @@ $favoriteRemoveButton.Add_Click({
 
 $favoriteRefreshButton.Add_Click({ Invoke-FavoritePackagesUpdate })
 $favoriteAllLocalButton.Add_Click({ Invoke-AllLocalPackagesUpdate })
-$favoriteAutoCheckbox.Add_CheckedChanged({
-  if (Test-UiBusy) { return }
-  $script:settings.AutoUpdateFavoritesOnStartup = [bool]$favoriteAutoCheckbox.Checked
-  Save-Settings
-  Update-Status (Get-UiString 'FavoriteAutoSavedStatus')
-})
 $pathBox.Add_TextChanged({ if ($favoriteListView) { Update-FavoritePackageList } })
 Update-FavoritePackageList
 
 # Section: Updates
 $tabUpdate = New-Object System.Windows.Forms.Panel
-Add-Section -Key 'updates' -Panel $tabUpdate -Label (Get-UiString 'TabUpdates')
+Add-Section -Key 'updates' -Panel $tabUpdate -Label (Get-UiString 'TabUpdates') -Group 'manage'
 
 # Section title
 $updateHeaderLabel = New-Object System.Windows.Forms.Label

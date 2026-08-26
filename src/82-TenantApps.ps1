@@ -1,4 +1,4 @@
-# --- Section: every app in the tenant ---
+﻿# --- Section: every app in the tenant ---
 # The other sections deliberately look at WinGet-manageable apps only. This one lists the tenant
 # EXACTLY as Intune holds it - every @odata.type, including apps this GUI can never package - so
 # assignments can be reviewed and changed in one place instead of switching to the portal.
@@ -46,6 +46,109 @@ function Get-TenantAllApps {
 
 # Human-readable assignment list for one app. Kept separate from Get-AppAssignmentProbe, which only
 # answers the yes/no question the cleanup logic needs.
+# --- Klarnamen von Entra-Gruppen ----------------------------------------------------------------
+#
+# Zuweisungen kamen ueberall als reine GUID an ("Group 1f4c...") - in Intune steht dort der Name der
+# Gruppe. Die GUID ist fuer einen Menschen nicht lesbar und beantwortet die eigentliche Frage nicht:
+# WER bekommt diese App.
+#
+# Aufgeloest wird in drei Stufen, absteigend nach Kosten:
+#   1. Gruppen-Favoriten dieses Kunden - der Name, den der Techniker selbst vergeben hat, ohne jede
+#      Abfrage.
+#   2. Graph mit dem Token der Anwendung. Reicht, wenn dessen Berechtigungen Verzeichnisleserechte
+#      enthalten.
+#   3. die Graph-PowerShell-Sitzung, ABER nur wenn die Zustimmung fuer Group.Read.All in dieser
+#      Sitzung schon erteilt wurde. Von hier wird NIE ein Zustimmungsdialog geoeffnet: diese
+#      Funktion laeuft in einer Schleife ueber eine Liste, das waere ein Dialog je Zeile.
+#
+# Gemerkt wird pro Sitzung, auch das Misserfolg: eine geloeschte Gruppe wird nicht bei jeder Zeile
+# erneut abgefragt, und fehlt die Berechtigung ganz, wird die Abfrage einmal abgeschaltet statt
+# hundertmal in einen 403 zu laufen.
+$script:entraGroupNameCache = @{}
+$script:entraGroupLookupOff = $false
+
+function Clear-EntraGroupNameCache {
+  $script:entraGroupNameCache = @{}
+  $script:entraGroupLookupOff = $false
+}
+
+function Get-EntraGroupDisplayName {
+  param([Parameter(Mandatory)][string]$GroupId)
+  if ([string]::IsNullOrWhiteSpace($GroupId) -or -not (Test-GuidString $GroupId)) { return '' }
+  $key = $GroupId.Trim().ToLowerInvariant()
+  if ($script:entraGroupNameCache.ContainsKey($key)) { return [string]$script:entraGroupNameCache[$key] }
+
+  # 1. Favorit dieses Kunden
+  try {
+    foreach ($f in @(Get-GroupFavorites)) {
+      if ($f -and [string]::Equals([string]$f.Id, $GroupId, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $script:entraGroupNameCache[$key] = [string]$f.Name
+        return [string]$f.Name
+      }
+    }
+  } catch { Write-LogDebug 'group favourite lookup' }
+
+  if ($script:entraGroupLookupOff) { return '' }
+
+  $uri = "https://graph.microsoft.com/v1.0/groups/$GroupId`?`$select=displayName"
+  $name = ''
+  $denied = $false
+  # 2. Token der Anwendung
+  try {
+    $token = Get-WtToken -ErrorAction Stop
+    $resp = Invoke-RestMethod -Uri $uri -Method GET -Headers @{ Authorization = "Bearer $token" } -ErrorAction Stop
+    $name = [string]$resp.displayName
+  } catch {
+    $status = Get-ErrorHttpStatus -ErrorRecord $_
+    if ($status -eq 401 -or $status -eq 403) { $denied = $true }
+    elseif ($status -eq 404) {
+      # Die Gruppe gibt es nicht mehr. Kein Fehler dieser Anwendung - aber die Zuweisung zeigt dann
+      # auf nichts, und das ist eine Auffaelligkeit, die ins Protokoll gehoert.
+      Write-Log ("Group {0} could not be found in Entra ID - an assignment points at a group that no longer exists." -f $GroupId)
+      $script:entraGroupNameCache[$key] = ''
+      return ''
+    } else {
+      Write-LogDebug ("Group name lookup for {0}: {1}" -f $GroupId, $_.Exception.Message)
+    }
+  }
+
+  # 3. bereits erteilte Graph-Zustimmung
+  if (-not $name) {
+    $hasScope = $false
+    try {
+      $ctx = Get-MgContext -ErrorAction SilentlyContinue
+      $hasScope = ($ctx -and ($ctx.Scopes -contains 'Group.Read.All'))
+    } catch { $hasScope = $false }
+    if ($hasScope) {
+      try {
+        $resp = Invoke-MgGraphRequest -Method GET -Uri $uri -ErrorAction Stop
+        $name = if ($resp -is [hashtable]) { [string]$resp['displayName'] } else { [string]$resp.displayName }
+        $denied = $false
+      } catch {
+        Write-LogDebug ("Group name lookup via the Graph session for {0}: {1}" -f $GroupId, $_.Exception.Message)
+      }
+    }
+  }
+
+  if (-not $name -and $denied) {
+    # Einmal abschalten und einmal sagen, wie man es einschaltet - nicht je Zeile.
+    $script:entraGroupLookupOff = $true
+    Write-Log "Group names cannot be read with the current permissions, so assignments show the group's object id. Grant the optional group permission once (button 'Gruppen...' next to any 'Assign to' field) and reopen the list to see the names."
+    return ''
+  }
+  $script:entraGroupNameCache[$key] = $name
+  return $name
+}
+
+# Name wenn moeglich, sonst die GUID - der Aufrufer bekommt immer etwas Anzeigbares.
+function Get-EntraGroupLabel {
+  param([Parameter(Mandatory)][string]$GroupId)
+  $name = ''
+  try { $name = Get-EntraGroupDisplayName -GroupId $GroupId } catch { $name = '' }
+  if ([string]::IsNullOrWhiteSpace($name)) { return [string]$GroupId }
+  return $name
+}
+
 function Get-TenantAppAssignmentText {
   param([Parameter(Mandatory)][string]$AppId)
   $token = Get-WtToken -ErrorAction Stop
@@ -59,8 +162,8 @@ function Get-TenantAppAssignmentText {
     $scope = switch -Regex ($targetType) {
       'allDevicesAssignmentTarget'       { 'All devices' }
       'allLicensedUsersAssignmentTarget' { 'All users' }
-      'exclusionGroupAssignmentTarget'   { 'Excluded group {0}' -f [string]$a.target.groupId }
-      'groupAssignmentTarget'            { 'Group {0}' -f [string]$a.target.groupId }
+      'exclusionGroupAssignmentTarget'   { 'Excluded group {0}' -f (Get-EntraGroupLabel -GroupId ([string]$a.target.groupId)) }
+      'groupAssignmentTarget'            { 'Group {0}' -f (Get-EntraGroupLabel -GroupId ([string]$a.target.groupId)) }
       default                            { $targetType }
     }
     $filterId = [string]$a.target.deviceAndAppManagementAssignmentFilterId
@@ -182,6 +285,20 @@ $tenantEditButton.Size = New-Object System.Drawing.Size(260, 32)
 $tenantEditButton.Enabled = $false
 $cardTenant.Controls.Add($tenantEditButton)
 
+# Der Sammel-Editor, bisher nur ueber "Extras" erreichbar. Er gehoert neben den Einzelfall: hier
+# steht die Liste der vorhandenen Apps, hier sucht man Einstellungen fuer vorhandene Apps.
+$tenantBulkEditButton = New-Object System.Windows.Forms.Button
+$tenantBulkEditButton.Tag = 'btn-secondary'
+$tenantBulkEditButton.Text = Get-UiString 'TenantAppBulkEditButton'
+$tenantBulkEditButton.Location = New-Object System.Drawing.Point(558, 510)
+$tenantBulkEditButton.Size = New-Object System.Drawing.Size(260, 32)
+$cardTenant.Controls.Add($tenantBulkEditButton)
+$tenantBulkEditButton.Add_Click({
+  if (-not (Test-Connected)) { return }
+  if (Test-UiBusy) { return }
+  try { Show-AppSettingsDialog } catch { Write-Log ("App settings dialog failed: {0}" -f $_.Exception.Message) }
+})
+
 $tenantHintLabel = New-Object System.Windows.Forms.Label
 $tenantHintLabel.Text = Get-UiString 'TenantAppsHint'
 $tenantHintLabel.Location = New-Object System.Drawing.Point(14, 552)
@@ -250,37 +367,23 @@ $tenantListView.Add_SelectedIndexChanged({
   }
 })
 
-# Reuses the very same settings dialog and writer as the deployment path, so an app configured here
-# ends up with exactly the payload a fresh deployment would produce - no second implementation.
+# Opens the shared app-settings dialog with the selected app pre-checked. That dialog writes only
+# deployment SETTINGS (notifications, availability, deadline, restart) and never rewrites assignment
+# targets - so exclusions and assignment filters on the app are left untouched. Changing the actual
+# targets of a tenant app is the separate "Zuweisungs-Manager" button below.
 $tenantEditButton.Add_Click({
   if (-not (Test-Connected)) { return }
   if (Test-UiBusy) { return }
   if ($tenantListView.SelectedItems.Count -eq 0) { return }
   $app = $tenantListView.SelectedItems[0].Tag
-  $confirm = [System.Windows.Forms.MessageBox]::Show(
-    ((Get-UiString 'TenantAppEditConfirm') -f $app.DisplayName),
-    (Get-UiString 'ConfirmTitle'),
-    [System.Windows.Forms.MessageBoxButtons]::YesNo,
-    [System.Windows.Forms.MessageBoxIcon]::Warning)
-  if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+  if (-not (Confirm-ChangeAction -Text ((Get-UiString 'TenantAppEditConfirm') -f $app.DisplayName) `
+      -Title (Get-UiString 'ConfirmTitle') `
+      -LogContext ("assignment settings of '{0}'" -f $app.DisplayName))) { return }
 
-  try { Show-AppSettingsDialog } catch { Write-Log ("App settings dialog failed: {0}" -f $_.Exception.Message); return }
+  try { Show-AppSettingsDialog -PreselectApp $app } catch { Write-Log ("App settings dialog failed: {0}" -f $_.Exception.Message); return }
 
-  try {
-    $settings = Get-DeployAssignmentSettings
-    if (-not $settings) { $settings = @{} }
-    $changes = Get-DeployAssignmentTargetChanges
-    $result = Set-AppAssignmentSettings -AppId ([string]$app.Id) -Settings $settings -TargetChanges $changes -AppName ([string]$app.DisplayName)
-    if ($result.ErrorMessage) {
-      Update-Status ((Get-UiString 'TenantAppEditFailedStatus') -f $result.ErrorMessage)
-    } else {
-      Update-Status ((Get-UiString 'TenantAppEditDoneStatus') -f $app.DisplayName, $result.Changed)
-      $tenantDetailBox.Text = Get-TenantAppAssignmentText -AppId ([string]$app.Id)
-    }
-  } catch {
-    Write-Log ("Applying assignment settings to '{0}' failed: {1}" -f $app.DisplayName, $_.Exception.Message)
-    Update-Status ((Get-UiString 'TenantAppEditFailedStatus') -f $_.Exception.Message)
-  }
+  # The dialog applies its own changes; just refresh the detail view for the selected app.
+  try { $tenantDetailBox.Text = Get-TenantAppAssignmentText -AppId ([string]$app.Id) } catch { }
 })
 
 $tenantAssignButton.Add_Click({
@@ -294,7 +397,7 @@ $tenantAssignButton.Add_Click({
   }
 })
 
-Add-Section -Key 'tenant' -Panel $tabTenant -Label (Get-UiString 'TabTenantApps')
+Add-Section -Key 'tenant' -Panel $tabTenant -Label (Get-UiString 'TabTenantApps') -Group 'manage'
 
 # Structured counterpart to Get-TenantAppAssignmentText. Keeps the RAW target and settings so an
 # unchanged assignment can be written back unaltered: Graph's /assign endpoint REPLACES the whole
@@ -310,15 +413,29 @@ function Get-TenantAppAssignments {
     $targetType = ([string]$a.target.'@odata.type').TrimStart([char]'#') -replace '^microsoft\.graph\.', ''
     $rawTarget = $null
     $rawSettings = $null
-    try { $rawTarget = ($a.target | ConvertTo-Json -Depth 12 | ConvertFrom-Json -AsHashtable) } catch { $rawTarget = $null }
+    # A failed clone used to be swallowed here and then quietly skipped by the writer - which,
+    # because the writer POSTs the COMPLETE desired set, deleted that assignment from Intune for
+    # good. Record it instead so the writer can refuse rather than lose it.
+    try { $rawTarget = ($a.target | ConvertTo-Json -Depth 12 | ConvertFrom-Json -AsHashtable) } catch {
+      $rawTarget = $null
+      Write-Log ("Assignment {0} on app {1}: its target could not be read ({2}). The assignment set cannot be rewritten safely while this one is unreadable." -f [string]$a.id, $AppId, $_.Exception.Message)
+    }
     if ($a.settings) {
-      try { $rawSettings = ($a.settings | ConvertTo-Json -Depth 12 | ConvertFrom-Json -AsHashtable) } catch { $rawSettings = $null }
+      try { $rawSettings = ($a.settings | ConvertTo-Json -Depth 12 | ConvertFrom-Json -AsHashtable) } catch {
+        $rawSettings = $null
+        Write-Log ("Assignment {0} on app {1}: its settings could not be read ({2}); Intune defaults would be applied if it were rewritten." -f [string]$a.id, $AppId, $_.Exception.Message)
+      }
     }
     $out.Add([pscustomobject]@{
       Id          = [string]$a.id
       Intent      = [string]$a.intent
       TargetType  = $targetType
       GroupId     = [string]$a.target.groupId
+      # Carried so the manager can SHOW the filter. An assignment filter decides which devices an
+      # assignment actually reaches; a list that hides it invites an admin to remove or re-add an
+      # assignment believing it is unfiltered.
+      FilterType  = [string]$a.target.deviceAndAppManagementAssignmentFilterType
+      FilterId    = [string]$a.target.deviceAndAppManagementAssignmentFilterId
       RawTarget   = $rawTarget
       RawSettings = $rawSettings
     })
@@ -332,11 +449,38 @@ function Get-AssignmentDisplayText {
   $scope = switch -Regex ([string]$Assignment.TargetType) {
     'allDevicesAssignmentTarget'       { Get-UiString 'TargetAllDevices' }
     'allLicensedUsersAssignmentTarget' { Get-UiString 'TargetAllUsers' }
-    'exclusionGroupAssignmentTarget'   { (Get-UiString 'TargetExcludedGroup') -f [string]$Assignment.GroupId }
-    'groupAssignmentTarget'            { (Get-UiString 'TargetGroup') -f [string]$Assignment.GroupId }
+    'exclusionGroupAssignmentTarget'   { (Get-UiString 'TargetExcludedGroup') -f (Get-EntraGroupLabel -GroupId ([string]$Assignment.GroupId)) }
+    'groupAssignmentTarget'            { (Get-UiString 'TargetGroup') -f (Get-EntraGroupLabel -GroupId ([string]$Assignment.GroupId)) }
     default                            { [string]$Assignment.TargetType }
   }
-  return ('{0,-10} {1}' -f [string]$Assignment.Intent, $scope)
+  # Name the assignment filter when there is one. 'none' is Intune's own value for "no filter" and
+  # is left off rather than shown as noise.
+  $filter = ''
+  $filterType = [string]$Assignment.FilterType
+  if ($filterType -and $filterType -ne 'none') {
+    $filterName = if ([string]$Assignment.FilterId) { [string]$Assignment.FilterId } else { '?' }
+    $filter = ' ' + ((Get-UiString 'TargetFilterSuffix') -f $filterType, $filterName)
+  }
+  return ('{0,-10} {1}{2}' -f [string]$Assignment.Intent, $scope, $filter)
+}
+
+# Counts exclusions that nothing includes.
+#
+# An "exclude group X" assignment only means something next to an include for the same intent - it
+# narrows that include. On its own it reaches nobody, so an admin who removed the last include and
+# kept the exclusion has silently unassigned the app while the list still shows an entry per line.
+# Pure so the rule can be tested without a dialog.
+function Get-ExclusionsWithoutInclude {
+  param([Parameter(Mandatory)][AllowEmptyCollection()][array]$Assignments)
+  $lonely = 0
+  foreach ($intent in @($Assignments | ForEach-Object { [string]$_.Intent } | Sort-Object -Unique)) {
+    $sameIntent = @($Assignments | Where-Object { [string]$_.Intent -eq $intent })
+    $exclusions = @($sameIntent | Where-Object { [string]$_.TargetType -match 'exclusionGroupAssignmentTarget' })
+    if ($exclusions.Count -eq 0) { continue }
+    $includes = @($sameIntent | Where-Object { -not ([string]$_.TargetType -match 'exclusionGroupAssignmentTarget') })
+    if ($includes.Count -eq 0) { $lonely += $exclusions.Count }
+  }
+  return $lonely
 }
 
 # Writes the COMPLETE desired assignment set. Nothing is merged here on purpose - the dialog owns
@@ -353,9 +497,21 @@ function Set-TenantAppAssignments {
     $token = Get-WtToken -ErrorAction Stop
     if ([string]::IsNullOrWhiteSpace([string]$token)) { throw 'WinTuner returned an empty access token.' }
     $headers = @{ Authorization = "Bearer $token"; 'Content-Type' = 'application/json' }
+    # An assignment whose target could not be read must STOP the write, not be skipped.
+    #
+    # This function posts the complete desired set, so every entry left out of $payload is deleted
+    # in Intune. Skipping the unreadable ones therefore turned "one assignment I could not parse"
+    # into "that assignment is gone", permanently, with a success message and a count that looked
+    # plausible. Refusing costs the user one dialog; the old behaviour cost them an assignment.
+    $unreadable = @($Assignments | Where-Object { -not $_.RawTarget })
+    if ($unreadable.Count -gt 0) {
+      $writable = @($Assignments).Count - $unreadable.Count
+      $out.ErrorMessage = (Get-UiString 'AssignRewriteUnreadable') -f $unreadable.Count, $writable
+      Write-Log ("Rewriting assignments REFUSED for '{0}' ({1}): {2} of {3} assignment(s) have an unreadable target; writing would have deleted them." -f $AppName, $AppId, $unreadable.Count, @($Assignments).Count)
+      return $out
+    }
     $payload = @()
     foreach ($a in $Assignments) {
-      if (-not $a.RawTarget) { continue }
       $entry = @{
         '@odata.type' = '#microsoft.graph.mobileAppAssignment'
         intent        = [string]$a.Intent
@@ -372,7 +528,7 @@ function Set-TenantAppAssignments {
     $out.Changed = $payload.Count
     Write-Log ("Assignment set rewritten for '{0}' ({1}): {2} assignment(s)." -f $AppName, $AppId, $payload.Count)
   } catch {
-    $out.ErrorMessage = $_.Exception.Message
+    $out.ErrorMessage = Get-AssignmentWriteErrorText -ErrorRecord $_
     Write-Log ("Rewriting assignments FAILED for '{0}' ({1}): {2}" -f $AppName, $AppId, $out.ErrorMessage)
   }
   return $out
@@ -601,12 +757,17 @@ function Show-AssignmentManagerDialog {
   $dlg.Dispose()
   if ($answer -ne [System.Windows.Forms.DialogResult]::OK) { return $false }
 
-  $confirm = [System.Windows.Forms.MessageBox]::Show(
-    ((Get-UiString 'AssignManagerConfirm') -f $AppName, $script:assignWorking.Count),
-    (Get-UiString 'ConfirmTitle'),
-    [System.Windows.Forms.MessageBoxButtons]::YesNo,
-    [System.Windows.Forms.MessageBoxIcon]::Warning)
-  if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return $false }
+  # Say it before writing, not after: an exclusion with no include left reaches nobody, so the app
+  # ends up effectively unassigned while the list still shows a line per assignment.
+  $confirmText = (Get-UiString 'AssignManagerConfirm') -f $AppName, $script:assignWorking.Count
+  $lonelyExclusions = Get-ExclusionsWithoutInclude -Assignments @($script:assignWorking.ToArray())
+  if ($lonelyExclusions -gt 0) {
+    $confirmText = $confirmText + "`r`n`r`n" + ((Get-UiString 'AssignManagerExclusionWarning') -f $lonelyExclusions)
+  }
+  # -AlwaysAsk: siehe Confirm-ChangeAction. Wer die Zuweisung aendert, aendert die Reichweite der
+  # App im Kundentenant - diese Frage darf die Einstellung "Rueckfragen abschalten" nicht schlucken.
+  if (-not (Confirm-ChangeAction -Text $confirmText -Title (Get-UiString 'ConfirmTitle') `
+      -AlwaysAsk -LogContext ("assignment set of '{0}'" -f $AppName))) { return $false }
 
   $applied = Set-TenantAppAssignments -AppId $AppId -Assignments @($script:assignWorking.ToArray()) -AppName $AppName
   if ($applied.ErrorMessage) {
@@ -627,9 +788,37 @@ function Update-TenantAppsLayout {
     $tenantFilterBox.Width = [Math]::Max(180, $tenantFilterHost.Width - 12)
     $tenantListView.Width = $inner
     $tenantDetailBox.Width = $inner
-    $tenantHintLabel.Width = [Math]::Max(200, $inner - 288)
+    # Auch die HOEHE. Bisher wuchs nur die Breite mit, die Liste blieb bei 300 px - auf einem
+    # grossen Bildschirm eine schmale Zeile Inhalt in einer halbleeren Karte.
+    $avail = $tabTenant.ClientSize.Height
+    if ($avail -ge 400) {
+      $topY = 48; $bottomPad = 6
+      $cardTenant.Height = $avail - $topY - $bottomPad
+      # Alles unter der Liste wird gemessen, nicht gezaehlt. Die frueheren Konstanten stimmten fuer
+      # eine Schriftart: die Beschriftung ragte ein Pixel ins Detailfeld, das Detailfeld ragte in
+      # den dritten Knopf (der ueberhaupt nicht mitverschoben wurde), und der Hinweis lag MITTEN in
+      # der Knopfreihe - drei Ueberlappungen, alle im Bild sichtbar, keine im Code zu sehen.
+      $labelH = [Math]::Max(18, $tenantDetailLabel.Height)
+      $buttonH = [Math]::Max(28, $tenantAssignButton.Height)
+      $hintH = [Math]::Max(20, $tenantHintLabel.Height)
+      $below = ($labelH + 4) + $tenantDetailBox.Height + 12 + $buttonH + 10 + $hintH + 16
+      $listH = $cardTenant.ClientSize.Height - 58 - 30 - $below
+      if ($listH -lt 150) { $listH = 150 }
+      $tenantListView.Height = $listH
+      $detailTop = 58 + $listH + 30
+      if ($tenantDetailLabel) { $tenantDetailLabel.Top = $detailTop - $labelH - 4 }
+      $tenantDetailBox.Top = $detailTop
+      # ALLE drei Knoepfe. Der Sammel-Editor blieb auf seiner Entwurfshoehe stehen und lag deshalb
+      # unter dem gewachsenen Detailfeld.
+      foreach ($b in @($tenantAssignButton, $tenantEditButton, $tenantBulkEditButton)) {
+        if ($b) { $b.Top = $tenantDetailBox.Bottom + 12 }
+      }
+      if ($tenantHintLabel) { $tenantHintLabel.Top = $tenantAssignButton.Bottom + 10 }
+    }
+    # Der Hinweis bekommt die volle Breite - er steht jetzt unter der Knopfreihe, nicht daneben.
+    $tenantHintLabel.Width = $inner
     # Extra width goes mostly to the app name, by far the longest value in this list.
-    $extra = $inner - 698
+    $extra = $inner - [System.Windows.Forms.SystemInformation]::VerticalScrollBarWidth - 2 - 698
     if ($extra -gt 0 -and $tenantListView.Columns.Count -ge 4) {
       $tenantListView.Columns[0].Width = 300 + [int]($extra * 0.55)
       $tenantListView.Columns[1].Width = 130 + [int]($extra * 0.20)
@@ -645,39 +834,185 @@ function Update-TenantAppsLayout {
 # sign-in prompt on every click, so a tenant without consent gets punished for a permission it
 # never needed. This one is therefore requested on first use only, and only when the user asks
 # for it - everything else in the GUI keeps working without it.
-$script:groupLookupConsentAsked = $false
+# The ANSWER is remembered per tenant domain, not merely the fact that we asked. Storing only "asked"
+# meant a second click skipped the prompt and connected anyway - and, because the flag survived a
+# tenant switch, it did so in the NEXT customer's tenant where no one had ever been asked. Keying by
+# domain both remembers a "No" and starts fresh for every new customer.
+$script:groupLookupConsent = @{}   # tenant domain -> $true | $false (die Antwort auf den Dialog)
+# Tenant-Domaene -> die Zustimmung wurde in dieser Sitzung erteilt, egal mit welchem Konto.
+$script:groupLookupGranted = @{}
 
-function Connect-GroupLookupScope {
-  $scope = 'Group.Read.All'
+# Holt eine OPTIONALE Graph-Berechtigung auf Zuruf. Verwendet fuer die Gruppensuche
+# (Group.Read.All) und fuer die erkannten Apps (DeviceManagementManagedDevices.Read.All): beide
+# gehoeren nicht zu dem, was Paketieren und Bereitstellen braucht, und werden deshalb bei der
+# Anmeldung bewusst nicht angefordert.
+function Connect-OptionalGraphScope {
+  param(
+    [Parameter(Mandatory)][string[]]$Scope,
+    [string]$TextKey = 'GroupLookupConsentDialog',
+    # Fuer den Weg ueber die Einstellung "direkt mit erhoehten Rechten anmelden": der Benutzer hat
+    # die Frage dort schon beantwortet, hier darf kein Dialog mehr aufgehen - und ein Fehlschlag
+    # ist kein Grund fuer eine Meldung, weil die Anwendung ohne diese Berechtigungen weiterlaeuft.
+    [switch]$NoPrompt
+  )
+  # Mehrere Berechtigungen in EINEM Anmeldevorgang: zwei Fenster hintereinander waeren bei der
+  # Anmeldung zwei Unterbrechungen fuer dieselbe Entscheidung.
+  $scope = @($Scope | Where-Object { $_ }) -join ' '
   $context = $null
   try { $context = Get-MgContext -ErrorAction SilentlyContinue } catch { $context = $null }
-  if ($context -and $context.Scopes -contains $scope -and $context.Account -eq $script:currentUserUpn) { return $true }
+  $tenantDomain = $script:currentUserUpn.Split('@')[1]
+  # Die Berechtigung darf mit einem ANDEREN Konto erteilt worden sein - beim Dienstleister liegen die
+  # Administratorrechte regelmaessig auf einem zweiten Konto. Die frueher hier stehende Bedingung
+  # verlangte, dass die Graph-Sitzung auf demselben Konto laeuft wie die Tenant-Verbindung; nach dem
+  # Weg "anderes Konto" traf das nie zu, und der Zustimmungsdialog erschien bei JEDER Suche erneut.
+  # Gemerkt wird deshalb pro Tenant-Domaene, dass die Zustimmung dort schon erteilt wurde; die
+  # Sitzung selbst muss den Scope aber weiterhin wirklich tragen.
+  # Gemerkt wird je Tenant UND je Berechtigung - "Gruppen darf ich lesen" sagt nichts darueber, ob
+  # auch erkannte Apps erlaubt sind.
+  $memoryKey = ("{0}|{1}" -f $tenantDomain, $scope)
+  $wanted = @($Scope | Where-Object { $_ })
+  $hasAll = $true
+  foreach ($s in $wanted) { if (-not ($context -and ($context.Scopes -contains $s))) { $hasAll = $false } }
+  $granted = ($hasAll -and
+              ([bool]$script:groupLookupGranted[$memoryKey] -or ($context -and $context.Account -eq $script:currentUserUpn)))
+  if ($granted) { return $true }
+  # Ein "Abbrechen" wird pro Tenant-Domaene gemerkt, damit nicht jeder Klick erneut fragt. Ein
+  # frueheres Ja fuehrt hingegen wieder durch die Auswahl: das Konto kann sich geaendert haben, und
+  # genau dort steht die Wahl "anderes Konto".
+  if ($script:groupLookupConsent.ContainsKey($memoryKey) -and -not $script:groupLookupConsent[$memoryKey]) {
+    Update-Status (Get-UiString 'GroupLookupDeclinedStatus')
+    return $false
+  }
 
-  if (-not $script:groupLookupConsentAsked) {
-    $script:groupLookupConsentAsked = $true
-    $answer = [System.Windows.Forms.MessageBox]::Show(
-      (Get-UiString 'GroupLookupConsentDialog'),
-      (Get-UiString 'GroupLookupConsentTitle'),
-      [System.Windows.Forms.MessageBoxButtons]::YesNo,
-      [System.Windows.Forms.MessageBoxIcon]::Information)
-    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return $false }
+  $choice = if ($NoPrompt) { 'self' } else { Show-GraphScopeConsentDialog -TextKey $TextKey }
+  if ($choice -eq 'cancel') {
+    $script:groupLookupConsent[$memoryKey] = $false
+    Update-Status (Get-UiString 'GroupLookupDeclinedStatus')
+    return $false
+  }
+  $script:groupLookupConsent[$memoryKey] = $true
+
+  if ($choice -eq 'other') {
+    # Nur die Caches der Graph-PowerShell, NICHT 'WinTuner-PowerShell*': sonst waere die
+    # Tenant-Verbindung der Anwendung gleich mit weg, und die Gruppensuche haette den Anwender
+    # ausgeloggt, um eine Leseberechtigung zu holen.
+    try { Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null } catch { }   # class 3
+    $removed = 0
+    $names = @()
+    try {
+      $cacheDir = Join-Path $env:LOCALAPPDATA '.IdentityService'
+      # Welche Datei die Graph-PowerShell benutzt, haengt von ihrer Version ab ('mg.msal.cache' in
+      # aelteren, die gemeinsame 'msal.cache' in neueren). Deshalb beide - und die Namen ins
+      # Protokoll, damit hinterher nachvollziehbar ist, was geleert wurde. 'WinTuner-PowerShell*'
+      # steht bewusst NICHT dabei: das ist die Tenant-Sitzung der Anwendung.
+      $names = @(Get-ChildItem -LiteralPath $cacheDir -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like 'mg.msal.cache*' -or $_.Name -like 'msal.cache*' } |
+        ForEach-Object { $_.Name })
+      $removed = Remove-TokenCacheFiles -Directory $cacheDir -Patterns @('mg.msal.cache*', 'msal.cache*')
+    } catch { Write-LogDebug 'graph cache clear' }
+    Write-Log ("Group lookup: cleared {0} Graph PowerShell token cache file(s) [{1}] so the sign-in asks which account to use. The WinTuner token cache was left alone, so the tenant connection stays; other Microsoft tools sharing that cache may ask to sign in again." -f `
+      $removed, $(if ($names.Count) { $names -join ', ' } else { 'none' }))
+    Update-Status (Get-UiString 'GroupLookupOtherAccountStatus')
   }
 
   try {
-    $tenantDomain = $script:currentUserUpn.Split('@')[1]
     Update-Status (Get-UiString 'GroupLookupAuthStatus')
-    $null = Connect-MgGraph -TenantId $tenantDomain -Scopes @($scope) -NoWelcome -ErrorAction Stop *>&1
-    Write-Log 'Group.Read.All granted for the optional group name lookup.'
+    $null = Connect-MgGraph -TenantId $tenantDomain -Scopes $wanted -NoWelcome -ErrorAction Stop *>&1
+    $ctx = try { Get-MgContext -ErrorAction SilentlyContinue } catch { $null }
+    $script:groupLookupGranted[$memoryKey] = $true
+    Write-Log ("Optional Graph scope(s) granted: {0} (account {1}, app id {2})." -f ($wanted -join ', '), `
+      $(if ($ctx) { [string]$ctx.Account } else { '?' }), $(if ($ctx) { [string]$ctx.ClientId } else { '?' }))
     return $true
   } catch {
-    Write-Log ("Group name lookup could not obtain Group.Read.All: {0}" -f $_.Exception.Message)
-    [void][System.Windows.Forms.MessageBox]::Show(
-      ((Get-UiString 'GroupLookupDeniedDialog') -f $_.Exception.Message),
-      (Get-UiString 'GroupLookupConsentTitle'),
-      [System.Windows.Forms.MessageBoxButtons]::OK,
-      [System.Windows.Forms.MessageBoxIcon]::Warning)
+    $failure = [string]$_.Exception.Message
+    # Ein FEHLGESCHLAGENER Versuch ist kein "Nein": vielleicht war das falsche Konto gewaehlt.
+    # Der Merker wird deshalb entfernt statt auf $false gesetzt - der naechste Klick fragt wieder,
+    # und dort steht die Wahl "anderes Konto". Nur ein ausdrueckliches Abbrechen sperrt die Sitzung.
+    [void]$script:groupLookupConsent.Remove($memoryKey)
+    # "Darf nicht selbst zustimmen" ist kein Fehler des Werkzeugs und keine Netzstoerung. AADSTS65001
+    # = noch keine Zustimmung erteilt, AADSTS90094 = Zustimmung braucht einen Administrator.
+    $needsAdmin = ($failure -match 'AADSTS90094' -or $failure -match 'AADSTS65001' -or
+                   $failure -match '(?i)admin(istrator)?\s+(approval|consent)' -or $failure -match '(?i)consent_required')
+    if ($NoPrompt) {
+      # Bei der Anmeldung angefordert: nur protokollieren. Wer die Berechtigung spaeter wirklich
+      # braucht, bekommt an dieser Stelle den ausfuehrlichen Dialog.
+      Write-Log ("Optional Graph scope(s) {0} could not be obtained at sign-in ({1}). The application continues without them; they are requested again when a feature actually needs them." -f ($wanted -join ', '), $failure)
+      return $false
+    }
+    if ($needsAdmin) {
+      Write-Log ("Group lookup: this account may not grant Group.Read.All itself. An administrator has to consent to it for the app 'Microsoft Graph Command Line Tools'. Detail: {0}" -f $failure)
+      [void][System.Windows.Forms.MessageBox]::Show(
+        ((Get-UiString 'GroupLookupAdminNeededDialog') -f $failure),
+        (Get-UiString 'GroupLookupConsentTitle'),
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information)
+    } else {
+      Write-Log ("Group name lookup could not obtain Group.Read.All: {0}" -f $failure)
+      [void][System.Windows.Forms.MessageBox]::Show(
+        ((Get-UiString 'GroupLookupDeniedDialog') -f $failure),
+        (Get-UiString 'GroupLookupConsentTitle'),
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Warning)
+    }
     return $false
   }
+}
+
+# Liest die erkannten Apps des Tenants, paginiert. Zwei Wege, eine Stelle:
+#   - mit dem Token der Anwendung (Standard): dasselbe Token wie fuer alles andere, kein zweiter
+#     Anmeldevorgang. Fehlt die Berechtigung, antwortet Graph mit 403 - der Aufrufer faengt das.
+#   - ueber die Graph-PowerShell-Sitzung (-UseGraphSession): nach einer erteilten Zustimmung, die
+#     ausdruecklich fuer diese Liste geholt wurde.
+function Get-TenantDetectedApps {
+  param(
+    [hashtable]$Headers,
+    [switch]$UseGraphSession,
+    [int]$MaxPages = 100
+  )
+  $uri = 'https://graph.microsoft.com/beta/deviceManagement/detectedApps?$top=500&$orderby=deviceCount desc'
+  $out = [System.Collections.Generic.List[object]]::new()
+  $pageCount = 0
+  do {
+    $response = if ($UseGraphSession) {
+      Invoke-MgGraphRequest -Method GET -Uri $uri -ErrorAction Stop
+    } else {
+      Invoke-RestMethod -Uri $uri -Method GET -Headers $Headers -ErrorAction Stop
+    }
+    $values = if ($UseGraphSession) { @($response['value']) } else { @($response.value) }
+    if ($values -and $values.Count -gt 0) { $out.AddRange([object[]]$values) }
+    $uri = if ($UseGraphSession) { [string]$response['@odata.nextLink'] } else { [string]$response.'@odata.nextLink' }
+    $pageCount++
+    if ($pageCount -ge $MaxPages) {
+      Write-Log ("Warning: Graph API pagination limit ({0} pages) reached. Some detected apps may not be shown." -f $MaxPages)
+      break
+    }
+  } while ($uri)
+  Write-Log ("Detected apps read: {0} entr(y/ies) over {1} page(s) via {2}." -f $out.Count, $pageCount, $(if ($UseGraphSession) { 'the Graph PowerShell session' } else { 'the WinTuner token' }))
+  return @($out.ToArray())
+}
+
+# Die Gruppensuche fragt genau eine Berechtigung ab - der Aufrufer bleibt dadurch lesbar.
+function Connect-GroupLookupScope {
+  return (Connect-OptionalGraphScope -Scope 'Group.Read.All' -TextKey 'GroupLookupConsentDialog')
+}
+
+# Die zwei optionalen Leseberechtigungen auf einmal, direkt bei der Anmeldung - fuer die Einstellung
+# "mit erhoehten Rechten anmelden". Danach zeigen Zuweisungen sofort Gruppennamen und die erkannten
+# Apps laden ohne Nachfrage. Ohne die Einstellung passiert hier nichts: beide werden weiterhin erst
+# angefordert, wenn sie wirklich gebraucht werden.
+$script:loginScopes = @('Group.Read.All', 'DeviceManagementManagedDevices.Read.All')
+function Request-LoginTimeScopes {
+  if (-not $script:settings.RequestOptionalScopesOnLogin) { return $false }
+  if ([string]::IsNullOrWhiteSpace([string]$script:currentUserUpn)) { return $false }
+  Update-Status (Get-UiString 'ElevatedLoginRequestingStatus')
+  [System.Windows.Forms.Application]::DoEvents()
+  $ok = Connect-OptionalGraphScope -Scope $script:loginScopes -NoPrompt
+  if ($ok) {
+    Update-Status ((Get-UiString 'ElevatedLoginGrantedStatus') -f ($script:loginScopes -join ', '))
+  } else {
+    Update-Status (Get-UiString 'ElevatedLoginFailedStatus')
+  }
+  return $ok
 }
 
 # Name search across Entra ID groups. Returns objects with DisplayName and Id.

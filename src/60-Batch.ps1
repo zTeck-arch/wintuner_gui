@@ -1,4 +1,4 @@
-
+﻿
 function Invoke-AppUpdateBatch {
   param(
     [Parameter(Mandatory=$true)]
@@ -13,14 +13,12 @@ function Invoke-AppUpdateBatch {
   $checkAllButton.Enabled = $false
   $uncheckAllButton.Enabled = $false
 
-  # Real per-app progress instead of a marquee. A marquee only animates while the UI thread pumps
-  # its message loop; during a long package build (60ms sleeps) it stutters and during the blocking
-  # upload it freezes outright - which read as "hung". A continuous bar over the app count moves at
-  # honest, observable moments (one app done), and the status line names the phase within each app.
-  $script:progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
-  $script:progressBar.Maximum = [Math]::Max(1, $Apps.Count)
-  $script:progressBar.Value = 0
-  $script:progressBar.Visible = $true
+  # Echter Fortschritt pro App als Prozentangabe. Kein Balken: der Marquee bewegt sich nur, solange
+  # der UI-Thread die Nachrichtenschleife pumpt, und genau das tut er beim Paketieren und Hochladen
+  # minutenlang nicht - das las sich wie ein haengendes Programm. Die Prozentzahl springt an
+  # ehrlichen, beobachtbaren Punkten (eine App fertig), die Statuszeile nennt die Phase darin.
+  # -Cancellable: die Schleife unten fragt $script:cancelBatch ab, also darf der Knopf erscheinen.
+  Show-Progress -Total ([Math]::Max(1, $Apps.Count)) -Cancellable
 
   $successCount = 0
   $failedCount = 0
@@ -34,23 +32,32 @@ function Invoke-AppUpdateBatch {
   $unresolvedTargetKeys = [System.Collections.Generic.HashSet[string]]::new()
 
   # Batch runs synchronously on the UI thread (the WinTuner/Graph calls must stay there), so the
-  # window freezes while a single app is packaged. Show the cancel button + reset the flag.
+  # window freezes while a single app is uploaded. Der Merker wird zu Beginn eines Laufs
+  # zurueckgesetzt; setzen kann ihn danach der Abbruch-Knopf, "Trennen"/"Abmelden" oder der
+  # Fensterschluss (alle ueber Request-RunCancel).
   $script:cancelBatch = $false
-  if ($cancelBatchButton) { Set-CancelBatchButtonVisible $true }
   try {
     foreach ($app in $Apps) {
-      # DoEvents above/below lets a queued click on "Stop" arrive – checked between apps only, so a
-      # running package/upload is never torn apart mid-operation.
+      # Geprueft wird nur zwischen zwei Apps, damit eine laufende Paketierung oder ein laufender
+      # Upload nie mitten im Vorgang auseinandergerissen wird.
       if ($script:cancelBatch) {
         Write-Log ("Batch canceled by user after {0} of {1} app(s)." -f ($currentIndex), $totalCount)
         Update-Status (Get-UiString 'BatchCanceledStatus')
         break
       }
+      # Ohne Sitzung geht kein Upload und keine Zuweisung mehr durch. Der Lauf lief bisher trotzdem
+      # weiter, wenn zwischendurch getrennt wurde - und paketierte App fuer App gegen einen Tenant,
+      # der nicht mehr da war. Das ist der Abbruchgrund, den der Benutzer nicht anklicken muss.
+      if (-not $script:isConnected) {
+        Write-Log ("Batch stopped after {0} of {1} app(s): the tenant session was disconnected." -f $currentIndex, $totalCount)
+        Update-Status (Get-UiString 'BatchAbortedDisconnectedStatus')
+        break
+      }
       $currentIndex++
-      # Advance the bar by COMPLETED apps: it sits at currentIndex-1 while this app runs, so the fill
-      # never claims an app is done before it is. The phase prefix ("(2/8) ") is picked up by the
-      # packaging/upload status lines inside Update-SingleApp.
-      $script:progressBar.Value = [Math]::Min([Math]::Max(0, $currentIndex - 1), $script:progressBar.Maximum)
+      # Gezaehlt werden ERLEDIGTE Apps: waehrend diese laeuft, steht die Anzeige auf currentIndex-1,
+      # damit die Prozentzahl keine App als fertig ausgibt, die es nicht ist. Der Phasen-Vorsatz
+      # ("(2/8) ") wird von den Status-Zeilen in Update-SingleApp aufgegriffen.
+      Set-ProgressValue ([Math]::Max(0, $currentIndex - 1))
       $script:batchProgressPrefix = "({0}/{1}) " -f $currentIndex, $totalCount
       $appStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
       Update-Status ("Updating ({0}/{1}): {2} {3}" -f $currentIndex, $totalCount, $app.Name, $app.CurrentVersion)
@@ -125,7 +132,8 @@ function Invoke-AppUpdateBatch {
         # Leistungstext. Add-SessionActivity persists it straight away - the record is usually
         # needed for the ticket after the tool has already been closed.
         Add-SessionActivity -Kind 'Update' -Name $appName -FromVersion $appCurrentVersion `
-          -ToVersion $effVer -OldVersionRemoved ([bool]$result.OldVersionRemoved)
+          -ToVersion $effVer -OldVersionRemoved ([bool]$result.OldVersionRemoved) `
+          -SupersedenceCreated ([bool]$result.SupersedenceCreated)
 
         # Remove only this concrete Intune object. Several rows may intentionally have the same name.
         foreach ($row in @($updateListBox.Items)) {
@@ -168,20 +176,20 @@ function Invoke-AppUpdateBatch {
     # asked for, on top of an update run that already took minutes. The rows of successfully updated
     # apps are removed from the list inside the loop above, so the view is already correct for what
     # happened; anything else is a deliberate decision by the user, who can press "Search Updates".
+    # Erst hier ist die letzte App wirklich fertig: ohne diese Zeile blendete die Anzeige bei
+    # (n-1)/n aus, also z. B. bei 91 % - der Lauf war durch, die Zahl sagte etwas anderes.
+    Set-ProgressValue $currentIndex
     Update-Status (Get-UiString 'BatchRescanHint')
     Update-UpdatesEmptyState
 
     return @{ SuccessCount = $successCount; FailedList = $failedList; SucceededList = $succeededList }
   } finally {
-    $script:progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
-    $script:progressBar.Visible = $false
-    $script:progressBar.Value = 0
+    Hide-Progress
     $updateSelectedButton.Enabled = $true
     $updateAllButton.Enabled = $true
     $updateSearchButton.Enabled = $true
     $checkAllButton.Enabled = $true
     $uncheckAllButton.Enabled = $true
-    if ($cancelBatchButton) { Set-CancelBatchButtonVisible $false }
     $script:cancelBatch = $false
     $script:batchProgressPrefix = ''
   }

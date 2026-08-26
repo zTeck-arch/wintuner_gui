@@ -14,6 +14,9 @@ try {
   Write-Log ("=" * 78)
   Write-Log ("Session start | WinTuner GUI {0} | PowerShell {1} | WinTuner module {2}" -f $script:appVersion, $psVer, $wtVer)
   Write-Log ("Environment   | {0} | user {1} | lang {2} | theme {3}" -f $osVer, $env:USERNAME, $script:uiLanguage, $script:themeName)
+  # Die wirksamen Einstellungen gehoeren in DIESES Protokoll: ohne sie ist jede Zeile darunter nur
+  # halb lesbar ("warum sucht er beim Anmelden Updates?", "warum fragt er nicht nach?").
+  foreach ($line in (Get-SettingsSnapshotLines)) { Write-Log $line }
   # Housekeeping first, so an old log is gone before this session appends to a fresh one. Logged
   # rather than silent: deleting a customer-related record without saying so would be worse than
   # keeping it.
@@ -93,6 +96,13 @@ try {
   # while changing semantics - that must surface at startup rather than halfway through an
   # upload or a cleanup run.
   $winTunerModule = Get-Module WinTuner | Sort-Object Version -Descending | Select-Object -First 1
+  # Recorded on every start, not only when something looks wrong. The application's assumptions about
+  # this module's parameter semantics are checked by tests/Unit/ModuleContract.Tests.ps1, and when a
+  # module update breaks one of them the symptom shows up on a customer tenant - as it did in 0.15.8.
+  # Having the exact version in the log is what makes that traceable afterwards.
+  if ($winTunerModule) {
+    Write-Log ("WinTuner module {0} loaded from {1}." -f $winTunerModule.Version, $winTunerModule.ModuleBase)
+  }
   if ($winTunerModule -and $winTunerModule.Version.Major -gt 1) {
     Write-Log ("WinTuner module version {0} is newer than the 1.x line this GUI was written and tested against." -f $winTunerModule.Version)
     [void][System.Windows.Forms.MessageBox]::Show(
@@ -205,6 +215,8 @@ $loginButton.Add_Click({
     Clear-TenantViews
     Update-Status (Get-UiString 'LoginSuccessStatus')
     $script:currentUserUpn = $usernameBox.Text
+    # Der Nachweis haengt an DIESER Adresse, auch wenn spaeter getrennt wird (siehe 75-UiState).
+    $script:activityTenantUpn = $usernameBox.Text
     # Remember the tenant domain so a later login to a DIFFERENT customer can nudge toward Logout.
     try { $script:lastTenantDomain = ($usernameBox.Text -split '@')[-1].Trim().ToLower() } catch { $script:lastTenantDomain = "" }
     # Record this login for quick re-selection next time, and refresh the recent list.
@@ -215,6 +227,11 @@ $loginButton.Add_Click({
     try { Update-AllAssignTargetCombos } catch { Write-Log ("Could not load group favorites: {0}" -f $_.Exception.Message) }
     if ($loginInfoLabel) { $loginInfoLabel.Text = (Get-UiString 'LoggedInAs') -f $script:currentUserUpn }
     Set-ConnectedUIState -Connected $true
+
+    # Erhoehte Rechte auf Wunsch sofort: EIN zusaetzlicher Anmeldevorgang jetzt statt einer Nachfrage
+    # spaeter, mitten in der Arbeit. Nur wenn die Einstellung es sagt; ein Fehlschlag bleibt ohne
+    # Folgen (siehe Request-LoginTimeScopes).
+    try { [void](Request-LoginTimeScopes) } catch { Write-Log ("Optional scopes at sign-in: {0}" -f $_.Exception.Message) }
 
     # Land on the dashboard rather than wherever the previous session happened to stop. Its tiles
     # are the first thing that states which tenant is actually loaded - staying in, say, the update
@@ -232,7 +249,10 @@ $loginButton.Add_Click({
         # Switch to the Updates section first so PerformClick works
         Show-Section 'updates'
         Start-Sleep -Milliseconds 100
-        $updateSearchButton.PerformClick()
+        # Nobody is watching an automatic trigger, so a message box here would block the whole
+        # application until someone walks past. The handler queues the search instead.
+        $script:automaticTrigger = $true
+        try { $updateSearchButton.PerformClick() } finally { $script:automaticTrigger = $false }
       } catch {
         Write-Log "Auto-check for updates failed: $($_.Exception.Message)"
       }
@@ -348,14 +368,14 @@ $createButton.Add_Click({
   $packageID = $package.PackageID
   $folder = try { [System.IO.Path]::GetFullPath($pathBox.Text.Trim()) } catch { Update-Status ((Get-UiString 'InvalidFolderDialog') -f $pathBox.Text.Trim()); return }
   if (-not (Test-PackageFolderUsable -Folder $folder)) { return }
-  if (-not (Test-Path $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
+  if (-not (Test-Path -LiteralPath $folder)) { [void][System.IO.Directory]::CreateDirectory($folder) }
   $filePath  = Join-Path $folder "$packageID.wtpackage"
 
-  if (Test-Path $filePath) {
+  if (Test-Path -LiteralPath $filePath) {
     $res = [System.Windows.Forms.MessageBox]::Show(((Get-UiString 'PackageExistsDialog') -f $filePath), (Get-UiString 'ConfirmOverwriteTitle'), [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
     if ($res -ne [System.Windows.Forms.DialogResult]::Yes) { Update-Status (Get-UiString 'CreationAbortedStatus'); $uploadButton.Enabled = $true; return }
     try {
-      Remove-Item -Path $filePath -Force -ErrorAction Stop
+      Remove-Item -LiteralPath $filePath -Force -ErrorAction Stop
     } catch {
       Write-Log "Warning: Failed to delete existing package file ${filePath}: $($_.Exception.Message)"
       Update-Status (Get-UiString 'DeleteExistingWarnStatus')
@@ -368,9 +388,7 @@ $createButton.Add_Click({
     $versionsButton.Enabled = $false
 
     Update-Status ((Get-UiString 'CreatingPackageStatus') -f $packageID)
-    $script:progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
-    $script:progressBar.MarqueeAnimationSpeed = 30
-    $script:progressBar.Visible = $true
+    Show-Progress
     [System.Windows.Forms.Application]::DoEvents()  # pumps the message loop; this work stays on the UI thread on purpose (see 70-Runtime)
 
     $desired = $null
@@ -410,12 +428,15 @@ $createButton.Add_Click({
         Update-SelectedPackageVersionLabel
       }
     } else {
-      Update-Status (Get-UiString 'PackageCreationFailedStatus')
+      # Der Grund stand im Ergebnis und wurde weggeworfen: im Protokoll stand nur
+      # "Paketerstellung fehlgeschlagen", ohne ein Wort dazu, warum. Genau diese Zeile war bei
+      # KevinOttalini.SimpleMTUTest die einzige Spur.
+      $pkgError = if ($resPkg -and $resPkg.ErrorMessage) { [string]$resPkg.ErrorMessage } else { 'unknown package build error' }
+      Update-Status ((Get-UiString 'PackageCreationFailedDetailStatus') -f $pkgError)
+      Write-Log ("Package creation failed for {0}: {1}" -f $packageID, $pkgError)
     }
   } finally {
-    $script:progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
-    $script:progressBar.Visible = $false
-    $script:progressBar.Value = 0
+    Hide-Progress
     $createButton.Enabled = $true
     $searchButton.Enabled = $true
     $versionsButton.Enabled = $true
@@ -451,7 +472,7 @@ $uploadButton.Add_Click({
     if ([string]::IsNullOrWhiteSpace($packageID)) { Update-Status (Get-UiString 'CannotResolvePackageIdStatus'); return }
     $folder = try { [System.IO.Path]::GetFullPath($pathBox.Text.Trim()) } catch { Update-Status ((Get-UiString 'InvalidFolderDialog') -f $pathBox.Text.Trim()); return }
     if (-not (Test-PackageFolderUsable -Folder $folder)) { return }
-    if (-not (Test-Path $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
+    if (-not (Test-Path -LiteralPath $folder)) { [void][System.IO.Directory]::CreateDirectory($folder) }
 
     $uploadSucceeded = $false
     try {
@@ -459,9 +480,7 @@ $uploadButton.Add_Click({
         $createButton.Enabled = $false
 
         Update-Status ((Get-UiString 'UploadingStatus') -f $packageID, $version)
-        $script:progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
-        $script:progressBar.MarqueeAnimationSpeed = 30
-        $script:progressBar.Visible = $true
+        Show-Progress
         [System.Windows.Forms.Application]::DoEvents()  # pumps the message loop; this work stays on the UI thread on purpose (see 70-Runtime)
 
         $assignTarget = Get-SelectedAssignmentTarget -TargetCombo $assignTargetCombo -GroupIdBox $assignGroupIdBox
@@ -572,13 +591,11 @@ $uploadButton.Add_Click({
 
         # Optionally turn on Intune's built-in auto-update for the just-deployed app.
         if ($script:autoUpdateCheckbox -and $script:autoUpdateCheckbox.Checked -and $newGraphId) {
-          try {
-            Update-WtIntuneApp -AppId $newGraphId -EnableAutoUpdate -ErrorAction Stop | Out-Null
-            Write-Log "Enabled Intune auto-update for $packageID (app $newGraphId)."
-          } catch {
-            $autoUpdateError = "Auto-update enable failed for ${packageID}: $($_.Exception.Message)"
-            Write-Log $autoUpdateError
-            $assignmentProblem = if ($assignmentProblem) { "$assignmentProblem; $autoUpdateError" } else { $autoUpdateError }
+          # Reports what the call actually achieved: Intune keeps this setting on the assignments, so
+          # an app deployed without one is unchanged no matter how well the call succeeded.
+          $autoUpdateOutcome = Enable-AppAutoUpdateChecked -AppId $newGraphId -AppName ([string]$packageID)
+          if ($autoUpdateOutcome.Problem) {
+            $assignmentProblem = if ($assignmentProblem) { "$assignmentProblem; $($autoUpdateOutcome.Problem)" } else { [string]$autoUpdateOutcome.Problem }
           }
         } elseif ($script:autoUpdateCheckbox -and $script:autoUpdateCheckbox.Checked -and -not $newGraphId) {
           $autoUpdateError = 'Auto-update was requested, but the authoritative Intune app ID could not be resolved.'
@@ -617,9 +634,7 @@ $uploadButton.Add_Click({
             [System.Windows.Forms.MessageBoxIcon]::Error
         )
     } finally {
-        $script:progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
-        $script:progressBar.Visible = $false
-        $script:progressBar.Value = 0
+        Hide-Progress
         $uploadButton.Enabled = (-not $uploadSucceeded)
         $createButton.Enabled = $true
     }
@@ -710,7 +725,11 @@ $updateFilterBox.Add_TextChanged({
 # ----------------------------------------------
 $updateSearchButton.Add_Click({
   if (-not (Test-Connected)) { return }
-  if (Test-UiBusy) { return }
+  # Read-only, so it is queued rather than refused: the login-time auto-check used to collide
+  # with the start-up favourites build and was thrown away, leaving the technician waiting for a
+  # scan that would never run.
+  if (Test-UiBusy -DeferKey 'update-search' -DeferLabel (Get-UiString 'DeferLabelUpdateSearch') `
+        -DeferAction { $updateSearchButton.PerformClick() }) { return }
 
   try {
     $updateSearchButton.Enabled = $false
@@ -743,7 +762,20 @@ $updateSearchButton.Add_Click({
     }
 
     if ($all.Count -eq 0) {
-      Update-Status (Get-UiString 'NoAppsInIntuneStatus')
+      # "Keine Apps in Intune gefunden" war falsch und hat in die Irre gefuehrt: im Portal STEHEN
+      # Apps - nur keine, die WinTuner gebaut hat. Diese Suche kann ausschliesslich Apps mit der
+      # '[WinTuner|'-Marke im Notizfeld vergleichen, weil nur die eine WinGet-Paket-Id tragen.
+      # Handgebaute Apps (Skripte, Treiber, Store-Apps) gehoeren nach "Alle Tenant-Apps".
+      # Ob die Null belastbar ist, hat Get-Win32AppsResilient schon geklaert (zweiter Lesevorgang
+      # plus direkte Graph-Gegenprobe) - hier wird sie nur noch richtig benannt.
+      $supCount = @($supersededInventory).Count
+      if (Test-InventoryContradiction -ActiveCount $all.Count -SupersededCount $supCount) {
+        Write-Log ("Update scan: no WinTuner-managed active apps, but {0} superseded one(s). The usual cause is that the newer versions were deleted and their predecessors kept the supersedence mark." -f $supCount)
+        Update-Status ((Get-UiString 'NoWinTunerAppsSupersededStatus') -f $supCount)
+      } else {
+        Write-Log 'Update scan: this tenant has no WinTuner-managed apps at all. Only apps carrying the [WinTuner| marker (and therefore a WinGet package id) can be compared here; hand-built apps are listed under "All tenant apps".'
+        Update-Status (Get-UiString 'NoWinTunerAppsStatus')
+      }
       return
     }
 
@@ -751,7 +783,19 @@ $updateSearchButton.Add_Click({
     # IDs to one version; 0.13.8 keeps active predecessors visible for assignment/cleanup follow-up
     # while already-superseded Graph objects stay exclusively in the superseded-apps section.
     $appsToCheck = @($all | Where-Object { $_ -and $_.CurrentVersion -and $_.GraphId })
+    # An app the filter above dropped is an app that will never be compared against anything, and
+    # until now nothing said so: the line below reported the ALREADY FILTERED count as "all". That is
+    # the shape of the 0.15.8 defect - a candidate that never reached the comparison - so the numbers
+    # are made to add up instead.
+    $skippedIncomplete = @($all).Count - $appsToCheck.Count
+    if ($skippedIncomplete -gt 0) {
+      foreach ($bad in @($all | Where-Object { -not ($_ -and $_.CurrentVersion -and $_.GraphId) })) {
+        Write-Log ("Update scan SKIPPED an app object without a version or Graph id, so it cannot be compared: name='{0}', version='{1}', graphId='{2}'." -f `
+          [string]$bad.Name, [string]$bad.CurrentVersion, [string]$bad.GraphId)
+      }
+    }
     $resolvedIds = @{}
+    $skippedNoWingetId = 0
     foreach ($a in $appsToCheck) {
       try {
         $resolvedIds[[string]$a.GraphId] = [string](Resolve-WingetIdForApp -App $a)
@@ -759,27 +803,40 @@ $updateSearchButton.Add_Click({
         $resolvedIds[[string]$a.GraphId] = ''
         Write-Log ("Could not resolve a WinGet id for '{0}' ({1}): {2}" -f $a.Name, $a.GraphId, $_.Exception.Message)
       }
+      if ([string]::IsNullOrWhiteSpace([string]$resolvedIds[[string]$a.GraphId])) {
+        $skippedNoWingetId++
+        Write-Log ("Update scan cannot check '{0}' ({1}): no WinGet package id could be resolved, so there is nothing to compare its version against." -f [string]$a.Name, [string]$a.GraphId)
+      }
     }
-    Write-Log ("Checking all {0} concrete active Intune app version(s); already-superseded Graph objects are excluded." -f $appsToCheck.Count)
+    Write-Log ("Update scan input: {0} app object(s) from the inventory -> {1} checkable, {2} without version/Graph id, {3} without a resolvable WinGet id; already-superseded Graph objects are excluded before this point." -f `
+      @($all).Count, $appsToCheck.Count, $skippedIncomplete, $skippedNoWingetId)
 
-    # Show progress bar
-    $script:progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
-    $script:progressBar.Value = 0
-    $script:progressBar.Maximum = [Math]::Max(1, $appsToCheck.Count)
-    $script:progressBar.Visible = $true
+    # Fortschritt in Prozent anzeigen. -Cancellable: die Schleife unten fragt den Merker ab. Die
+    # Suche schreibt nichts, sie fragt nur Versionen ab - sie darf jederzeit zwischen zwei Apps
+    # enden, das Ergebnis der bereits geprueften Apps bleibt gueltig.
+    $script:cancelBatch = $false
+    Show-Progress -Total ([Math]::Max(1, $appsToCheck.Count)) -Cancellable
 
     $candidates = [System.Collections.Generic.List[object]]::new()
     $processedCount = 0
     $totalCount = $appsToCheck.Count
     $failedChecks = 0
+    $scanCanceled = $false
     $freshByPackageId = @{}
 
     foreach ($app in $appsToCheck) {
+      # Abbruch (Knopf, Trennen, Fensterschluss) wirkt zwischen zwei Apps. Was bis hierher geprueft
+      # wurde, wird trotzdem angezeigt - eine halbe Liste ist mehr als keine.
+      if ($script:cancelBatch) {
+        Write-Log ("Update scan canceled by user after {0} of {1} app(s)." -f $processedCount, $totalCount)
+        $scanCanceled = $true
+        break
+      }
       $processedCount++
 
       # Update progress every app
       try {
-        $script:progressBar.Value = $processedCount
+        Set-ProgressValue ($processedCount - 1)
         Update-Status ((Get-UiString 'CheckingAppStatus') -f $processedCount, $totalCount, $app.Name)
         [System.Windows.Forms.Application]::DoEvents()  # pumps the message loop; this work stays on the UI thread on purpose (see 70-Runtime)
       } catch { Write-LogDebug ("Progress update: {0}" -f $_.Exception.Message) }
@@ -794,7 +851,9 @@ $updateSearchButton.Add_Click({
         try {
           $cacheKey = $wingetId.ToLowerInvariant()
           if (-not $freshByPackageId.ContainsKey($cacheKey)) {
-            $freshByPackageId[$cacheKey] = Get-FreshLatestPackageVersion -PackageId $wingetId
+            # Vom Benutzer angestossen heisst frisch; die automatische Suche nach der Anmeldung darf
+            # die Antworten nehmen, die die Dashboard-Kachel Sekunden vorher schon geholt hat.
+            $freshByPackageId[$cacheKey] = Get-FreshLatestPackageVersion -PackageId $wingetId -Force:(-not $script:automaticTrigger)
           }
           $fresh = $freshByPackageId[$cacheKey]
           if ($fresh -and $fresh.Latest) {
@@ -893,6 +952,18 @@ $updateSearchButton.Add_Click({
     $newUploadCount = @($groupedCandidates | Where-Object { -not $_.TargetAlreadyDeployed }).Count
     $followUpCount = @($groupedCandidates | Where-Object { $_.TargetAlreadyDeployed }).Count
     Write-Log ("Scan classification: {0} new upload(s), {1} follow-up item(s) with an existing target, {2} outdated active source app object(s)." -f $newUploadCount, $followUpCount, $concreteCandidateCount)
+    # The reconciliation line: every app object from the inventory is accounted for exactly once.
+    # If these do not add up, something was dropped silently - which is the one failure this scan
+    # must never have, because a missed app looks exactly like an app that is up to date.
+    $upToDateCount = $appsToCheck.Count - $concreteCandidateCount - $skippedNoWingetId - $failedChecks
+    Set-ProgressValue $processedCount
+    Write-Log ("Update scan reconciliation: {0} from inventory = {1} outdated + {2} up to date + {3} no WinGet id + {4} check failed + {5} no version/Graph id." -f `
+      @($all).Count, $concreteCandidateCount, $upToDateCount, $skippedNoWingetId, $failedChecks, $skippedIncomplete)
+    if ($skippedIncomplete -gt 0 -or $skippedNoWingetId -gt 0) {
+      # Said in the window as well, not only in the log: "no updates found" and "no updates found,
+      # but I could not look at four of them" are different answers.
+      Write-Log ("Update scan: {0} app(s) could NOT be checked at all. Review the lines above - each one names the app." -f ($skippedIncomplete + $skippedNoWingetId))
+    }
     if ($count -gt 0) {
       if ($failedChecks -gt 0) {
         Update-Status ((Get-UiString 'SearchUpdatesGroupedWithFailuresStatus') -f $newUploadCount, $followUpCount, $concreteCandidateCount, $failedChecks)
@@ -914,12 +985,15 @@ $updateSearchButton.Add_Click({
     # The dashboard tile says "Updates available", therefore it counts only targets that still
     # require a new package/upload. Existing-target follow-up remains visible in the detailed list.
     if ($script:dashUpdatesVal) { $script:dashUpdatesVal.Text = [string]$newUploadCount }
+    # Steht ZULETZT, damit die Zahlen oben die abgebrochene Suche nicht als vollstaendig ausgeben.
+    if ($scanCanceled) { Update-Status (Get-UiString 'ScanCanceledStatus') }
   } finally {
     $script:updateListRefreshing = $false
     $updateSearchButton.Enabled = $true
-    $script:progressBar.Maximum = 100
-    $script:progressBar.Value = 0
-    $script:progressBar.Visible = $false
+    # Der Merker gehoert dem Lauf, nicht der Sitzung: sonst wuerde ein Abbruch der Suche noch den
+    # naechsten Vorgang stoppen.
+    $script:cancelBatch = $false
+    Hide-Progress
     if (Get-Command Update-UpdatesEmptyState -ErrorAction SilentlyContinue) { Update-UpdatesEmptyState }
   }
 })
@@ -969,12 +1043,10 @@ $updateSelectedButton.Add_Click({
       "- $($_.Name): $($_.CurrentVersion) -> $($_.LatestVersion) [$action]"
     }) -join "`r`n")
     if ($checkedApps.Count -gt 15) { $namesPreview += "`r`n- ..." }
-    $confirmSel = [System.Windows.Forms.MessageBox]::Show(
-        ((Get-UiString 'UpdateSelectedConfirmDialog') -f $checkedApps.Count, $namesPreview, (Get-UpdateCleanupNotice)),
-        (Get-UiString 'ConfirmTitle'),
-        [System.Windows.Forms.MessageBoxButtons]::YesNo,
-        [System.Windows.Forms.MessageBoxIcon]::Question)
-    if ($confirmSel -ne [System.Windows.Forms.DialogResult]::Yes) {
+    if (-not (Confirm-ChangeAction `
+        -Text ((Get-UiString 'UpdateSelectedConfirmDialog') -f $checkedApps.Count, $namesPreview, (Get-UpdateCleanupNotice)) `
+        -Title (Get-UiString 'ConfirmTitle') `
+        -LogContext ("update run for {0} selected app(s)" -f $checkedApps.Count))) {
         Update-Status (Get-UiString 'MassUpdateCanceledStatus'); return
     }
 
@@ -983,8 +1055,8 @@ $updateSelectedButton.Add_Click({
       return
     }
     if (-not (Test-PackageFolderUsable -Folder $rootPackageFolder)) { return }
-    if (-not (Test-Path $rootPackageFolder)) {
-        New-Item -ItemType Directory -Path $rootPackageFolder -Force | Out-Null
+    if (-not (Test-Path -LiteralPath $rootPackageFolder)) {
+        [void][System.IO.Directory]::CreateDirectory($rootPackageFolder)
     }
 
     try {
@@ -1034,12 +1106,12 @@ $updateAllButton.Add_Click({
       $action = if ($_.TargetAlreadyDeployed) { Get-UiString 'UpdateActionReuse' } else { Get-UiString 'UpdateActionUpload' }
       "$($_.Name): $($_.CurrentVersion) -> $($_.LatestVersion) [$action]"
     }) -join "`r`n"
-    $confirm = [System.Windows.Forms.MessageBox]::Show(
-        ((Get-UiString 'UpdateConfirmDialog') -f $appNames, (Get-UpdateCleanupNotice)),
-        (Get-UiString 'ConfirmTitle'),
-        [System.Windows.Forms.MessageBoxButtons]::YesNo,
-        [System.Windows.Forms.MessageBoxIcon]::Question
-    )
+    $confirm = if (Confirm-ChangeAction -Text ((Get-UiString 'UpdateConfirmDialog') -f $appNames, (Get-UpdateCleanupNotice)) `
+        -Title (Get-UiString 'ConfirmTitle') -LogContext 'update run for all outdated apps') {
+      [System.Windows.Forms.DialogResult]::Yes
+    } else {
+      [System.Windows.Forms.DialogResult]::No
+    }
 
     if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) {
         Update-Status (Get-UiString 'MassUpdateCanceledStatus')
@@ -1062,7 +1134,7 @@ $removeOldAppsButton.Add_Click({
   if (-not (Test-Connected)) { return }
   if (Test-UiBusy) { return }
   try {
-    $supersededApps = @(Get-WtWin32Apps -Superseded:$true -ErrorAction Stop)
+    $supersededApps = @(Get-Win32AppsResilient -Superseded -Label 'superseded cleanup')
   } catch {
     Update-Status ((Get-UiString 'SupersededFetchErrorStatus') -f $_.Exception.Message)
     Write-Log "removeOldApps error: $($_.Exception.Message)"
@@ -1078,10 +1150,12 @@ $removeOldAppsButton.Add_Click({
       [System.Windows.Forms.MessageBoxIcon]::Question
     )
     if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
-      $script:progressBar.Value = 0
-      $script:progressBar.Visible = $true
+      Show-Progress -Total ([Math]::Max(1, @($supersededApps).Count))
       $removedCount = 0; $keptCount = 0
+      $supersededDone = 0
       foreach ($app in @($supersededApps)) {
+        Set-ProgressValue $supersededDone
+        $supersededDone++
         $assignmentProbe = Get-AppAssignmentProbe -AppId $app.GraphId -AppName $app.Name
         $installationProbe = Get-AppInstallationProbe -AppId $app.GraphId -AppName $app.Name
         if (-not $assignmentProbe.Succeeded -or -not $installationProbe.Succeeded -or
@@ -1092,6 +1166,10 @@ $removeOldAppsButton.Add_Click({
           continue
         }
         try {
+          # Stand hier zweimal hintereinander mit identischen Argumenten (und kaputter Einrueckung):
+          # zwei Graph-Lesevorgaenge und zwei Schnappschuesse je geloeschter App statt einem.
+          $null = Save-AppScopeSnapshot -AppId ([string]$app.GraphId) -AppName ([string]$app.Name) `
+            -Version ([string]$app.CurrentVersion) -Reason (Get-UiString 'ScopeSnapshotReasonSuperseded')
           Invoke-WtRemoveWin32App -AppId $app.GraphId
           Add-SessionActivity -Kind 'SupersededRemoved' -Name ([string]$app.Name) -FromVersion ([string]$app.CurrentVersion)
           $removedCount++
@@ -1121,8 +1199,7 @@ $removeOldAppsButton.Add_Click({
           }
         }
       }
-      $script:progressBar.Maximum = 100
-      $script:progressBar.Value = 100
+      Set-ProgressValue $supersededDone
       Update-Status ((Get-UiString 'DeletedAllSupersededStatus') -f $removedCount, $keptCount)
       try { $supersededSearchButton.PerformClick() } catch { Write-LogDebug ("Superseded refresh: {0}" -f $_.Exception.Message) }
     } else {
@@ -1131,6 +1208,14 @@ $removeOldAppsButton.Add_Click({
   } catch {
     Write-Log "Error loading superseded apps: $($_.Exception.Message)"
     Update-Status ((Get-UiString 'GenericErrorStatus') -f $_.Exception.Message)
+  } finally {
+    # Ohne dieses finally blieb die Fortschrittsanzeige nach dem Loeschen abgeloester Apps stehen -
+    # und weil ihre Sichtbarkeit die Sperre gegen gleichzeitige Vorgaenge IST (Test-OperationRunning),
+    # galt die Anwendung anschliessend dauerhaft als beschaeftigt: jeder weitere Klick wurde
+    # abgewiesen oder in die Warteschlange gelegt, bis irgendein anderer Vorgang die Anzeige
+    # zufaellig ausblendete. Der Fehler stammt aus der Balken-Fassung (dort blieb er auf 100 %
+    # stehen) und ist erst durch die neue StaticCheck-Regel aufgefallen.
+    Hide-Progress
   }
 })
 
@@ -1138,20 +1223,24 @@ $removeOldAppsButton.Add_Click({
 $script:supersededApps = @()
 $supersededSearchButton.Add_Click({
   if (-not (Test-Connected)) { return }
-  if (Test-UiBusy) { return }
+  # Read-only, so queued rather than discarded (see the update search above).
+  if (Test-UiBusy -DeferKey 'superseded-search' -DeferLabel (Get-UiString 'DeferLabelSupersededSearch') `
+        -DeferAction { $supersededSearchButton.PerformClick() }) { return }
   try {
     Update-Status (Get-UiString 'SearchingSupersededStatus')
-    $script:supersededApps = Get-WtWin32Apps -Superseded $true
+    # @() matters here beyond the retry: a tenant with exactly one superseded app used to leave a
+    # scalar in a variable that line 1184 indexes and line 1180 tests for emptiness.
+    $script:supersededApps = @(Get-Win32AppsResilient -Superseded -Label 'superseded search')
     # Also pull the CURRENT (non-superseded) apps so each old entry can show the version that
     # replaced it – "Chrome — 150.x (current: 151.x)" – instead of a bare old version number.
     $currentByName = @{}
     try {
-      foreach ($cur in @(Get-WtWin32Apps -Superseded:$false -ErrorAction SilentlyContinue)) {
+      foreach ($cur in @(Get-Win32AppsResilient -Label 'superseded search (current versions)')) {
         if ($cur -and $cur.Name) { $currentByName[[string]$cur.Name] = [string]$cur.CurrentVersion }
       }
     } catch { Write-Log "Superseded search: could not load current versions for comparison: $($_.Exception.Message)" }
 
-    $supersededDropdown.Items.Clear()
+    $supersededListBox.Items.Clear()
     foreach ($app in @($script:supersededApps)) {
       $name = $app.Name
       $version = $app.CurrentVersion
@@ -1160,10 +1249,12 @@ $supersededSearchButton.Add_Click({
       if ($newVer -and $newVer -ne $version) {
         $display += ("  ({0} {1})" -f (Get-UiString 'SupersededCurrentLabel'), $newVer)
       }
-      [void]$supersededDropdown.Items.Add($display)
+      # UNMARKIERT eingetragen. Ein Suchergebnis, das sich selbst zum Loeschen vormarkiert, macht
+      # aus einem Blick in den Bestand einen Klick vom Loeschen entfernt.
+      [void]$supersededListBox.Items.Add($display, $false)
     }
-    if ($supersededDropdown.Items.Count -gt 0) { $supersededDropdown.SelectedIndex = 0 }
-    Update-Status ((Get-UiString 'SupersededSearchCompletedStatus') -f $supersededDropdown.Items.Count)
+    Update-SupersededListState
+    Update-Status ((Get-UiString 'SupersededSearchCompletedStatus') -f $supersededListBox.Items.Count)
   } catch {
     Write-Log "Superseded search error: $($_.Exception.Message)"
     Update-Status ((Get-UiString 'SupersededSearchErrorStatus') -f $_.Exception.Message)
@@ -1177,52 +1268,125 @@ $supersededSearchButton.Add_Click({
 $deleteSelectedAppButton.Add_Click({
   if (-not (Test-Connected)) { return }
   if (Test-UiBusy) { return }
-  if (-not $script:supersededApps -or $supersededDropdown.SelectedIndex -lt 0) {
+  # Ueber die MARKIERTEN Eintraege, nicht ueber einen ausgewaehlten. Die Indizes werden vorab in
+  # eine eigene Liste kopiert: der Lauf loescht in Intune und startet danach die Suche neu, die die
+  # Liste leert - ueber CheckedIndices zu iterieren, waehrend sich die Quelle darunter aendert, ist
+  # genau das Muster, das an anderer Stelle in diesem Programm "Collection was modified" ergab.
+  $checked = @()
+  try { foreach ($i in $supersededListBox.CheckedIndices) { $checked += [int]$i } } catch { }
+  if (-not $script:supersededApps -or $checked.Count -eq 0) {
     Update-Status (Get-UiString 'SelectSupersededFirstStatus')
     return
   }
-  $app = $script:supersededApps[$supersededDropdown.SelectedIndex]
+  $victims = @()
+  foreach ($i in $checked) {
+    if ($i -ge 0 -and $i -lt @($script:supersededApps).Count) { $victims += $script:supersededApps[$i] }
+  }
+  if ($victims.Count -eq 0) { Update-Status (Get-UiString 'SelectSupersededFirstStatus'); return }
+
+  # Namen aller Betroffenen in die Rueckfrage - bei mehr als einer App ist "wirklich loeschen?"
+  # ohne die Liste keine Frage, die man beantworten kann.
+  $names = ($victims | ForEach-Object { "{0} {1}" -f $_.Name, $_.CurrentVersion }) -join "`r`n"
   $result = [System.Windows.Forms.MessageBox]::Show(
-    ((Get-UiString 'DeleteAppConfirmDialog') -f $app.Name),
+    ((Get-UiString 'RemoveSupersededConfirmDialog') -f $names),
     (Get-UiString 'ConfirmationTitle'),
     [System.Windows.Forms.MessageBoxButtons]::YesNo,
-    [System.Windows.Forms.MessageBoxIcon]::Question
+    [System.Windows.Forms.MessageBoxIcon]::Warning,
+    [System.Windows.Forms.MessageBoxDefaultButton]::Button2
   )
-  if ($result -eq [System.Windows.Forms.DialogResult]::Yes) {
+  if ($result -ne [System.Windows.Forms.DialogResult]::Yes) {
+    Update-Status (Get-UiString 'RemovalAbortedStatus')
+    return
+  }
+
+  $removed = 0; $kept = 0
+  foreach ($app in $victims) {
+    # Dieselbe Sicherheitspruefung wie bei jeder anderen Loeschung: null Zuweisungen UND null
+    # erfolgreiche Installationen, beides bestaetigt - sonst bleibt die Version stehen.
+    #
+    # Die Ansage davor ist nicht Kosmetik: die beiden Sonden fragen bis zu drei Graph-Endpunkte ab,
+    # und wenn die nicht antworten, dauert das mit Zeitueberlaeufen ueber zehn Sekunden. Ohne diese
+    # Zeile steht das Fenster still und sieht aus, als haenge es.
+    Update-Status ((Get-UiString 'SupersededProbingStatus') -f $app.Name)
+    [System.Windows.Forms.Application]::DoEvents()
     $assignmentProbe = Get-AppAssignmentProbe -AppId $app.GraphId -AppName $app.Name
     $installationProbe = Get-AppInstallationProbe -AppId $app.GraphId -AppName $app.Name
-    if (-not $assignmentProbe.Succeeded -or -not $installationProbe.Succeeded -or
-        $assignmentProbe.HasAssignments -or $installationProbe.HasInstallations) {
-      Update-Status ((Get-UiString 'SupersededSafetyKeptStatus') -f $app.Name)
-      Write-Log ("Delete superseded: kept {0} {1} ({2}); assignments/installations are present or unknown." -f $app.Name, $app.CurrentVersion, $app.GraphId)
-      return
+
+    # ZWEI Faelle, die vorher in einer Meldung zusammenfielen ("vorhanden ODER nicht pruefbar").
+    # Sie bedeuten voellig Verschiedenes: im einen ist die App noch in Benutzung und alles ist in
+    # Ordnung, im anderen hat Intune nicht geantwortet und man weiss schlicht nichts. Wer das nicht
+    # unterscheiden kann, weiss nicht, ob er warten oder etwas reparieren muss.
+    $stateUnknown = (-not $assignmentProbe.Succeeded) -or (-not $installationProbe.Succeeded)
+    $stillInUse = $assignmentProbe.HasAssignments -or $installationProbe.HasInstallations
+    if ($stateUnknown -or $stillInUse) {
+      $kept++
+      if ($stateUnknown) {
+        Update-Status ((Get-UiString 'SupersededKeptUnknownStatus') -f $app.Name)
+        Write-Log ("Delete superseded: kept {0} {1} ({2}); the state could NOT be established (assignment probe ok={3}, installation probe ok={4}) - an unknown state never authorizes deletion." -f $app.Name, $app.CurrentVersion, $app.GraphId, $assignmentProbe.Succeeded, $installationProbe.Succeeded)
+      } else {
+        Update-Status ((Get-UiString 'SupersededSafetyKeptStatus') -f $app.Name)
+        Write-Log ("Delete superseded: kept {0} {1} ({2}); still in use (assignments={3}, installations={4})." -f $app.Name, $app.CurrentVersion, $app.GraphId, $assignmentProbe.HasAssignments, $installationProbe.HasInstallations)
+      }
+      [System.Windows.Forms.Application]::DoEvents()
+      continue
     }
     try {
+      $null = Save-AppScopeSnapshot -AppId ([string]$app.GraphId) -AppName ([string]$app.Name) `
+        -Version ([string]$app.CurrentVersion) -Reason (Get-UiString 'ScopeSnapshotReasonSuperseded')
       Invoke-WtRemoveWin32App -AppId $app.GraphId
       Add-SessionActivity -Kind 'SupersededRemoved' -Name ([string]$app.Name) -FromVersion ([string]$app.CurrentVersion)
+      $removed++
       Update-Status ((Get-UiString 'DeletedStatus') -f $app.Name)
-      try { $supersededSearchButton.PerformClick() } catch { Write-LogDebug ("Superseded refresh: {0}" -f $_.Exception.Message) }
     } catch {
       $delMsg = $_.Exception.Message
       if ($delMsg -match 'parent of another app' -or $delMsg -match 'Cannot delete this app') {
         $newId = Get-SupersedingAppIdFromError $delMsg
         if ($newId -and (Remove-SupersededByUnlinking -OldAppId $app.GraphId -NewAppId $newId)) {
+          $removed++
           Update-Status ((Get-UiString 'DeletedStatus') -f $app.Name)
-          try { $supersededSearchButton.PerformClick() } catch { Write-LogDebug ("Superseded refresh: {0}" -f $_.Exception.Message) }
         } else {
+          $kept++
           Write-Log "Delete superseded: kept $($app.Name) - still referenced as the predecessor of a newer version."
           Update-Status ((Get-UiString 'SupersededStillReferencedStatus') -f $app.Name)
         }
       } else {
+        $kept++
         Update-Status ((Get-UiString 'ErrorRemovalStatus') -f $delMsg)
       }
     }
-  } else {
-    Update-Status (Get-UiString 'RemovalAbortedStatus')
+    [System.Windows.Forms.Application]::DoEvents()
   }
+  Write-Log ("Delete checked superseded apps: {0} removed, {1} kept." -f $removed, $kept)
+  Update-Status ((Get-UiString 'SupersededDeleteCheckedDone') -f $removed, $kept)
+  # Neu suchen, damit die Liste den Tenant zeigt und nicht den Stand von vor dem Loeschen.
+  try { $supersededSearchButton.PerformClick() } catch { Write-LogDebug ("Superseded refresh: {0}" -f $_.Exception.Message) }
 })
 
-$disconnectButton.Add_Click({
+# --- Lauf stoppen -------------------------------------------------------------------------------
+# Der Knopf erscheint nur, wenn Show-Progress -Cancellable gerufen wurde, also nur dort, wo der
+# Merker auch abgefragt wird. Er setzt nur den Merker: abgebrochen wird am naechsten sicheren
+# Punkt, ein laufender Upload nach Intune wird noch fertig gemacht.
+$script:cancelRunButton.Add_Click({
+  Request-RunCancel -Reason 'stop button'
+  Update-Status (Get-UiString 'CancelRunRequestedStatus')
+})
+
+# Trennen und Abmelden mitten in einem Lauf: erst den Lauf stoppen, dann trennen.
+#
+# Vorher wurde sofort getrennt und der Lauf lief weiter - er paketierte und lud gegen eine Sitzung,
+# die es nicht mehr gab. Wer waehrend eines Fehlers auf "Trennen" drueckt, will genau das nicht.
+# Die Trennung wird deshalb zurueckgestellt, bis der Lauf am naechsten sicheren Punkt endet;
+# Invoke-PendingDeferredActions fuehrt sie danach aus.
+function Test-DeferWhileRunning {
+  param([Parameter(Mandatory)][string]$Key, [Parameter(Mandatory)][scriptblock]$Action, [string]$Label = '')
+  if (-not (Test-OperationRunning)) { return $false }
+  Request-RunCancel -Reason $Key
+  Add-DeferredAction -Key $Key -Action $Action -Label $Label
+  Update-Status (Get-UiString 'DisconnectDuringRunStatus')
+  return $true
+}
+
+function Disconnect-TenantSession {
   # Lightweight disconnect: ends the current session only. The Windows auth broker (WAM)
   # and the Microsoft.Graph disk token cache are left untouched on purpose, so the next
   # login reconnects silently without a new sign-in prompt.
@@ -1237,9 +1401,14 @@ $disconnectButton.Add_Click({
   if ($loginInfoLabel) { $loginInfoLabel.Text = "" }
   Update-Status (Get-UiString 'DisconnectedStatus')
   Set-ConnectedUIState -Connected $false
+}
+
+$disconnectButton.Add_Click({
+  if (Test-DeferWhileRunning -Key 'disconnect' -Action { Disconnect-TenantSession } -Label (Get-UiString 'DisconnectButton')) { return }
+  Disconnect-TenantSession
 })
 
-$logoutButton.Add_Click({
+function Disconnect-TenantSessionAndForgetTokens {
   try {
     Disconnect-WtWinTuner -ErrorAction Stop
   } catch {
@@ -1253,10 +1422,18 @@ $logoutButton.Add_Click({
 
   $script:isConnected = $false
   $script:currentUserUpn = ""
+  # Abmelden beendet die Zuordnung des Nachweises; "Trennen" laesst sie absichtlich stehen, damit
+  # ein noch laufender Lauf seine Eintraege weiter dem richtigen Kunden zuordnet.
+  $script:activityTenantUpn = ""
   if ($loginInfoLabel) { $loginInfoLabel.Text = "" }
   $usernameBox.Text = ""
   Update-Status (Get-UiString 'LogoutSuccessStatus')
   Set-ConnectedUIState -Connected $false
+}
+
+$logoutButton.Add_Click({
+  if (Test-DeferWhileRunning -Key 'logout' -Action { Disconnect-TenantSessionAndForgetTokens } -Label (Get-UiString 'LogoutButton')) { return }
+  Disconnect-TenantSessionAndForgetTokens
 })
 # ==================================================
 # ==================================================
@@ -1319,7 +1496,10 @@ function Update-DiscoveredListUI {
     # Show EITHER the hint (nothing scanned yet) OR the list – never both, so the native list HWND
     # can't paint over the hint. "Empty" = nothing scanned (raw list empty), not merely filtered to 0.
     $empty = (-not $script:discoveredRaw -or @($script:discoveredRaw).Count -eq 0)
-    if ($discoveredEmptyLabel) { $discoveredEmptyLabel.Visible = $empty }
+    if ($discoveredEmptyLabel) {
+      Set-ListEmptyText -Label $discoveredEmptyLabel -NormalKey 'DiscoveredEmptyHint'
+      $discoveredEmptyLabel.Visible = $empty
+    }
     $discoveredListBox.Visible = (-not $empty)
     if ($empty -and $discoveredEmptyLabel) { $discoveredEmptyLabel.BringToFront() }
 }
@@ -1330,10 +1510,23 @@ function Update-UpdatesEmptyState {
   # managed label, which previously produced a garbled/mis-placed hint (same fix as Discovered).
   $empty = (@($script:updateApps).Count -eq 0)
   if ($updatesEmptyLabel) {
+    Set-ListEmptyText -Label $updatesEmptyLabel -NormalKey 'UpdatesEmptyHint'
     $updatesEmptyLabel.Visible = $empty
     if ($empty) { $updatesEmptyLabel.BringToFront() }
   }
   if ($updateListBox) { $updateListBox.Visible = (-not $empty) }
+  # Die Zahl gehoert in den Knopf, nicht in die Ruecksprache: "Alle 47 aktualisieren" wirkt vor dem
+  # Klick, eine Rueckfrage erst danach. Ohne Ergebnis bleibt die Beschriftung ohne Zahl.
+  if ($updateAllButton) {
+    try {
+      $count = @($script:updateApps).Count
+      $updateAllButton.Text = if ($count -gt 0) {
+        (Get-UiString 'UpdateAllButtonCount') -f $count
+      } else {
+        Get-UiString 'UpdateAllButton'
+      }
+    } catch { Write-LogDebug 'update-all button label' }
+  }
 }
 
 # Listener für das Suchfeld (Text-Eingabe) – debounced 200ms
@@ -1398,8 +1591,7 @@ $scanDiscoveredButton.Add_Click({
     $discoveredListBox.Items.Clear()
     $script:discoveredRaw = [System.Collections.Generic.List[object]]::new()
 
-    $script:progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
-    $script:progressBar.Visible = $true
+    Show-Progress
     [System.Windows.Forms.Application]::DoEvents()  # pumps the message loop; this work stays on the UI thread on purpose (see 70-Runtime)
 
 # --- GRAPH-AUTH BLOCK (FIXED) ---
@@ -1425,11 +1617,18 @@ $scanDiscoveredButton.Add_Click({
     # 1. Vorhandene Apps checken (EXTREM SCHNELL DURCH "Resolve" STATT "Try-Resolve")
     Update-Status (Get-UiString 'LoadingManagedAppsStatus')
     [System.Windows.Forms.Application]::DoEvents()  # pumps the message loop; this work stays on the UI thread on purpose (see 70-Runtime)
-    $existingApps = @(Get-WtWin32Apps -Superseded:$false -ErrorAction SilentlyContinue 2>$null 3>$null 4>$null 5>$null 6>$null)
+    # The stream redirections that used to sit here (2>$null 3>$null ... 6>$null) did nothing for the
+    # case they looked like they covered: -ErrorAction and stream redirection do not suppress an
+    # unhandled exception from a binary cmdlet, so the module's race still reached the outer catch.
+    # All they achieved was hiding the module's own verbose/warning output - including a genuine
+    # permission or throttling warning - from the log.
+    $existingApps = @(Get-Win32AppsResilient -Label 'discovered scan (existing apps)')
     $existingPackageIds = [System.Collections.Generic.List[object]]::new()
     foreach ($eApp in $existingApps) {
         [System.Windows.Forms.Application]::DoEvents()  # pumps the message loop; this work stays on the UI thread on purpose (see 70-Runtime)
-        $id = Resolve-WtWingetId -AppOrResult $eApp 2>$null 3>$null 4>$null 5>$null 6>$null
+        # No stream redirections here: Resolve-WtWingetId is our own function and does nothing but
+        # read properties off an object, so it cannot write to any stream in the first place.
+        $id = Resolve-WtWingetId -AppOrResult $eApp
         if ($id) { $existingPackageIds.Add($id) }
     }
 
@@ -1437,21 +1636,26 @@ $scanDiscoveredButton.Add_Click({
     Update-Status (Get-UiString 'FetchingDetectedStatus')
     [System.Windows.Forms.Application]::DoEvents()  # pumps the message loop; this work stays on the UI thread on purpose (see 70-Runtime)
 
-    $uri = "https://graph.microsoft.com/beta/deviceManagement/detectedApps?`$top=500&`$orderby=deviceCount desc"
-    $detectedApps = [System.Collections.Generic.List[object]]::new()
-    $maxPages = 100
-    $pageCount = 0
-
-    do {
-        $response = Invoke-RestMethod -Uri $uri -Method GET -Headers $discoveredHeaders -ErrorAction Stop
-        if ($response.value) { $detectedApps.AddRange([object[]]$response.value) }
-        $uri = $response.'@odata.nextLink'
-        $pageCount++
-        if ($pageCount -ge $maxPages) {
-            Write-Log "Warning: Graph API pagination limit ($maxPages pages) reached. Some apps may not be shown."
-            break
+    # Erst mit dem Token, das die Anwendung ohnehin hat. Antwortet der Tenant mit 403, fehlt genau
+    # eine optionale Berechtigung - dann wird sie ANGEBOTEN statt nur gemeldet, und die Abfrage
+    # laeuft anschliessend ueber die Graph-PowerShell-Sitzung, die sie traegt.
+    $detectedApps = $null
+    try {
+        $detectedApps = Get-TenantDetectedApps -Headers $discoveredHeaders
+    } catch {
+        $fetchError = [string]$_.Exception.Message
+        if (-not ($fetchError -match '\b403\b' -or $fetchError -match '(?i)forbidden')) { throw }
+        Write-Log (Get-UiString 'DiscoveredForbiddenLog')
+        Update-Status (Get-UiString 'DiscoveredForbiddenStatus')
+        [System.Windows.Forms.Application]::DoEvents()
+        if (-not (Connect-OptionalGraphScope -Scope 'DeviceManagementManagedDevices.Read.All' -TextKey 'DiscoveredConsentDialog')) {
+            Update-Status (Get-UiString 'DiscoveredForbiddenStatus')
+            return
         }
-    } while ($uri)
+        Update-Status (Get-UiString 'FetchingDetectedStatus')
+        [System.Windows.Forms.Application]::DoEvents()
+        $detectedApps = Get-TenantDetectedApps -UseGraphSession
+    }
 
     if (-not $detectedApps -or $detectedApps.Count -eq 0) {
         Update-Status (Get-UiString 'NoDiscoveredFoundStatus')
@@ -1501,18 +1705,21 @@ $scanDiscoveredButton.Add_Click({
     Write-Log "Discovery prep -> Filtered apps: $total, Normalized apps: $($normalizedApps.Count), Unique search terms: $queryTotal, Skipped non-candidates: $skippedNonCandidateCount, Skip-mode: $($script:skipLowValueWingetCandidates)"
 
     # Phase 1: fetch/search all unique terms
-    $script:progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
-    $script:progressBar.Maximum = if ($queryTotal -gt 0) { $queryTotal } else { 1 }
-    $script:progressBar.Value = 0
+    Show-Progress -Total $(if ($queryTotal -gt 0) { $queryTotal } else { 1 })
 
     foreach ($searchName in $uniqueSearchNames) {
         $queryCurrent++
-        $script:progressBar.Value = $queryCurrent
+        Set-ProgressValue ($queryCurrent - 1)
         if (($queryCurrent -eq 1) -or ($queryCurrent % 25 -eq 0) -or ($queryCurrent -eq $queryTotal)) {
             Update-Status ((Get-UiString 'QueryingWingetStatus') -f $queryCurrent, $queryTotal, $normalizedApps.Count, $searchName)
             [System.Windows.Forms.Application]::DoEvents()  # pumps the message loop; this work stays on the UI thread on purpose (see 70-Runtime)
         }
         try {
+            # The stream redirections stay HERE, deliberately, unlike the one that used to sit on the
+            # inventory read above. This runs once per unique search name - hundreds of iterations in
+            # a real scan - and the module writes progress and warning output on every call. Without
+            # the suppression a single scan buries the log. A failed search is not lost either way:
+            # the catch below records it, and an empty result simply means "no WinGet match".
             $searchResultCache[$searchName] = @(Search-WtWinGetPackage -SearchQuery $searchName -ErrorAction SilentlyContinue 2>$null 3>$null 4>$null 5>$null 6>$null)
         } catch {
             $searchResultCache[$searchName] = @()
@@ -1523,13 +1730,12 @@ $scanDiscoveredButton.Add_Click({
     # Phase 2: match normalized discovered apps against cached results
     $processTotal = $normalizedApps.Count
     $processCurrent = 0
-    $script:progressBar.Maximum = if ($processTotal -gt 0) { $processTotal } else { 1 }
-    $script:progressBar.Value = 0
+    Show-Progress -Total $(if ($processTotal -gt 0) { $processTotal } else { 1 })
 
     foreach ($entry in $normalizedApps) {
         [System.Windows.Forms.Application]::DoEvents()  # pumps the message loop; this work stays on the UI thread on purpose (see 70-Runtime)
         $processCurrent++
-        $script:progressBar.Value = $processCurrent
+        Set-ProgressValue ($processCurrent - 1)
         if (($processCurrent -eq 1) -or ($processCurrent % 25 -eq 0) -or ($processCurrent -eq $processTotal)) {
             Update-Status ((Get-UiString 'MatchingAppsStatus') -f $processCurrent, $processTotal, $entry.App.displayName)
             [System.Windows.Forms.Application]::DoEvents()  # pumps the message loop; this work stays on the UI thread on purpose (see 70-Runtime)
@@ -1630,15 +1836,23 @@ $scanDiscoveredButton.Add_Click({
     }
 
   } catch {
-    Update-Status ((Get-UiString 'FetchDiscoveredErrorStatus') -f $_.Exception.Message)
-    Write-Log "Scan Discovered Error: $($_.Exception.Message)"
+    # 403 ist hier kein Fehler des Werkzeugs, sondern eine fehlende Berechtigung - und zwar eine,
+    # die nichts mit Paketieren oder Bereitstellen zu tun hat: die Liste erkannter Apps kommt aus
+    # deviceManagement/detectedApps und verlangt DeviceManagementManagedDevices.Read.All. Die rohe
+    # Meldung ("Response status code does not indicate success") sagt niemandem, was zu tun ist.
+    $discoveredError = [string]$_.Exception.Message
+    if ($discoveredError -match '403' -or $discoveredError -match '(?i)forbidden') {
+      Update-Status (Get-UiString 'DiscoveredForbiddenStatus')
+      Write-Log (Get-UiString 'DiscoveredForbiddenLog')
+    } else {
+      Update-Status ((Get-UiString 'FetchDiscoveredErrorStatus') -f $discoveredError)
+      Write-Log "Scan Discovered Error: $discoveredError"
+    }
   } finally {
     $ProgressPreference = $oldProgress
     $InformationPreference = $oldInfo
     $scanDiscoveredButton.Enabled = $true
-    $script:progressBar.Maximum = 100
-    $script:progressBar.Value = 0
-    $script:progressBar.Visible = $false
+    Hide-Progress
   }
 })
 
@@ -1670,7 +1884,7 @@ $deployDiscoveredButton.Add_Click({
       Update-Status ((Get-UiString 'InvalidFolderDialog') -f $rootFolder); return
     }
     if (-not (Test-PackageFolderUsable -Folder $rootFolder)) { return }
-    if (-not (Test-Path $rootFolder)) { New-Item -ItemType Directory -Path $rootFolder -Force | Out-Null }
+    if (-not (Test-Path -LiteralPath $rootFolder)) { [void][System.IO.Directory]::CreateDirectory($rootFolder) }
 
     $assignTarget = Get-SelectedAssignmentTarget -TargetCombo $discoveredAssignTargetCombo -GroupIdBox $discoveredAssignGroupIdBox
     $discoveredTargetChanges = Get-DeployAssignmentTargetChanges
@@ -1714,10 +1928,7 @@ $deployDiscoveredButton.Add_Click({
         $checkAllDiscoveredButton.Enabled = $false
         $uncheckAllDiscoveredButton.Enabled = $false
 
-        $script:progressBar.Style = [System.Windows.Forms.ProgressBarStyle]::Continuous
-        $script:progressBar.Maximum = $checkedItems.Count
-        $script:progressBar.Value = 0
-        $script:progressBar.Visible = $true
+        Show-Progress -Total ([Math]::Max(1, $checkedItems.Count))
 
         $successCount = 0
         $failedCount = 0
@@ -1725,7 +1936,7 @@ $deployDiscoveredButton.Add_Click({
 
         foreach ($item in $checkedItems) {
             $i++
-            $script:progressBar.Value = $i
+            Set-ProgressValue ($i - 1)
             $wingetApp = $item.WingetApp
 
             Update-Status ((Get-UiString 'PackagingDeployingStatus') -f $i, $checkedItems.Count, $wingetApp.Name)
@@ -1749,7 +1960,7 @@ $deployDiscoveredButton.Add_Click({
 
                 # The tenant may have changed since the discovery scan. Recheck immediately before
                 # upload so another administrator's deployment cannot result in a duplicate app.
-                $freshApps = @(Get-WtWin32Apps -Superseded:$false -ErrorAction Stop)
+                $freshApps = @(Get-Win32AppsResilient -Label 'discovered deploy duplicate guard')
                 $alreadyThere = Find-ExistingUpdateTarget -Apps $freshApps -PackageId $packageId -Version $effVersion
                 if ($alreadyThere) {
                   throw ("Package {0} {1} already exists in Intune as {2}; duplicate deployment blocked." -f $packageId, $effVersion, $alreadyThere.GraphId)
@@ -1778,10 +1989,12 @@ $deployDiscoveredButton.Add_Click({
                   }
                 }
                 if ($script:autoUpdateCheckbox -and $script:autoUpdateCheckbox.Checked) {
-                  try {
-                    Update-WtIntuneApp -AppId $discoveredGraphId -EnableAutoUpdate -ErrorAction Stop | Out-Null
-                  } catch {
-                    throw ("The app was uploaded, but auto-update could not be enabled: {0}" -f $_.Exception.Message)
+                  # Only a real failure of the call aborts the app. "No assignments yet" is the
+                  # NORMAL outcome on this path - apps are uploaded here without a temporary
+                  # assignment on purpose (see the log line above) - so it is recorded, not thrown.
+                  $autoUpdateOutcome = Enable-AppAutoUpdateChecked -AppId $discoveredGraphId -AppName ([string]$packageId)
+                  if ($autoUpdateOutcome.Verdict -eq 'failed') {
+                    throw ("The app was uploaded, but auto-update could not be enabled: {0}" -f $autoUpdateOutcome.Problem)
                   }
                 }
                 $successCount++
@@ -1793,6 +2006,7 @@ $deployDiscoveredButton.Add_Click({
             }
         }
 
+        Set-ProgressValue $i
         Update-Status ((Get-UiString 'DeploymentCompleteStatus') -f $successCount, $failedCount)
         [System.Windows.Forms.MessageBox]::Show(
             ((Get-UiString 'DeploymentFinishedDialog') -f $successCount, $failedCount),
@@ -1811,9 +2025,7 @@ $deployDiscoveredButton.Add_Click({
         $scanDiscoveredButton.Enabled = $true
         $checkAllDiscoveredButton.Enabled = $true
         $uncheckAllDiscoveredButton.Enabled = $true
-        $script:progressBar.Maximum = 100
-        $script:progressBar.Value = 0
-        $script:progressBar.Visible = $false
+        Hide-Progress
     }
 })
 
@@ -1859,16 +2071,65 @@ $exportDiscoveredCsvButton.Add_Click({
 # dashboard quick-action buttons).
 $navFlow = New-Object System.Windows.Forms.Panel
 $navFlow.Dock = [System.Windows.Forms.DockStyle]::Fill
+# Ohne das waeren Eintraege, die nicht in die Hoehe passen, unerreichbar - keine Bildlaufleiste,
+# kein Hinweis, einfach weg. Bei acht Eintraegen fiel das nie auf; mit Ueberschriften und einem
+# kleinen Fenster schon.
+$navFlow.AutoScroll = $true
 $navFlow.Tag = 'no-theme'
 
 $navY = 8
-foreach ($s in $script:sections) {
+# Gruppentitel werden VOR dem ersten Eintrag ihrer Gruppe eingeschoben. Sie sind reine
+# Beschriftungen, keine Knoepfe - anklickbar waere irrefuehrend, es gibt keine Gruppenseite.
+$navGroupLabels = @{ deploy = (Get-UiString 'NavGroupDeploy'); manage = (Get-UiString 'NavGroupManage'); local = (Get-UiString 'NavGroupLocal') }
+$navSeenGroups = @{}
+# Gezeichnet wird in GRUPPEN-Reihenfolge, nicht in der Reihenfolge, in der die Sektionen registriert
+# wurden. Die haengt davon ab, in welcher Quelldatei ein Bereich gebaut wird - und "Eigene Installer"
+# entsteht in 83-, also nach "Alle Tenant-Apps" aus 82-, und landete damit unter der falschen
+# Ueberschrift. Innerhalb einer Gruppe bleibt die bisherige Reihenfolge erhalten.
+$navGroupOrder = @('start', 'deploy', 'manage', 'local')
+# Innerhalb einer Gruppe entschied bisher die Reihenfolge der QUELLDATEIEN, in denen die Bereiche
+# gebaut werden - "Alle Tenant-Apps" (Teil 82) stand deshalb vor "Erkannte Apps" (Teil 85), ohne
+# dass das jemand so entschieden haette. Diese Liste ist die Entscheidung; wer einen Bereich
+# verschieben will, aendert sie, nicht die Dateireihenfolge. Nicht aufgefuehrte Schluessel landen
+# hinten (in ihrer Gruppe), damit ein neuer Bereich nie verschwindet.
+$navKeyOrder = @('dashboard',
+                 'winget', 'store', 'ownpackage',
+                 'updates', 'discovered', 'tenant', 'appsettings',
+                 'localpackages', 'workrecord', 'settings')
+$navOrdered = @($script:sections | Sort-Object -Stable `
+  @{ Expression = {
+      $idx = $navGroupOrder.IndexOf([string]$_.Group)
+      if ($idx -lt 0) { $navGroupOrder.Count } else { $idx }
+    } },
+  @{ Expression = {
+      $idx = $navKeyOrder.IndexOf([string]$_.Key)
+      if ($idx -lt 0) { $navKeyOrder.Count } else { $idx }
+    } })
+foreach ($s in $navOrdered) {
+  $group = [string]$s.Group
+  if ($group -and $navGroupLabels.ContainsKey($group) -and -not $navSeenGroups.ContainsKey($group)) {
+    $navSeenGroups[$group] = $true
+    $navY += 10
+    $groupLabel = New-Object System.Windows.Forms.Label
+    $groupLabel.Tag = 'no-theme'
+    $groupLabel.Text = ([string]$navGroupLabels[$group]).ToUpperInvariant()
+    # Gruppentitel stehen auf derselben Spalte wie die Symbole der Eintraege (und wie der Titel in
+    # der Kopfzeile) - siehe $script:navContentIndent in 75-UiState.
+    $groupLabel.Location = New-Object System.Drawing.Point(($script:navButtonIndent + $script:navButtonTextPad), $navY)
+    $groupLabel.Size = New-Object System.Drawing.Size(192, 18)
+    $groupLabel.Font = New-Object System.Drawing.Font("Segoe UI", 7.5, [System.Drawing.FontStyle]::Bold)
+    $groupLabel.ForeColor = $script:sidebarForeColor
+    $groupLabel.BackColor = $script:sidebarBackColor
+    $navFlow.Controls.Add($groupLabel)
+    $script:navGroupLabelList = @($script:navGroupLabelList) + @($groupLabel)
+    $navY += 20
+  }
   $btn = New-Object System.Windows.Forms.Button
   $btn.Text = $s.Label
   $btn.Tag = 'no-theme'
-  $btn.Location = New-Object System.Drawing.Point(8, $navY)
+  $btn.Location = New-Object System.Drawing.Point($script:navButtonIndent, $navY)
   $btn.Size = New-Object System.Drawing.Size(204, 40)
-  $btn.Padding = New-Object System.Windows.Forms.Padding(12, 0, 0, 0)
+  $btn.Padding = New-Object System.Windows.Forms.Padding($script:navButtonTextPad, 0, 0, 0)
   $btn.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
   $btn.FlatAppearance.BorderSize = 0
   $btn.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
@@ -1925,16 +2186,22 @@ Update-MenuTheme
 Update-StatusStripTheme
 # Tenant-action buttons look the same signed in or out (they were created disabled). Force them
 # enabled once here; the handlers gate themselves via Test-Connected (sign-in popup when needed).
-foreach ($b in @($updateSearchButton, $updateSelectedButton, $updateAllButton, $supersededSearchButton, $deleteSelectedAppButton, $removeOldAppsButton, $scanDiscoveredButton, $exportDiscoveredCsvButton)) {
+foreach ($b in @($updateSearchButton, $updateSelectedButton, $updateAllButton, $supersededSearchButton, $removeOldAppsButton, $scanDiscoveredButton, $exportDiscoveredCsvButton)) {
   if ($b) { $b.Enabled = $true }
 }
+# $deleteSelectedAppButton steht bewusst NICHT mehr in der Liste oben: er löscht die markierten
+# Einträge der Liste darüber und ist ohne Liste sinnlos. Update-SupersededListState schaltet ihn und
+# die zwei Markieren-Knöpfe mit dem Inhalt der Liste, hier einmal für den Leerzustand beim Start.
+try { Update-SupersededListState } catch { Write-LogDebug 'initial superseded list state' }
 Show-Section 'dashboard'
 
-# Style the log toggle to match the current theme and set its initial (expanded) label.
+# Style the log toggle to match the current theme and set its initial label.
 $logToggle.BackColor = $script:currentTheme.BackColor
 $logToggle.ForeColor = $script:currentTheme.ForeColor
 $logToggle.FlatAppearance.MouseOverBackColor = $script:currentTheme.TextBoxBackColor
-Set-LogExpanded $true
+# Der gespeicherte Zustand, nicht mehr fest aufgeklappt. -SkipSave, weil das Anwenden eines
+# gespeicherten Werts kein Speichern auslösen darf - sonst schriebe jeder Start die settings.json.
+Set-LogExpanded ([bool]$script:settings.LogExpanded) -SkipSave
 
 # Safe logger for closing context
 function Write-FileLog {
@@ -1971,9 +2238,10 @@ $form.Add_FormClosing({
     $script:_closingInProgress = $true
 
     # 2a. Hintergrund-Runspace fürs Paketieren abräumen, damit kein Thread das Beenden aufhält.
+    # Erst den Lauf stoppen, dann den Runspace schliessen - auch wenn es (noch) keinen gibt.
+    try { Request-RunCancel -Reason 'window closing' } catch { }   # class 3: teardown
     try {
         if ($script:pkgRunspace) {
-            $script:cancelBatch = $true    # lässt eine laufende Paketierung abbrechen
             $script:pkgRunspace.Close()
             $script:pkgRunspace.Dispose()
             $script:pkgRunspace = $null
@@ -2073,6 +2341,44 @@ $form.Add_Shown({
 # in which the predecessor was deleted although "keep the newest versions" was ticked too.
 # Load-Settings has already resolved it; say so once instead of changing a user's choice silently,
 # and persist the corrected state so the notice does not return on every start.
+# A settings file that could not be parsed leaves the defaults in place, and the first save then
+# replaces it. Say so once, and name the copy that was put aside - silently starting over with
+# defaults is how a user loses their package path and their group favourites without ever knowing.
+$form.Add_Shown({
+  if (-not $script:settingsCorruptBackupPath) { return }
+  $backupPath = [string]$script:settingsCorruptBackupPath
+  $script:settingsCorruptBackupPath = $null
+  [void]$form.BeginInvoke([System.Action]{
+    [void][System.Windows.Forms.MessageBox]::Show(
+      ((Get-UiString 'SettingsCorruptDialog') -f $backupPath),
+      (Get-UiString 'SettingsCorruptTitle'),
+      [System.Windows.Forms.MessageBoxButtons]::OK,
+      [System.Windows.Forms.MessageBoxIcon]::Warning)
+  })
+})
+
+# Der einmalige Hinweis auf ein umgezogenes Repository ist ENTFALLEN: die Umbenennung zu
+# "Verteilwerk" ist zurueckgenommen, das Repository hiess und heisst zTeck-arch/wintuner_gui. Ein
+# Hinweis auf einen Umzug, den es nicht gibt, waere schlimmer als keiner. Der Merker
+# RepoMoveNoticeShown bleibt in den Einstellungen liegen und stoert dort nicht.
+
+# Wurden Einstellungen aus dem Ordner der Zwischenfassung uebernommen (siehe 10-Settings), wird das
+# genau einmal gesagt - mit beiden Pfaden. Wer nach dem Wechsel seinen Paketordner sucht, muss
+# wissen, wo er jetzt steht und dass der alte Stand noch liegt.
+$form.Add_Shown({
+  if (-not $script:legacySettingsCopied) { return }
+  $legacyPath = [string]$script:legacySettingsCopied
+  $script:legacySettingsCopied = $null
+  Write-Log ("Settings taken over from the previous name: {0} -> {1}" -f $legacyPath, $script:settingsPath)
+  [void]$form.BeginInvoke([System.Action]{
+    [void][System.Windows.Forms.MessageBox]::Show(
+      ((Get-UiString 'LegacyDataTakenOverDialog') -f $script:settingsPath, $legacyPath),
+      (Get-UiString 'LegacyDataTakenOverTitle'),
+      [System.Windows.Forms.MessageBoxButtons]::OK,
+      [System.Windows.Forms.MessageBoxIcon]::Information)
+  })
+})
+
 $form.Add_Shown({
   if (-not $script:cleanupConflictResolved) { return }
   $script:cleanupConflictResolved = $false
@@ -2087,13 +2393,17 @@ $form.Add_Shown({
   })
 })
 
-# Async update check on startup so it doesn't block the UI – only when a self-update repo
-# is configured (see $script:githubRepo). Gated here on the main thread so nothing runs
-# and no status noise appears when the feature is unconfigured.
+# Suche nach Programm-Updates beim Start - nur wenn ein Repository konfiguriert ist UND der Nutzer
+# es will. Beides hier auf dem Hauptthread geprueft, damit im abgeschalteten Fall nichts laeuft und
+# keine Statusmeldung erscheint.
 $form.Add_Shown({
   # Apply the native dark/rounded window chrome now that the handle exists (Win11).
   Set-WindowChrome -Form $form -Dark ([bool]$script:currentTheme.Dark)
   if ([string]::IsNullOrWhiteSpace($script:githubRepo)) { return }
+  if (-not $script:settings.CheckAppUpdateOnStartup) {
+    Write-Log 'Start-up check for a newer version of this tool is switched off in the settings.'
+    return
+  }
   # BeginInvoke so the window paints before the check runs, then synchronously on the UI thread:
   # the former BackgroundWorker route never executed the scriptblock (no runspace on that thread),
   # so the startup check silently reported "up to date" for every version ever shipped.
@@ -2123,12 +2433,21 @@ foreach ($b in $script:infoBadges) {
 }
 
 $toolTip.SetToolTip($searchButton,          (Get-UiString 'TtSearchButton'))
+# Die Kachel wurde als "Apps mit Update-Bedarf" missverstanden - der Tooltip sagt, was sie zaehlt.
+if ($script:dashSupersededVal) { $toolTip.SetToolTip($script:dashSupersededVal, (Get-UiString 'TtDashSuperseded')) }
+# Sagt vor dem Klick, was "stoppen" hier heisst - sofort oder erst nach dem laufenden Upload.
+if ($script:cancelRunButton) { $toolTip.SetToolTip($script:cancelRunButton, (Get-UiString 'CancelRunTooltip')) }
 # Sits in the superseded card but acts on every managed app - the tooltip spells that out, plus
 # the fact that it deletes rather than supersedes.
 if ($versionCleanupButton) { $toolTip.SetToolTip($versionCleanupButton, ((Get-UiString 'TtVersionCleanupButton') -f $script:keepVersionCount)) }
 $toolTip.SetToolTip($versionsButton,        (Get-UiString 'TtVersionsButton'))
 if ($assignTargetCombo) { $toolTip.SetToolTip($assignTargetCombo, (Get-UiString 'TtAssignTarget')) }
 if ($assignGroupIdBox)  { $toolTip.SetToolTip($assignGroupIdBox,  (Get-UiString 'TtAssignGroupId')) }
+# Die drei Favoriten-Knoepfe erklaeren sich nicht von selbst - und sie sind der einzige Ort, an dem
+# Gruppen-Favoriten eines Kunden gepflegt werden.
+foreach ($favBtn in @($assignFavButton, $storeAssignFavButton, $discoveredAssignFavButton)) {
+  if ($favBtn) { $toolTip.SetToolTip($favBtn, (Get-UiString 'TtFavAdd')) }
+}
 $toolTip.SetToolTip($browseButton,          (Get-UiString 'TtBrowseButton'))
 if ($createButton)          { $toolTip.SetToolTip($createButton,          (Get-UiString 'TtCreateButton')) }
 if ($uploadButton)          { $toolTip.SetToolTip($uploadButton,          (Get-UiString 'TtUploadButton')) }
@@ -2141,6 +2460,10 @@ if ($disconnectButton)      { $toolTip.SetToolTip($disconnectButton,      (Get-U
 if ($logoutButton)          { $toolTip.SetToolTip($logoutButton,          (Get-UiString 'TooltipLogout')) }
 
 # tabOwnPackage
+if ($detectAutoButton)   { $toolTip.SetToolTip($detectAutoButton,   (Get-UiString 'TtDetectAuto')) }
+# The card's hint stays short enough to fit its box; the full explanation of why a rule needs the
+# installer and not the package lives here, where length costs nothing.
+if ($detectHint)         { $toolTip.SetToolTip($detectHint,         (Get-UiString 'DetectHintTooltip')) }
 if ($detectMsiButton)    { $toolTip.SetToolTip($detectMsiButton,    (Get-UiString 'TtDetectMsi')) }
 if ($win32PackageButton) { $toolTip.SetToolTip($win32PackageButton, (Get-UiString 'TtWin32Package')) }
 
@@ -2164,6 +2487,7 @@ if ($uncheckAllDiscoveredButton){ $toolTip.SetToolTip($uncheckAllDiscoveredButto
 
 # tabSettings
 if ($browsePathButton)         { $toolTip.SetToolTip($browsePathButton,         (Get-UiString 'TtBrowsePath')) }
+if ($localInstallButton)       { $toolTip.SetToolTip($localInstallButton,       (Get-UiString 'TtLocalInstall')) }
 if ($autoCheckUpdatesCheckbox) { $toolTip.SetToolTip($autoCheckUpdatesCheckbox, (Get-UiString 'TtAutoCheckUpdates')) }
 if ($autoRemoveSupersededCheckbox) { $toolTip.SetToolTip($autoRemoveSupersededCheckbox, (Get-UiString 'TtAutoRemoveSuperseded')) }
 if ($autoVersionCleanupCheckbox) { $toolTip.SetToolTip($autoVersionCleanupCheckbox, (Get-UiString 'TtAutoVersionCleanup')) }
@@ -2177,6 +2501,15 @@ if ($moveAssignmentsCheckbox)  { $toolTip.SetToolTip($moveAssignmentsCheckbox,  
 if ($openLogButton)            { $toolTip.SetToolTip($openLogButton,            (Get-UiString 'TtOpenLogFile')) }
 if ($openLogFolderButton)      { $toolTip.SetToolTip($openLogFolderButton,      (Get-UiString 'TtOpenLogFolder')) }
 
+# Stack the settings rows now that every control has its final (themed) font: the number of lines a
+# wrapped explanation needs is only known then, and each card is sized to what it actually holds.
+# Kopfzeile und Einstellungsseite messen sich an ihren Beschriftungen - beides erst, wenn das
+# Design seine Schriftart gesetzt hat, sonst wird mit der falschen Schrift gerechnet.
+try { Update-InfoBadgePositions } catch { Write-LogDebug 'initial info badge positions' }
+try { Update-HeaderLayout } catch { Write-LogDebug 'initial header layout' }
+try { Update-OwnPackageLayout } catch { Write-LogDebug 'initial own-package layout' }
+try { Update-SettingsLayout } catch { Write-LogDebug 'initial settings layout' }
+
 
 
 # Compact first-run window size. The explicit bottom-layout routine keeps the log/status area at the
@@ -2186,11 +2519,33 @@ try {
   # This is the size that actually reaches the screen: it runs last and overrides the one set while
   # the controls were laid out. 1060 wide because the four dashboard tiles need 748px of content and
   # the sidebar plus window chrome costs 256px - at the previous 1014 the fourth tile was clipped.
-  if (-not $script:settings.WindowMaximized -and
-      -not ([int]$script:settings.WindowWidth -ge $form.MinimumSize.Width -and [int]$script:settings.WindowHeight -ge $form.MinimumSize.Height)) {
+  if (-not $script:settings.WindowMaximized) {
+    # Groesse UND Lage aus der Arbeitsflaeche, nicht aus der Bildschirmflaeche.
+    #
+    # Vorher: Groesse auf die Arbeitsflaeche begrenzt, Lage aber ueber CenterScreen - und das
+    # zentriert im GESAMTEN Bildschirm, Taskleiste eingerechnet. Ein 850 px hohes Fenster auf einem
+    # Schirm mit hoher Skalierung landete damit unter der Taskleiste: die unterste Zeile
+    # (Statuszeile, Protokoll-Umschalter) war verdeckt. Eine gespeicherte Groesse bekam ueberhaupt
+    # keine Lage zugewiesen und blieb bei Windows' Vorgabe.
+    #
+    # Jetzt wird in der Arbeitsflaeche zentriert (die schliesst die Taskleiste aus, egal an welcher
+    # Kante sie klebt) und die Groesse zusaetzlich um 8 px Luft je Achse begrenzt.
     $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-    $form.Size = New-Object System.Drawing.Size([Math]::Min(1060, $wa.Width), [Math]::Min(850, $wa.Height))
-    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+    # Die Rechnung liegt in Get-InitialWindowSize (75-UiState) - dort ist sie pruefbar.
+    $placement = Get-InitialWindowSize -WorkWidth $wa.Width -WorkHeight $wa.Height `
+      -SavedWidth ([int]$script:settings.WindowWidth) -SavedHeight ([int]$script:settings.WindowHeight) `
+      -MinWidth $form.MinimumSize.Width -MinHeight $form.MinimumSize.Height
+    $hasSaved = ($placement.Source -eq 'settings')
+    $w = [int]$placement.Width
+    $h = [int]$placement.Height
+    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+    $form.Size = New-Object System.Drawing.Size($w, $h)
+    $form.Location = New-Object System.Drawing.Point(
+      ($wa.X + [Math]::Max(0, [int](($wa.Width - $w) / 2))),
+      ($wa.Y + [Math]::Max(0, [int](($wa.Height - $h) / 2))))
+    Write-Log ("Window placement: {0}x{1} at {2},{3} inside working area {4}x{5} at {6},{7} ({8})" -f `
+      $w, $h, $form.Left, $form.Top, $wa.Width, $wa.Height, $wa.X, $wa.Y,
+      $(if ($hasSaved) { 'restored from settings' } else { 'first run: 80 percent of the working area' }))
   }
   Update-BottomLayout
 } catch {}
@@ -2202,6 +2557,39 @@ $form.Add_Shown({
     [void]$form.BeginInvoke([System.Action]{ Invoke-FavoritePackagesUpdate -Automatic })
   }
 })
+
+# Drains the deferred-action queue.
+#
+# There is no "operation finished" event to hook: the busy state is derived from the progress bar
+# and the packaging flag, so the only way to notice the end of an operation is to look. A timer is
+# the right tool here - it ticks on the UI thread, which is exactly where a queued action has to
+# run, and Invoke-PendingDeferredActions is a no-op while anything is still running.
+#
+# 750 ms: fast enough that a queued update search starts right after the favourites build finishes,
+# slow enough to be free when the queue is empty (the common case).
+$deferredActionTimer = New-Object System.Windows.Forms.Timer
+$deferredActionTimer.Interval = 750
+$deferredActionTimer.Add_Tick({ Invoke-PendingDeferredActions })
+$deferredActionTimer.Start()
+
+# Smoke gate: stop here, before any modal dialog and before the message loop, when the build is
+# being verified rather than used.
+#
+# Until this existed, nothing in the whole chain ever RAN the assembled script - the parser was the
+# last word. A bundle could therefore be accepted while failing at load time: a part in the wrong
+# order, a $script: variable read before its assignment, a control referenced before it is built.
+# None of that is visible to a parser, and all of it is fatal on a user's machine.
+#
+# Reaching this line means every part loaded, every control was constructed and every top-level
+# statement ran. The marker is what tests/SmokeTest.ps1 looks for. Gated on an environment variable
+# no user would have set, and placed BEFORE the production-risk dialog so a headless run cannot hang
+# on a message box waiting for a click.
+if ($env:WINTUNER_SMOKE -eq '1') {
+  Write-Host ("WINTUNER_SMOKE_OK version={0}" -f $script:appVersion)
+  # Exit rather than return: this is the top level of the shipped single file, and a return here
+  # would fall through to the message loop below.
+  exit 0
+}
 
 # Run the form mit finalem Sicherheitsnetz
 if ([string]$script:settings.ProductionWarningAcceptedVersion -ne $script:appVersion) {

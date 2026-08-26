@@ -18,7 +18,7 @@ function Get-CurrentLogPath {
   param([datetime]$Now = (Get-Date))
   $base = if ($script:logDirectory) { $script:logDirectory } else { [Environment]::GetFolderPath('LocalApplicationData') }
   if (-not (Test-Path -LiteralPath $base)) {
-    try { New-Item -ItemType Directory -Path $base -Force -ErrorAction Stop | Out-Null } catch { return $null }
+    try { [void][System.IO.Directory]::CreateDirectory($base) } catch { return $null }
   }
   $isoYear = [System.Globalization.ISOWeek]::GetYear($Now)
   $isoWeek = [System.Globalization.ISOWeek]::GetWeekOfYear($Now)
@@ -48,7 +48,7 @@ function Write-Log {
             # the line still reaches the window, and the alternative is blocking the UI thread.
             try { $held = $mutex.WaitOne(1000) } catch [System.Threading.AbandonedMutexException] { $held = $true }
           }
-          Add-Content -Path $logPath -Value $logLine -Encoding utf8 -ErrorAction SilentlyContinue
+          Add-Content -LiteralPath $logPath -Value $logLine -Encoding utf8 -ErrorAction SilentlyContinue
         } finally {
           if ($held) { try { $mutex.ReleaseMutex() } catch { } }
         }
@@ -123,7 +123,7 @@ function Write-LogSafe {
     $timestamp = $now.ToString("yyyy-MM-dd HH:mm:ss")
     $logLine = "$timestamp - $Message"
     $base = if ($script:logDirectory) { $script:logDirectory } else { [Environment]::GetFolderPath('LocalApplicationData') }
-    if (-not (Test-Path $base)) { New-Item -ItemType Directory -Path $base -Force | Out-Null }
+    if (-not (Test-Path -LiteralPath $base)) { [void][System.IO.Directory]::CreateDirectory($base) }
     $isoYear = [System.Globalization.ISOWeek]::GetYear($now)
     $isoWeek = [System.Globalization.ISOWeek]::GetWeekOfYear($now)
     $logPath = Join-Path $base ("WinTuner_GUI_{0}-W{1:D2}.log" -f $isoYear, $isoWeek)
@@ -132,7 +132,7 @@ function Write-LogSafe {
     $m = $null; $held = $false
     try {
       try { $m = [System.Threading.Mutex]::new($false, 'WinTunerGUI_LogFile'); $held = $m.WaitOne(1000) } catch { }
-      Add-Content -Path $logPath -Value $logLine -Encoding utf8 -ErrorAction SilentlyContinue
+      Add-Content -LiteralPath $logPath -Value $logLine -Encoding utf8 -ErrorAction SilentlyContinue
     } finally {
       if ($held -and $m) { try { $m.ReleaseMutex() } catch { } }
       if ($m) { try { $m.Dispose() } catch { } }
@@ -209,14 +209,101 @@ function Update-Status {
   } catch {}
 }
 
+# Says so before the module downloads its 3.2 MB package index, and keeps quiet otherwise.
+#
+# The download is synchronous and runs on the UI thread, so the window stops repainting for its
+# whole duration - measured at 130 seconds on 2026-08-21, during which the status line still read
+# "Prüfe Favorit (1/4)" and the only explanation ("Loading package index from ...") went to the
+# console, where a user of the shipped single file never looks. This does not make the window
+# responsive - that would mean moving the call off the UI thread - it makes the wait explained,
+# which is the difference between "it hangs" and "it is fetching something big".
+#
+# Runs at most once per session: after the first call the module holds the index in memory, so a
+# second notice would be a lie.
+$script:wingetIndexWarmed = $false
+$script:wingetIndexWarmupStartedAt = $null
+$script:wingetIndexBarState = $null
+function Initialize-WingetPackageIndex {
+  if ($script:wingetIndexWarmed) { return }
+  $script:wingetIndexWarmed = $true
+  $state = Test-WingetIndexCacheCold
+  if (-not $state.Cold) {
+    Write-LogDebug ("Winget package index cache is fresh ({0} h old); no download expected." -f $state.AgeHours)
+    return
+  }
+  Write-Log ("Winget package index cache is {0} ({1}); the module will download it now. This blocks the window until it finishes." -f $state.Reason, $state.Path)
+  $script:wingetIndexWarmupStartedAt = [datetime]::Now
+  Update-Status (Get-UiString 'WingetIndexDownloading')
+  # This runs INSIDE loops that drive the progress display themselves (the favourites run counts its
+  # packages up). Borrowing it without putting it back left those loops without an indicator for the
+  # rest of the run, so the previous state is saved and restored rather than overwritten.
+  # progress-restored-elsewhere: Complete-WingetPackageIndexWarmup stellt den gemerkten Zustand
+  # wieder her - hier darf NICHT ausgeblendet werden, weil dieser Aufwaermer INNERHALB von Laeufen
+  # laeuft, die die Anzeige selbst fuehren (die Favoritenrunde zaehlt ihre Pakete hoch).
+  if ($script:progressLabel) {
+    $script:wingetIndexBarState = @{
+      Total   = $script:progressTotal
+      Current = $script:progressCurrent
+      Visible = $script:progressLabel.Visible
+    }
+    Show-Progress
+  }
+  # Repaints the status line and the progress text before the thread goes away for a minute or two. Without
+  # this the new text never reaches the screen and the notice is worthless.
+  try { [System.Windows.Forms.Application]::DoEvents() } catch { }
+}
+
+# Puts the bar back and records how long the download actually took, so the next report is not
+# guesswork. Silent unless a download was announced.
+function Complete-WingetPackageIndexWarmup {
+  if (-not $script:wingetIndexWarmupStartedAt) { return }
+  $elapsed = ([datetime]::Now - $script:wingetIndexWarmupStartedAt).TotalSeconds
+  $script:wingetIndexWarmupStartedAt = $null
+  if ($script:progressLabel -and $script:wingetIndexBarState) {
+    $script:progressTotal = [int]$script:wingetIndexBarState.Total
+    $script:progressCurrent = [int]$script:wingetIndexBarState.Current
+    Update-ProgressDisplay
+    $script:progressLabel.Visible = [bool]$script:wingetIndexBarState.Visible
+  }
+  $script:wingetIndexBarState = $null
+  Write-Log ("Winget package index ready after {0:n1} s." -f $elapsed)
+}
+
 # NOTE: there used to be an Invoke-AsyncOperation helper here that ran work on a
 # System.ComponentModel.BackgroundWorker. It was removed because it never worked: a worker thread
 # has no PowerShell runspace, so the scriptblock handed to it was not executed at all - not even
 # its own try/catch. Callers received $null and could not tell that from a real result. That is
 # what kept the dashboard tiles on "-" and made the self-update check report "up to date" for
-# every release ever shipped. Everything long-running in this app therefore runs on the UI thread
-# with Application::DoEvents to keep the window responsive; the packaging step, which needs no
-# Graph context, uses a dedicated runspace (Get-PackageRunspace) instead.
+# every release ever shipped.
+#
+# Was daraus lange abgeleitet wurde - "Nebenlaeufigkeit geht hier nicht" - stimmt so NICHT, und das
+# ist gemessen: [Microsoft.Graph.PowerShell.Authentication.GraphSession]::Instance ist ein
+# statisches Singleton, ein zweiter Runspace im selben Prozess sieht also dieselbe Anmeldung
+# (siehe tests/Unit/GraphSessionSharing.Tests.ps1). Der BackgroundWorker scheiterte am fehlenden
+# RUNSPACE, nicht am Graph-Kontext. Ein echter Runspace hat beides.
+#
+# Ausgelagert ist bisher: das Paketieren (Get-PackageRunspace) und die Inventar-Abfrage
+# (Get-Win32AppsOffThread), die laengste Blockade. Alles Uebrige laeuft weiterhin auf dem
+# UI-Thread mit Application::DoEvents - Schritt fuer Schritt, jeweils mit Rueckfall.
+
+# Der Leerzustand einer Liste sagt jetzt, WARUM sie leer ist.
+#
+# Bisher stand dort immer "auf Suchen klicken, um zu laden" - auch ohne Anmeldung, wo genau das
+# nicht geht. Der Klick fuehrte dann zu einem Anmelde-Dialog, also erst nach dem Versuch. Der
+# Zustand gehoert vor den Klick, und die Stelle dafuer ist die Flaeche, auf die man sowieso schaut.
+#
+# Die Knoepfe bleiben absichtlich bedienbar (siehe Set-ConnectedUIState): sie sollen angemeldet und
+# abgemeldet gleich aussehen. Diese Funktion ergaenzt das, statt es umzudrehen.
+function Set-ListEmptyText {
+  param(
+    [System.Windows.Forms.Label]$Label,
+    [Parameter(Mandatory)][string]$NormalKey
+  )
+  if (-not $Label) { return }
+  try {
+    $Label.Text = if ($script:isConnected) { Get-UiString $NormalKey } else { Get-UiString 'NotConnectedListHint' }
+  } catch { }   # class 3: ein Leerzustandstext darf nie eine Sektion aufhalten
+}
 
 # Friendly tenant name from a UPN: adm@alsterspree.de -> "Alsterspree" (full UPN shown on hover).
 # Picks the label that actually identifies the customer.
@@ -228,6 +315,15 @@ function Update-Status {
 function Get-TenantDisplayName {
   param([string]$Upn)
   if ([string]::IsNullOrWhiteSpace($Upn)) { return "" }
+  # A name the technician set by hand wins over everything derived below: they know what they call
+  # this customer, and the derivation is only ever a guess from the domain.
+  try {
+    $manual = $script:settings.TenantDisplayNames
+    if ($manual -and $manual.ContainsKey($Upn)) {
+      $chosen = [string]$manual[$Upn]
+      if (-not [string]::IsNullOrWhiteSpace($chosen)) { return $chosen }
+    }
+  } catch { }   # class 3: a broken name map must never stop a label from rendering
   try {
     $domain = ($Upn -split '@')[-1]
     $labels = @($domain -split '\.' | Where-Object { $_ })
@@ -257,6 +353,40 @@ function Get-TenantDisplayName {
   return $Upn
 }
 
+# Replaces tenant data in log text with STABLE pseudonyms so a log can be attached to a bug report
+# without leaking customer identifiers. Stable = the same input maps to the same pseudonym within the
+# text, so the relationships needed for diagnosis survive. Covers UPNs, GUIDs (Intune app / Entra
+# group ids), the Windows user name and the user profile path.
+function Get-SanitizedLogText {
+  param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [string]$UserName = $env:USERNAME, [string]$UserProfile = $env:USERPROFILE)
+  if ([string]::IsNullOrEmpty($Text)) { return $Text }
+
+  $maps = @{ user = @{}; id = @{} }
+  $counters = @{ user = 0; id = 0 }
+  $pseudonym = {
+    param($category, $value)
+    $m = $maps[$category]
+    if (-not $m.ContainsKey($value)) { $counters[$category]++; $m[$value] = "$category-$($counters[$category])" }
+    return $m[$value]
+  }
+
+  # 1) User profile path first (literal), before the user name inside it is touched separately.
+  if (-not [string]::IsNullOrWhiteSpace($UserProfile)) {
+    $Text = $Text.Replace($UserProfile, 'C:\Users\user-profile')
+  }
+  # 2) UPNs (contain '@' and the domain) -> user-N. Case-insensitive, stable per distinct UPN.
+  $upn = '(?i)[A-Za-z0-9._%+\-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}'
+  $Text = [regex]::Replace($Text, $upn, { param($m) & $pseudonym 'user' $m.Value.ToLowerInvariant() })
+  # 3) GUIDs -> id-N.
+  $guid = '(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b'
+  $Text = [regex]::Replace($Text, $guid, { param($m) & $pseudonym 'id' $m.Value.ToLowerInvariant() })
+  # 4) The bare Windows user name (whole word), last so it does not disturb the UPN match above.
+  if (-not [string]::IsNullOrWhiteSpace($UserName)) {
+    $Text = [regex]::Replace($Text, ('(?i)\b' + [regex]::Escape($UserName) + '\b'), 'user-name')
+  }
+  return $Text
+}
+
 # Helper: validate M365 username (UPN-like)
 function Test-ValidM365UserName {
   param([string]$UserName)
@@ -278,6 +408,9 @@ function Test-WtConnected {
       # Materialised right here with @(): the module hands back a collection it may still be
       # filling, and enumerating that live is what produced "Collection was modified" during
       # sign-in. Select-Object -First 1 is still avoided - it crashed the pipeline under WinForms.
+      # Deliberately NOT Get-Win32AppsResilient: this function IS the retry loop (see $Attempts), it
+      # runs before 25-WinGetData's state is meaningful, and it must report the raw failure reason
+      # rather than swallow it into a retry - the caller classifies the message.
       $null = @(Get-WtWin32Apps -Superseded:$false -ErrorAction Stop)
       $script:lastConnectionProbeError = $null
       return $true   # the query itself worked; an empty tenant is a valid answer
@@ -339,17 +472,102 @@ function Test-WingetSearchCandidate {
 # thread keeps pumping messages (that is the whole point), so the user can now click other actions
 # mid-run - something that was impossible while the thread was blocked. Every handler that starts a
 # long operation or changes Intune asks here first.
+# Actions that were asked for while another operation was running, to be carried out afterwards.
+#
+# Keyed and therefore de-duplicated: asking for the same thing three times queues it once. Insertion
+# order is preserved so the first request is also the first to run.
+$script:deferredActions = [ordered]@{}
+$script:deferredRunning = $false
+# Set around a trigger the USER did not click - the login-time update check, the favourites run.
+# Those must never open a modal dialog: nobody is looking at the screen for them, and a message box
+# nobody dismisses stops the whole application until someone walks past.
+$script:automaticTrigger = $false
+
+function Add-DeferredAction {
+  param(
+    [Parameter(Mandatory)][string]$Key,
+    [Parameter(Mandatory)][scriptblock]$Action,
+    [string]$Label = ''
+  )
+  $script:deferredActions[$Key] = @{ Label = $Label; Action = $Action }
+}
+
+# True while an operation owns the UI. Split out of Test-UiBusy so the deferred-action pump can ask
+# the same question without producing a status line or a dialog as a side effect.
+function Test-OperationRunning {
+  if ($script:packagingBusy) { return $true }
+  if (Test-ProgressVisible) { return $true }
+  return $false
+}
+
+# Runs at most ONE queued action per call, and only while nothing else is running.
+#
+# One per call on purpose: an action typically makes the UI busy again immediately, and the next one
+# has to wait for that in turn. The timer in 90-Main calls this again a moment later.
+function Invoke-PendingDeferredActions {
+  if ($script:deferredActions.Count -eq 0) { return }
+  if (Test-OperationRunning) { return }
+  # The timer also ticks inside the DoEvents of a running operation, and an action can itself pump
+  # DoEvents - without this guard the pump would re-enter itself and run the same action twice.
+  if ($script:deferredRunning) { return }
+
+  $script:deferredRunning = $true
+  try {
+    $key = @($script:deferredActions.Keys)[0]
+    $entry = $script:deferredActions[$key]
+    [void]$script:deferredActions.Remove($key)
+    $name = if ($entry.Label) { [string]$entry.Label } else { $key }
+    Write-Log ("Deferred action now running: {0}" -f $name)
+    try { & $entry.Action } catch {
+      Write-Log ("Deferred action '{0}' failed: {1}" -f $name, (Format-ErrorDetail -ErrorRecord $_))
+    }
+  } finally {
+    $script:deferredRunning = $false
+  }
+}
+
+# Answers "is another operation running?" and, when one is, decides what happens to the request.
+#
+# Long-running handlers keep the shared progress bar visible. DoEvents makes the UI responsive, so
+# that visibility is also the cross-handler operation lock. packagingBusy covers the short window
+# before a build has made the progress bar visible.
+#
+# Passing -DeferKey/-DeferAction turns "refused" into "queued": the request is carried out as soon as
+# the running operation finishes, instead of being thrown away. That matters most for the login-time
+# update check, which used to collide with the start-up favourites build and was simply lost - the
+# log said "another operation is running" at 08:39:26 and nothing ever picked it up again, so the
+# technician waited for a scan that was never going to happen.
+#
+# Deferring is offered ONLY for read-only work (searching, refreshing). An action that writes to
+# Intune stays refused, because running a deploy or a deletion minutes later, unattended, when the
+# user has moved on to something else, is worse than making them click again.
 function Test-UiBusy {
-  # Long-running handlers keep the shared progress bar visible. DoEvents makes the UI responsive,
-  # so that visibility is also the cross-handler operation lock. packagingBusy covers the short
-  # window before a build has made the progress bar visible.
-  if (-not $script:packagingBusy -and (-not $script:progressBar -or -not $script:progressBar.Visible)) { return $false }
+  param(
+    [string]$DeferKey,
+    [scriptblock]$DeferAction,
+    [string]$DeferLabel = ''
+  )
+  if (-not (Test-OperationRunning)) { return $false }
+
+  if ($DeferKey -and $DeferAction) {
+    Add-DeferredAction -Key $DeferKey -Action $DeferAction -Label $DeferLabel
+    $name = if ($DeferLabel) { [string]$DeferLabel } else { [string]$DeferKey }
+    $text = (Get-UiString 'BusyDeferred') -f $name
+    Update-Status $text
+    Write-Log ("Deferred until the running operation finishes: {0}" -f $name)
+    # No dialog for an automatic trigger, and none for a deferred request either: the status line
+    # already says it will happen, and the point of queueing is that nobody has to acknowledge it.
+    return $true
+  }
+
   Update-Status (Get-UiString 'BusyStatus')
-  [void][System.Windows.Forms.MessageBox]::Show(
-    (Get-UiString 'BusyDialog'),
-    (Get-UiString 'InfoTitle'),
-    [System.Windows.Forms.MessageBoxButtons]::OK,
-    [System.Windows.Forms.MessageBoxIcon]::Information)
+  if (-not $script:automaticTrigger) {
+    [void][System.Windows.Forms.MessageBox]::Show(
+      (Get-UiString 'BusyDialog'),
+      (Get-UiString 'InfoTitle'),
+      [System.Windows.Forms.MessageBoxButtons]::OK,
+      [System.Windows.Forms.MessageBoxIcon]::Information)
+  }
   return $true
 }
 
@@ -362,4 +580,74 @@ function Test-Connected {
     [System.Windows.Forms.MessageBoxIcon]::Information)
   return $false
 }
+# ---------------------------------------------------------------------------------------------
+# Manual tenant names, on top of the automatic derivation in Get-TenantDisplayName above.
+#
+# An MSP signs in to a dozen tenants whose UPNs all look the same, and the derived name is not
+# always the one the technician uses ("Demomehr" when everyone says "Stadtwerke"). A name set here
+# wins over the derivation - but the UPN must stay visible, because that is what actually gets
+# signed in, and picking the wrong customer is the one mistake this tool must never make easy.
+# ---------------------------------------------------------------------------------------------
+# "Kunde GmbH (admin@kunde.de)" when a name is set, otherwise just the UPN - never a label that
+# hides which account is meant.
+function Get-TenantDisplayLabel {
+  param([string]$Upn)
+  if ([string]::IsNullOrWhiteSpace($Upn)) { return '' }
+  $name = Get-TenantDisplayName -Upn $Upn
+  if ([string]::Equals($name, $Upn, [System.StringComparison]::OrdinalIgnoreCase)) { return $Upn }
+  return ('{0} ({1})' -f $name, $Upn)
+}
 
+function Set-TenantDisplayName {
+  param([Parameter(Mandatory)][string]$Upn, [string]$Name = '')
+  if ([string]::IsNullOrWhiteSpace($Upn)) { return }
+  if ($null -eq $script:settings.TenantDisplayNames) { $script:settings.TenantDisplayNames = @{} }
+  if ([string]::IsNullOrWhiteSpace($Name)) {
+    if ($script:settings.TenantDisplayNames.ContainsKey($Upn)) { [void]$script:settings.TenantDisplayNames.Remove($Upn) }
+  } else {
+    $script:settings.TenantDisplayNames[$Upn] = $Name.Trim()
+  }
+}
+
+# ---------------------------------------------------------------------------------------------
+# Confirmation prompts that an experienced technician may switch off.
+#
+# The prompts exist for a reason, so switching them off is acknowledged once per version (see
+# ChangeConfirmationRiskAcceptedVersion) rather than being a quiet checkbox. What is suppressed is
+# the "are you sure you want to change this?" class. Two things are NEVER suppressed, because they
+# are a different kind of risk than "I meant to do this to the tenant":
+#   - the one-time production-risk warning at startup
+#   - installing an installer locally on the technician's own machine
+# ---------------------------------------------------------------------------------------------
+function Test-ChangeConfirmationsSuppressed {
+  if (-not $script:settings.SuppressChangeConfirmations) { return $false }
+  # Only honoured once the risk has been acknowledged for THIS version, so a settings file carried
+  # over from an older release cannot silently disable the prompts after an update.
+  return [string]::Equals([string]$script:settings.ChangeConfirmationRiskAcceptedVersion, [string]$script:appVersion, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+# Drop-in replacement for a Yes/No MessageBox on a change. Returns $true when the action may proceed.
+# -AlwaysAsk: diese Frage wird NICHT von der Einstellung "Rueckfragen abschalten" weggedrueckt.
+#
+# Gemeldet fuer die Zuweisungen in "Alle Tenant-Apps": wer dort das Ziel einer App aendert, aendert,
+# WER die App bekommt - und das soll nie eine Nebenwirkung eines Klicks sein. Die Einstellung nimmt
+# einem die Rueckfragen fuer die eigene Routine ab (Update-Lauf starten, Inhalt ersetzen); die
+# Reichweite einer App gehoert nicht dazu.
+function Confirm-ChangeAction {
+  param(
+    [Parameter(Mandatory)][string]$Text,
+    [Parameter(Mandatory)][string]$Title,
+    [string]$LogContext = '',
+    [switch]$AlwaysAsk
+  )
+  if (-not $AlwaysAsk -and (Test-ChangeConfirmationsSuppressed)) {
+    $what = if ($LogContext) { $LogContext } else { $Title }
+    Write-Log ("Confirmation skipped (prompts switched off in Settings): {0}" -f $what)
+    return $true
+  }
+  $answer = [System.Windows.Forms.MessageBox]::Show(
+    $Text, $Title,
+    [System.Windows.Forms.MessageBoxButtons]::YesNo,
+    [System.Windows.Forms.MessageBoxIcon]::Warning)
+  return ($answer -eq [System.Windows.Forms.DialogResult]::Yes)
+}

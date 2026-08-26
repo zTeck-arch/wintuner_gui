@@ -1,7 +1,11 @@
 BeforeAll {
   . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
   Initialize-TestAmbient
-  . ([scriptblock]::Create((Get-SourceFunctionText -Part '35-Packaging.ps1' -Name 'Test-IsProtectedSystemFolder')))
+  . ([scriptblock]::Create((Get-SourceFunctionText -Part '35-Packaging.ps1' `
+    -Name 'Test-IsProtectedSystemFolder', 'Test-PackageFolderUsable')))
+  function global:Get-UiString { param($k) $k }
+  # Keep the low-disk-space branch from ever popping a modal dialog during the test run.
+  function global:Get-PSDrive { param($Name, $ErrorAction) [pscustomobject]@{ Free = 500GB } }
 }
 
 Describe 'Test-IsProtectedSystemFolder' {
@@ -40,5 +44,26 @@ Describe 'Test-IsProtectedSystemFolder' {
 
   It 'treats empty input as harmless rather than throwing' {
     Test-IsProtectedSystemFolder -Folder '   ' | Should -BeFalse
+  }
+}
+
+Describe 'Test-PackageFolderUsable' {
+  # Audit finding #11: a package folder whose name contains '[' or ']' made the -Path write probe
+  # fail, and a writable folder was reported to the user as "not writable".
+  It 'accepts a writable folder whose name contains brackets and spaces' {
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ("Intune Pakete [Kunde] " + [guid]::NewGuid().ToString('N'))
+    try {
+      Test-PackageFolderUsable -Folder $dir | Should -BeTrue
+      # The probe file must be cleaned up, not left behind.
+      @(Get-ChildItem -LiteralPath $dir -Filter '.wtgui_write_test_*' -Force).Count | Should -Be 0
+    } finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+  }
+
+  It 'creates the folder when it does not exist yet (bracket path)' {
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ("Kunde [X] " + [guid]::NewGuid().ToString('N'))
+    try {
+      Test-PackageFolderUsable -Folder $dir | Should -BeTrue
+      Test-Path -LiteralPath $dir | Should -BeTrue
+    } finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
   }
 }

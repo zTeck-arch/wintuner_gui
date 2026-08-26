@@ -2,7 +2,7 @@ BeforeAll {
   . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
   Initialize-TestAmbient
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '40-Graph.ps1' `
-    -Name 'Get-AppInstallationProbe', 'Get-AppInstallCountsFromReport')))
+    -Name 'Get-AppInstallationProbe', 'Get-AppInstallCountsFromReport', 'Get-AppInstallSummaryCount')))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '20-Version.ps1' -Name 'Test-GuidString')))
 
   function global:Get-WtToken { 'test-token' }
@@ -48,6 +48,56 @@ Describe 'Get-AppInstallationProbe' {
       }
       $probe = Get-AppInstallationProbe -AppId $global:AppId -AppName 'Webex'
       $probe.Succeeded | Should -BeTrue
+      $probe.HasInstallations | Should -BeTrue
+    }
+
+    It 'leaves Count null on a device-status hit (it stops at the first, cannot count) [#31]' {
+      $global:GraphHandler = {
+        param($Uri)
+        if ($Uri -like '*/deviceStatuses*') { return [pscustomobject]@{ value = @([pscustomobject]@{ installState = 'installed' }) } }
+        throw 'no fallback should have been used'
+      }
+      $probe = Get-AppInstallationProbe -AppId $global:AppId -AppName 'Webex'
+      $probe.HasInstallations | Should -BeTrue
+      $probe.Count | Should -BeNullOrEmpty
+    }
+  }
+
+  Context 'empty device statuses must be cross-checked before confirming zero [#12]' {
+    It 'confirms zero only when a second source agrees' {
+      $global:GraphHandler = {
+        param($Uri)
+        if ($Uri -like '*/deviceStatuses*') { return [pscustomobject]@{ value = @() } }
+        if ($Uri -like '*/installSummary*') { return [pscustomobject]@{ installedDeviceCount = 0; installedUserCount = 0 } }
+        throw "unexpected $Uri"
+      }
+      $probe = Get-AppInstallationProbe -AppId $global:AppId -AppName 'Airtame'
+      $probe.Succeeded | Should -BeTrue
+      $probe.HasInstallations | Should -BeFalse
+      $probe.Count | Should -Be 0
+    }
+
+    It 'does NOT confirm zero when install summary disagrees - takes the higher, blocks deletion' {
+      $global:GraphHandler = {
+        param($Uri)
+        if ($Uri -like '*/deviceStatuses*') { return [pscustomobject]@{ value = @() } }
+        if ($Uri -like '*/installSummary*') { return [pscustomobject]@{ installedDeviceCount = 4; installedUserCount = 1 } }
+        throw "unexpected $Uri"
+      }
+      $probe = Get-AppInstallationProbe -AppId $global:AppId -AppName 'Adobe'
+      $probe.HasInstallations | Should -BeTrue
+      $probe.Count | Should -Be 5
+    }
+
+    It 'stays unknown (blocks deletion) when no second source can confirm zero' {
+      # deviceStatuses says empty, installSummary AND the report are unavailable.
+      $global:GraphHandler = {
+        param($Uri)
+        if ($Uri -like '*/deviceStatuses*') { return [pscustomobject]@{ value = @() } }
+        throw 'Response status code does not indicate success: 400 (Bad Request).'
+      }
+      $probe = Get-AppInstallationProbe -AppId $global:AppId -AppName 'Zoom'
+      $probe.Succeeded | Should -BeFalse
       $probe.HasInstallations | Should -BeTrue
     }
   }

@@ -8,7 +8,7 @@ Diese Anleitung richtet einen öffentlichen GitHub-Releasekanal ein, über den d
 - Berechtigung, ein öffentliches Repository anzulegen
 - Git für Windows oder GitHub Desktop
 - dieses vollständige Repository-Paket
-- ein Repository-Name, zum Beispiel `WinTuner-GUI`
+- ein Repository-Name, zum Beispiel `verteilwerk`
 
 Nicht benötigt und niemals weiterzugeben sind GitHub-Passwort, Personal Access Token, Microsoft-Anmeldedaten oder Tenant-Geheimnisse. GitHub akzeptiert für Git-Operationen kein Kontopasswort mehr; Git Credential Manager beziehungsweise GitHub Desktop öffnet den sicheren Browser-Login.
 
@@ -20,11 +20,11 @@ Der eingebaute Updater ruft die öffentliche GitHub-Release-API ohne eingebettet
 
 1. Auf <https://github.com/new> gehen.
 2. Owner auswählen.
-3. Repository-Namen festlegen, beispielsweise `WinTuner-GUI`.
+3. Repository-Namen festlegen, beispielsweise `verteilwerk`.
 4. Sichtbarkeit **Public** wählen.
 5. README, `.gitignore` und Lizenz beim Anlegen nicht automatisch erzeugen; diese Dateien kommen aus dem Paket.
 6. `Create repository` wählen.
-7. Die angezeigte HTTPS-URL kopieren, zum Beispiel `https://github.com/FIRMA/WinTuner-GUI.git`.
+7. Die angezeigte HTTPS-URL kopieren, zum Beispiel `https://github.com/FIRMA/verteilwerk.git`.
 
 Die Lizenzfrage ist seit 0.14.0 geklärt: WinTuner GUI steht unter der GPL-3.0 (siehe `LICENSE`). Grund ist das vorausgesetzte Modul [WinTuner](https://github.com/svrooij/WinTuner), das ebenfalls unter der GPL-3.0 steht und im selben PowerShell-Prozess geladen wird. Der Lizenzkopf im Quellcode und der Abschnitt „Lizenz und Herkunft“ in der README müssen dazu passen.
 
@@ -37,7 +37,7 @@ Get-Location
 Get-ChildItem -Force
 ```
 
-`Get-Location` muss den entpackten WinTuner-Ordner zeigen – niemals `C:\Windows\System32` und möglichst auch nicht den übergeordneten Ordner `Projekte`, der weitere Dateien enthalten kann.
+`Get-Location` muss den entpackten WinTuner GUI-Ordner zeigen – niemals `C:\Windows\System32` und möglichst auch nicht den übergeordneten Ordner `Projekte`, der weitere Dateien enthalten kann.
 
 Falls `git init` versehentlich bereits in `C:\Windows\System32` ausgeführt wurde, eine PowerShell **als Administrator** öffnen und ausschließlich die dadurch erzeugten Git-Metadaten entfernen:
 
@@ -51,7 +51,7 @@ Remove-Item -LiteralPath 'C:\Windows\System32\.git' -Recurse -Force
 Danach in den entpackten Ordner wechseln und dort nochmals `Get-Location` prüfen, zum Beispiel:
 
 ```powershell
-Set-Location -LiteralPath 'C:\Pfad\zum\WinTuner-GUI-Repository'
+Set-Location -LiteralPath 'C:\Pfad\zum\WinTuner GUI-Repository'
 Get-Location
 Get-ChildItem -Force
 ```
@@ -64,11 +64,11 @@ git branch -M main
 git add .
 git status
 git commit -m "Release 0.13.9"
-git remote add origin https://github.com/FIRMA/WinTuner-GUI.git
+git remote add origin https://github.com/FIRMA/verteilwerk.git
 git push -u origin main
 ```
 
-`FIRMA/WinTuner-GUI` durch den echten Owner und Repository-Namen ersetzen. Vor `git commit` bei `git status` prüfen, dass keine Logs, Backups, Einstellungen, Pakete oder Kundendaten enthalten sind.
+`FIRMA/verteilwerk` durch den echten Owner und Repository-Namen ersetzen. Vor `git commit` bei `git status` prüfen, dass keine Logs, Backups, Einstellungen, Pakete oder Kundendaten enthalten sind.
 
 Alternativ kann GitHub Desktop verwendet werden: `Add existing repository` beziehungsweise `Create a repository from existing files`, Ordner auswählen, committen und `Publish repository` mit öffentlicher Sichtbarkeit wählen.
 
@@ -96,7 +96,7 @@ Der Tag startet `Publish release`. Der Workflow:
 5. erzeugt `WinTuner_GUI_ntg.ps1.sha256`,
 6. veröffentlicht beide Dateien als stabiles GitHub-Release.
 
-Nach erfolgreichem Workflow unter `Releases` das Asset `WinTuner_GUI_ntg.ps1` herunterladen. **Diese Release-Datei** an Admin-PCs verteilen; sie enthält bereits die richtige Repository-URL. Die Quelldatei im Git-Repository darf weiterhin einen leeren Wert besitzen.
+Nach erfolgreichem Workflow unter `Releases` das Asset `WinTuner_GUI_ntg.ps1` herunterladen. **Diese Release-Datei** an Admin-PCs verteilen; sie enthält bereits die richtige Repository-URL. Seit 0.16.0 trägt auch die Quelldatei in `src/05-Config.ps1` das Repository, damit eine selbst gebaute Kopie ebenfalls nach Updates sucht; der Workflow überschreibt die Zeile trotzdem mit dem Repository, aus dem das Release stammt — nach einer Umbenennung stimmt sie damit von allein.
 
 ## 7. Automatische Updates testen
 

@@ -1,4 +1,4 @@
-# Helper: resolve Winget Package Identifier across possible property names
+﻿# Helper: resolve Winget Package Identifier across possible property names
 function Resolve-WtWingetId {
     param([object]$AppOrResult)
 
@@ -53,6 +53,55 @@ function Get-TenantStoreApps {
     }
     $uri = [string]$response.'@odata.nextLink'
   } while (-not [string]::IsNullOrWhiteSpace($uri))
+  return @($result.ToArray())
+}
+
+# Every Win32 app in the tenant, not just the ones WinTuner made.
+#
+# Get-WtWin32Apps cannot answer this question: the module filters server-side on
+# contains(notes,'[WinTuner|') or contains(notes,'[WingetIntune|'), so an app created any other way -
+# including by this GUI's own "own installer" card, which writes no such marker - is invisible to it.
+# The "replace the content of an existing app" list was built on that call and therefore could not
+# offer the very apps this GUI had just created, pushing the user into creating a duplicate instead:
+# exactly what Update-ExistingAppContent exists to prevent.
+#
+# The marker is deliberately NOT written on creation instead. A '[WinTuner|' prefix would pull these
+# apps into the update scan, the version cleanup and the deletion paths as well, and all three expect
+# a resolvable WinGet PackageId that a hand-built app does not have. Reading the collection directly
+# fixes the one broken list without touching those.
+#
+# Paged like Get-TenantStoreApps, and type-filtered locally for the same reason documented there.
+# Shaped like the module's objects (Name / CurrentVersion / GraphId) so callers do not care which
+# source they got.
+function Get-TenantWin32Apps {
+  $token = Get-WtToken -ErrorAction Stop
+  if ([string]::IsNullOrWhiteSpace([string]$token)) { throw 'WinTuner returned an empty access token.' }
+  $headers = @{ Authorization = "Bearer $token"; 'Content-Type' = 'application/json' }
+  $uri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps?`$top=100"
+  $result = [System.Collections.Generic.List[object]]::new()
+  $maxPages = 100
+  $page = 0
+  do {
+    $page++
+    if ($page -gt $maxPages) { throw "Graph pagination exceeded $maxPages pages while listing Win32 apps." }
+    $response = Invoke-RestMethod -Method GET -Uri $uri -Headers $headers -ErrorAction Stop
+    foreach ($app in @($response.value)) {
+      if (-not $app -or -not $app.id) { continue }
+      $odataType = [string]$app.'@odata.type'
+      if (-not [string]::Equals($odataType.TrimStart([char]'#'), 'microsoft.graph.win32LobApp', [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+      $result.Add([pscustomobject]@{
+        Name           = [string]$app.displayName
+        CurrentVersion = [string]$app.displayVersion
+        GraphId        = [string]$app.id
+        Publisher      = [string]$app.publisher
+        IsAssigned     = [bool]$app.isAssigned
+        # Empty for anything this GUI or a human created by hand; that is the point of this read.
+        WinTunerNotes  = [string]$app.notes
+      })
+    }
+    $uri = [string]$response.'@odata.nextLink'
+  } while (-not [string]::IsNullOrWhiteSpace($uri))
+  Write-Log ("Tenant Win32 app list read directly from Graph: {0} app(s) over {1} page(s)." -f $result.Count, $page)
   return @($result.ToArray())
 }
 
@@ -135,25 +184,58 @@ function Resolve-WingetIdForApp {
 
 # Reads the "Assign to" ComboBox + optional group-id TextBox and returns the value to
 # pass as Deploy-WtWin32App's -AvailableFor, or $null if the app should stay unassigned.
+# The four fixed entries of every assignment target combo, in the order Update-AssignTargetCombo
+# builds them. Saved favorites follow from index 4 onwards.
+$script:assignTargetIndexNotAssigned = 0
+$script:assignTargetIndexAllUsers    = 1
+$script:assignTargetIndexAllDevices  = 2
+$script:assignTargetIndexCustomGroup = 3
+$script:assignTargetFixedEntryCount  = 4
+
+# Pure core of the selection: index in, target out. Kept free of WinForms so it can be tested.
+#
+# This used to compare $TargetCombo.SelectedItem against Get-UiString 'AssignAllUsers' and friends.
+# The combo's items are built once, in the language active at that moment, while Get-UiString answers
+# in the language active NOW - so after switching language at runtime nothing matched any more, the
+# function fell through to its final "return $null", and an app the user had explicitly pointed at
+# All Users was deployed with no assignment at all. Nothing failed and nothing was logged.
+# The index carries the same meaning in every language, and the rest of this file already relies on
+# it (index 3 == custom group, >= 4 == favorite).
+function Resolve-AssignmentTargetFromIndex {
+  param(
+    [Parameter(Mandatory)][int]$Index,
+    [string]$GroupId = '',
+    [string[]]$FavoriteIds = @()
+  )
+  if ($Index -eq $script:assignTargetIndexAllUsers)   { return 'AllUsers' }
+  if ($Index -eq $script:assignTargetIndexAllDevices) { return 'AllDevices' }
+  if ($Index -eq $script:assignTargetIndexCustomGroup) {
+    $gid = ([string]$GroupId).Trim()
+    if ([string]::IsNullOrWhiteSpace($gid)) { return $null }
+    return $gid
+  }
+  if ($Index -ge $script:assignTargetFixedEntryCount) {
+    $favIndex = $Index - $script:assignTargetFixedEntryCount
+    if ($favIndex -ge 0 -and $favIndex -lt $FavoriteIds.Count) {
+      $favId = [string]$FavoriteIds[$favIndex]
+      if (-not [string]::IsNullOrWhiteSpace($favId)) { return $favId }
+    }
+  }
+  # Index 0 ("not assigned"), -1 (nothing selected) and a favorite that no longer exists all mean
+  # the same thing: deploy without an assignment.
+  return $null
+}
+
 function Get-SelectedAssignmentTarget {
   param(
     [Parameter(Mandatory=$true)][System.Windows.Forms.ComboBox]$TargetCombo,
     [Parameter(Mandatory=$true)][System.Windows.Forms.TextBox]$GroupIdBox
   )
-  $selected = $TargetCombo.SelectedItem
-  if ($selected -eq (Get-UiString 'AssignAllUsers'))   { return 'AllUsers' }
-  if ($selected -eq (Get-UiString 'AssignAllDevices')) { return 'AllDevices' }
-  if ($selected -eq (Get-UiString 'AssignCustomGroup')) {
-    $gid = $GroupIdBox.Text.Trim()
-    if ([string]::IsNullOrWhiteSpace($gid)) { return $null }
-    return $gid
-  }
-  # Saved group favorites sit AFTER the four fixed entries, so every existing SelectedIndex check
-  # (index 3 == "custom group") keeps its meaning. The id comes from the stored favorite, never
-  # from the text box, which is hidden for these entries.
-  $favId = Get-FavoriteIdForSelection -TargetCombo $TargetCombo
-  if ($favId) { return $favId }
-  return $null
+  # The id of a favorite comes from the stored favorite, never from the text box, which is hidden
+  # for those entries.
+  $favoriteIds = @(@(Get-GroupFavorites) | ForEach-Object { [string]$_.Id })
+  return Resolve-AssignmentTargetFromIndex -Index ([int]$TargetCombo.SelectedIndex) `
+    -GroupId ([string]$GroupIdBox.Text) -FavoriteIds $favoriteIds
 }
 
 # Resolves a favorite entry selected in a target combo back to its group id, or "" for any of the
@@ -183,37 +265,110 @@ function Test-IsGroupSelection {
 function Update-AssignTargetCombo {
   param([System.Windows.Forms.ComboBox]$TargetCombo)
   if (-not $TargetCombo) { return }
-  $previous = [string]$TargetCombo.SelectedItem
+  # Remember the selection by IDENTITY, not by the text on screen. Matching the display text back
+  # meant two things went wrong: after a language switch nothing matched (harmless - falls back to
+  # "not assigned"), and two tenants whose favorites share a name - "Pilot", "Test" and "IT" are
+  # everyday names at an MSP - matched each other, so the combo silently pointed at a DIFFERENT
+  # customer's group while looking unchanged. That is the outcome the comment below promises not to
+  # produce.
+  $previousIndex = [int]$TargetCombo.SelectedIndex
+  $previousFavoriteId = if ($previousIndex -ge $script:assignTargetFixedEntryCount) {
+    $oldFavorites = @(Get-GroupFavorites)
+    $oldFavIndex = $previousIndex - $script:assignTargetFixedEntryCount
+    if ($oldFavIndex -ge 0 -and $oldFavIndex -lt $oldFavorites.Count) { [string]$oldFavorites[$oldFavIndex].Id } else { '' }
+  } else { '' }
+
   $TargetCombo.BeginUpdate()
   try {
     $TargetCombo.Items.Clear()
     [void]$TargetCombo.Items.AddRange(@(
       (Get-UiString 'AssignNotAssigned'), (Get-UiString 'AssignAllUsers'),
       (Get-UiString 'AssignAllDevices'), (Get-UiString 'AssignCustomGroup')))
-    foreach ($f in @(Get-GroupFavorites)) {
+    $favorites = @(Get-GroupFavorites)
+    foreach ($f in $favorites) {
       [void]$TargetCombo.Items.Add(((Get-UiString 'AssignFavoriteEntry') -f [string]$f.Name))
     }
     # Restore the previous choice when it still exists; otherwise fall back to "not assigned"
     # rather than silently landing on a different group after a tenant switch.
-    $restore = if ($previous) { $TargetCombo.Items.IndexOf($previous) } else { -1 }
-    $TargetCombo.SelectedIndex = if ($restore -ge 0) { $restore } else { 0 }
+    $restore = -1
+    if ($previousFavoriteId) {
+      # A favorite is only the same favorite if its group id is the same one.
+      for ($i = 0; $i -lt $favorites.Count; $i++) {
+        if ([string]::Equals([string]$favorites[$i].Id, $previousFavoriteId, [System.StringComparison]::OrdinalIgnoreCase)) {
+          $restore = $script:assignTargetFixedEntryCount + $i
+          break
+        }
+      }
+    } elseif ($previousIndex -gt 0 -and $previousIndex -lt $script:assignTargetFixedEntryCount) {
+      # One of the fixed entries: the index means the same thing in every language.
+      $restore = $previousIndex
+    }
+    $TargetCombo.SelectedIndex = if ($restore -ge 0 -and $restore -lt $TargetCombo.Items.Count) { $restore } else { 0 }
   } finally { $TargetCombo.EndUpdate() }
+}
+
+# Housekeeping bounds for the on-disk version cache. Reads already refuse anything older than six
+# hours (see Get-WingetVersions), so an expired entry can never be SERVED - but nothing ever removed
+# one either, and the file grew for the lifetime of the installation, one entry per package ever
+# looked up. These two limits keep it to what is actually useful.
+$script:versionCacheMaxAgeDays = 7
+$script:versionCacheMaxEntries = 2000
+
+# Pure so the pruning rules can be tested without touching the disk or the clock.
+function Select-LiveVersionCacheEntries {
+  param(
+    [Parameter(Mandatory)][hashtable]$Cache,
+    [datetime]$Now = [datetime]::UtcNow,
+    [int]$MaxAgeDays = $script:versionCacheMaxAgeDays,
+    [int]$MaxEntries = $script:versionCacheMaxEntries
+  )
+  $kept = @{}
+  $candidates = [System.Collections.Generic.List[object]]::new()
+  foreach ($key in @($Cache.Keys)) {
+    $entry = $Cache[$key]
+    if (-not $entry -or -not $entry.timestamp) { continue }
+    $stamp = [datetime]$entry.timestamp
+    if ($MaxAgeDays -gt 0) {
+      $ageDays = ($Now - $stamp.ToUniversalTime()).TotalDays
+      if ($ageDays -gt $MaxAgeDays) { continue }
+      # A timestamp in the future means a clock change or a hand-edited file; treating it as fresh
+      # would pin a stale entry forever, so it goes too.
+      if ($ageDays -lt -1) { continue }
+    }
+    $candidates.Add([pscustomobject]@{ Key = $key; Stamp = $stamp; Entry = $entry })
+  }
+  # Newest first, so a cap keeps what is most likely to still be asked for.
+  $ordered = @($candidates | Sort-Object -Property Stamp -Descending)
+  if ($MaxEntries -gt 0 -and $ordered.Count -gt $MaxEntries) {
+    $ordered = @($ordered | Select-Object -First $MaxEntries)
+  }
+  foreach ($c in $ordered) { $kept[$c.Key] = $c.Entry }
+  return $kept
 }
 
 function Get-VersionDiskCache {
   if (-not $script:versionCachePath) { return @{} }
   try {
-    if (Test-Path $script:versionCachePath) {
-      $raw = Get-Content $script:versionCachePath -Raw -Encoding utf8 -ErrorAction Stop
+    if (Test-Path -LiteralPath $script:versionCachePath) {
+      $raw = Get-Content -LiteralPath $script:versionCachePath -Raw -Encoding utf8 -ErrorAction Stop
       $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
       $ht = @{}
+      $skipped = 0
       foreach ($prop in $parsed.PSObject.Properties) {
-        $ht[$prop.Name] = @{
-          versions  = @($prop.Value.versions)
-          timestamp = [datetime]::Parse($prop.Value.timestamp, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
-        }
+        # One entry per try: a single unparseable timestamp used to throw out of the loop and
+        # discard the ENTIRE cache, so one bad line cost every package's cached versions.
+        try {
+          $ht[$prop.Name] = @{
+            versions  = @($prop.Value.versions)
+            timestamp = [datetime]::Parse($prop.Value.timestamp, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+          }
+        } catch { $skipped++ }
       }
-      return $ht
+      if ($skipped -gt 0) { Write-Log ("Version cache: skipped {0} unreadable entr(y/ies); the rest was kept." -f $skipped) }
+      $live = Select-LiveVersionCacheEntries -Cache $ht
+      $dropped = $ht.Count - $live.Count
+      if ($dropped -gt 0) { Write-Log ("Version cache: dropped {0} entr(y/ies) past the {1}-day limit or over the {2}-entry cap." -f $dropped, $script:versionCacheMaxAgeDays, $script:versionCacheMaxEntries) }
+      return $live
     }
   } catch {
     Write-Log "Warning: Could not read version cache: $($_.Exception.Message)"
@@ -225,14 +380,24 @@ function Save-VersionDiskCache {
   param([hashtable]$Cache)
   if (-not $script:versionCachePath) { return }
   try {
+    # Prune on the way out as well as on the way in, so a long-running session cannot write back a
+    # file that has grown past the limits since it was loaded.
+    $live = Select-LiveVersionCacheEntries -Cache $Cache
     $obj = @{}
-    foreach ($key in $Cache.Keys) {
+    foreach ($key in $live.Keys) {
       $obj[$key] = @{
-        versions  = $Cache[$key].versions
-        timestamp = $Cache[$key].timestamp.ToString('o')
+        versions  = $live[$key].versions
+        timestamp = $live[$key].timestamp.ToString('o')
       }
     }
-    $obj | ConvertTo-Json -Depth 4 | Set-Content -Path $script:versionCachePath -Encoding utf8 -ErrorAction SilentlyContinue
+    # The cache moved from a loose file in LocalAppData into the application's own folder with the
+    # rename to WinTuner GUI. That folder may not exist yet on a fresh profile, and Set-Content does
+    # not create one - without this the cache silently never persisted and every search re-fetched.
+    $cacheDir = Split-Path -Parent $script:versionCachePath
+    if ($cacheDir -and -not (Test-Path -LiteralPath $cacheDir -PathType Container)) {
+      [void][System.IO.Directory]::CreateDirectory($cacheDir)
+    }
+    $obj | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $script:versionCachePath -Encoding utf8 -ErrorAction SilentlyContinue
   } catch {
     Write-Log "Warning: Could not save version cache: $($_.Exception.Message)"
   }
@@ -330,6 +495,38 @@ function Get-WingetVersions {
   return $result
 }
 
+# Where the WinTuner module caches the community package index. Not our file - we only look at it,
+# never write it. Measured: 3.2 MB, pulled from raw.githubusercontent.com.
+$script:wingetIndexCachePath = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'WingetCommunityRepo\index.v2.json'
+
+# Is the module about to download the package index rather than read it from disk?
+#
+# This matters because that download is synchronous and lands on the UI thread, so the window has no
+# message pump for its whole duration and Windows paints it as "not responding". Measured on
+# 2026-08-21: 130 seconds between "Prüfe Favorit (1/4)" and its result, with the cache file's
+# LastWriteTime landing on the exact second the wait ended. The following favourites took ~1 s each.
+#
+# The module's own expiry rule is not readable from outside (it lives in IL, and the only hint is a
+# "cache still valid" log message), so this is a heuristic: missing, empty, or older than a day.
+# Being wrong is cheap in both directions - a false positive shows a notice for a fetch that turns
+# out to be fast, a false negative just restores today's behaviour.
+function Test-WingetIndexCacheCold {
+  param([string]$CachePath = $script:wingetIndexCachePath, [int]$MaxAgeHours = 24)
+  $result = [pscustomobject]@{ Cold = $true; Path = $CachePath; AgeHours = $null; Reason = 'missing' }
+  try {
+    $file = Get-Item -LiteralPath $CachePath -ErrorAction Stop
+    if ($file.Length -le 0) { $result.Reason = 'empty'; return $result }
+    $age = ([datetime]::Now - $file.LastWriteTime).TotalHours
+    $result.AgeHours = [Math]::Round($age, 1)
+    if ($age -gt $MaxAgeHours) { $result.Reason = 'stale'; return $result }
+    $result.Cold = $false
+    $result.Reason = 'fresh'
+  } catch {
+    # A path we cannot read is treated as cold: the notice is harmless, a silent freeze is not.
+  }
+  return $result
+}
+
 # Queries WinTuner's online package index directly. This is intentionally separate from the local
 # `winget show` source: the online index can already know a new version while a workstation's
 # configured WinGet source is stale (the TeamViewer case that prompted this change).
@@ -369,9 +566,42 @@ function Get-WtPackageIndexLatestVersion {
 # Fresh update scans consult BOTH authoritative paths and pick the newer version. No GUI cache is
 # used here. The returned object retains the per-source values so discrepancies are visible in the
 # log instead of being silently treated as "no update".
+# Kurzzeit-Zwischenspeicher fuer die teuerste Frage der Anwendung: "welche Version ist die neueste?"
+#
+# Jede Antwort kostet zwei Abfragen (WinTuner-Index + lokale WinGet-Quelle) und dauert 1-3 s. Beim
+# Anmelden wurde sie ZWEIMAL je App gestellt: erst von der Dashboard-Kachel (voller Versionsvergleich),
+# Sekunden spaeter von der automatischen Update-Suche - dieselben Pakete, dasselbe Ergebnis. Im
+# Protokoll stehen die Zeilen "Refreshing available WinGet versions for X" deshalb doppelt.
+#
+# Fuenf Minuten sind lang genug, damit die zweite Runde frei ist, und kurz genug, dass niemand mit
+# einer veralteten Antwort arbeitet. Wer ausdruecklich nachsieht (Knopf "Nach Updates suchen"),
+# bekommt mit -Force garantiert eine frische Antwort.
+$script:latestVersionCache = @{}
+$script:latestVersionCacheSeconds = 300
+
+function Clear-LatestVersionCache {
+  $script:latestVersionCache = @{}
+}
+
 function Get-FreshLatestPackageVersion {
-  param([Parameter(Mandatory)][string]$PackageId)
+  param(
+    [Parameter(Mandatory)][string]$PackageId,
+    [switch]$Force
+  )
+  $cacheKey = ([string]$PackageId).Trim().ToLowerInvariant()
+  if (-not $Force -and $script:latestVersionCache.ContainsKey($cacheKey)) {
+    $entry = $script:latestVersionCache[$cacheKey]
+    $age = ([datetime]::UtcNow - $entry.Time).TotalSeconds
+    if ($age -lt $script:latestVersionCacheSeconds) {
+      Write-LogDebug ("Latest version for {0} served from the session cache ({1:n0}s old)." -f $PackageId, $age)
+      return $entry.Result
+    }
+  }
+  # Announced here rather than at the three call sites (favourites, update scan, batch): this is the
+  # one place they all pass through, and the guard inside makes every call after the first free.
+  Initialize-WingetPackageIndex
   $moduleLatest = Get-WtPackageIndexLatestVersion -PackageId $PackageId
+  Complete-WingetPackageIndexWarmup
   $wingetVersions = @(Get-WingetVersions -PackageId $PackageId -ForceRefresh)
   $wingetLatest = if ($wingetVersions.Count -gt 0) { [string]$wingetVersions[0] } else { $null }
 
@@ -384,12 +614,16 @@ function Get-FreshLatestPackageVersion {
   if ($moduleLatest -and $wingetLatest -and $moduleLatest -ne $wingetLatest) {
     Write-Log ("Version source mismatch for {0}: WinTuner index={1}, local WinGet={2}; using {3} from {4}." -f $PackageId, $moduleLatest, $wingetLatest, $latest, $source)
   }
-  [pscustomobject]@{
+  $result = [pscustomobject]@{
     Latest       = $latest
     Source       = $source
     ModuleLatest = $moduleLatest
     WingetLatest = $wingetLatest
   }
+  # Auch ein leeres Ergebnis wird gemerkt: ein Paket ohne auffindbare Version findet auch die zweite
+  # Abfrage zehn Sekunden spaeter nicht, und genau die kostete die Zeit.
+  $script:latestVersionCache[$cacheKey] = @{ Time = [datetime]::UtcNow; Result = $result }
+  return $result
 }
 
 # WinTuner stores built packages beneath <root>\<PackageId>\<Version>. Use those version folders
@@ -557,6 +791,140 @@ function Invoke-LocalPackagePrune {
 $script:win32AppsCache = @{}
 $script:win32AppsCacheSeconds = 10
 
+# The module asks Graph for the inventory with $top=999 and does NOT follow @odata.nextLink (checked
+# against WinTuner 1.4.1: MobileAppsRequestBuilderExtensions+<GetWinTunerAppsAsync> calls GetAsync
+# once and reads response.Value - no PageIterator). A tenant with more WinTuner-managed apps than
+# one page therefore hands us a SILENT partial inventory: no error, no warning, just a short list.
+# Every decision built on it - which apps have updates, which versions get deleted - would then be
+# made on incomplete data, which is the same failure class as 0.15.8.
+#
+# The GUI cannot fix this inside the module, so it does the next best thing: it notices. A result at
+# or above the page size means "possibly truncated" (exactly 999 matching apps is indistinguishable
+# from more than 999 from out here), and that gets said out loud instead of being assumed complete.
+$script:win32AppsModulePageSize = 999
+# Warn once per session per inventory kind; a per-read warning would flood the log during a batch.
+$script:win32InventoryTruncationWarned = @{}
+
+# Pure so it can be tested without Graph: is a result of this size possibly a truncated first page?
+function Test-Win32InventoryTruncated {
+  param([Parameter(Mandatory)][int]$Count, [int]$PageSize = $script:win32AppsModulePageSize)
+  if ($PageSize -le 0) { return $false }
+  return ($Count -ge $PageSize)
+}
+
+# Reads the WinGet package id back out of the notes marker the module writes.
+#
+# Format verified against WinTuner 1.4.1, whose own parser is
+#   \[WinTuner\|(?<source>[^\|]+)\|(?<packageId>[^\]]+)\]
+# with '[WingetIntune|' as the historical spelling. The module derives the PackageId property from
+# exactly this string, so reading the inventory without the module means reading this too.
+# Pure, so the format can be tested without a tenant.
+function Get-PackageIdFromNotes {
+  param([string]$Notes)
+  if ([string]::IsNullOrWhiteSpace($Notes)) { return '' }
+  $m = [regex]::Match($Notes, '\[(?:WinTuner|WingetIntune)\|(?<source>[^|]+)\|(?<packageId>[^\]]+)\]')
+  if (-not $m.Success) { return '' }
+  return ([string]$m.Groups['packageId'].Value).Trim()
+}
+
+# Decides whether an app counts as superseded, from the Graph counters.
+#
+# The two counters are easy to mix up, so this is written down rather than remembered. Per the Graph
+# documentation for mobileApp:
+#   supersedingAppCount = "the total number of apps this app directly or indirectly SUPERSEDES"
+#                         -> greater than zero on the NEW app
+#   supersededAppCount  = "the total number of apps this app is directly or indirectly SUPERSEDED BY"
+#                         -> greater than zero on the OLD app
+# So "superseded", the state the GUI calls an old version, is supersededAppCount > 0.
+function Test-IsSupersededApp {
+  param([Parameter(Mandatory)][AllowNull()]$SupersededAppCount)
+  if ($null -eq $SupersededAppCount) { return $false }
+  return ([int]$SupersededAppCount -gt 0)
+}
+
+# The full WinTuner-managed inventory, read straight from Graph WITH pagination.
+#
+# Exists because the module asks for one page of 999 and never follows @odata.nextLink, so on a large
+# tenant its answer is a silent partial list. This reproduces the module's own server-side filter -
+# win32LobApp carrying a '[WinTuner|' or '[WingetIntune|' notes marker - and the same partition into
+# active and superseded, then hands back objects shaped like the module's (Name / CurrentVersion /
+# GraphId / PackageId), which is the whole contract the rest of the application reads.
+#
+# NOT the default path: it is used only when the module's answer looks truncated. Normal tenants keep
+# running on the module, so this code cannot change what the vast majority of runs see - and the one
+# case it does change is the case that is otherwise provably wrong.
+# Der ROHE Durchlauf durch alle App-Objekte, 30 Sekunden gemerkt.
+#
+# Die Abfrage liefert die ganze Liste und wird LOKAL in aktiv/abgeloest geteilt - zwei Aufrufe
+# hintereinander (genau das passiert bei jeder Dashboard-Aktualisierung, wenn das Modul leer
+# antwortet) waren deshalb zweimal derselbe Netzdurchlauf, bei einem grossen Tenant zweimal neun
+# Seiten. Der zweite Aufruf kostet jetzt nichts.
+$script:graphInventoryRaw = $null
+$script:graphInventoryRawTime = [datetime]::MinValue
+$script:graphInventoryRawSeconds = 30
+# Die ausfuehrliche Erklaerung zu einem leeren Inventar wird einmal pro Sitzung geschrieben.
+$script:emptyInventoryExplained = $false
+
+function Clear-GraphInventoryRawCache {
+  $script:graphInventoryRaw = $null
+  $script:graphInventoryRawTime = [datetime]::MinValue
+}
+
+function Get-RawWin32AppsFromGraph {
+  # Eigener Standard, falls die Konstante (noch) nicht gesetzt ist: ein $null in dieser Rechnung
+  # macht jeden Vergleich falsch, und der Cache greift dann nie - lautlos.
+  $maxAge = if ([int]$script:graphInventoryRawSeconds -gt 0) { [int]$script:graphInventoryRawSeconds } else { 30 }
+  $age = ([datetime]::UtcNow - $script:graphInventoryRawTime).TotalSeconds
+  if ($null -ne $script:graphInventoryRaw -and $age -lt $maxAge) {
+    Write-LogDebug ("Paged Graph inventory served from the short-term cache ({0:n0}s old)." -f $age)
+    return @($script:graphInventoryRaw)
+  }
+  $token = Get-WtToken -ErrorAction Stop
+  if ([string]::IsNullOrWhiteSpace([string]$token)) { throw 'WinTuner returned an empty access token.' }
+  $headers = @{ Authorization = "Bearer $token"; 'Content-Type' = 'application/json' }
+  $uri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps?`$top=100"
+  $raw = [System.Collections.Generic.List[object]]::new()
+  $maxPages = 200   # 20000 apps; far beyond any real tenant, and stops a broken cursor looping forever
+  $page = 0
+  do {
+    $page++
+    if ($page -gt $maxPages) { throw "Graph pagination exceeded $maxPages pages while reading the app inventory." }
+    $response = Invoke-RestMethod -Method GET -Uri $uri -Headers $headers -ErrorAction Stop
+    foreach ($app in @($response.value)) { $raw.Add($app) }
+    $uri = [string]$response.'@odata.nextLink'
+  } while (-not [string]::IsNullOrWhiteSpace($uri))
+  $script:graphInventoryRaw = @($raw.ToArray())
+  $script:graphInventoryRawTime = [datetime]::UtcNow
+  Write-Log ("Paged Graph inventory read: {0} app object(s) of any type over {1} page(s)." -f $script:graphInventoryRaw.Count, $page)
+  return @($script:graphInventoryRaw)
+}
+
+function Get-Win32AppInventoryViaGraph {
+  param([switch]$Superseded)
+  $result = [System.Collections.Generic.List[object]]::new()
+  foreach ($app in (Get-RawWin32AppsFromGraph)) {
+      if (-not $app -or -not $app.id) { continue }
+      $odataType = [string]$app.'@odata.type'
+      if (-not [string]::Equals($odataType.TrimStart([char]'#'), 'microsoft.graph.win32LobApp', [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+      $packageId = Get-PackageIdFromNotes -Notes ([string]$app.notes)
+      # No marker means the module would not list it either. Staying identical to the module here
+      # matters more than being more complete: every consumer downstream expects a resolvable
+      # PackageId, and the deletion paths in particular must not suddenly see hand-built apps.
+      if (-not $packageId) { continue }
+      $isSuperseded = Test-IsSupersededApp -SupersededAppCount $app.supersededAppCount
+      if ($isSuperseded -ne [bool]$Superseded) { continue }
+      $result.Add([pscustomobject]@{
+        Name           = [string]$app.displayName
+        CurrentVersion = [string]$app.displayVersion
+        GraphId        = [string]$app.id
+        PackageId      = $packageId
+        IsAssigned     = [bool]$app.isAssigned
+      })
+  }
+  Write-Log ("Paged Graph inventory: {0} WinTuner-managed {1} app(s)." -f $result.Count, $(if ($Superseded) { 'superseded' } else { 'active' }))
+  return @($result.ToArray())
+}
+
 # The WinTuner module hands back a live collection it is still filling and enumerates it internally
 # ("Getting list of published apps"). Under WinForms - where the UI thread pumps DoEvents while the
 # module works - that race surfaces as "Collection was modified; enumeration operation may not
@@ -609,17 +977,170 @@ function Invoke-WithTransientRetry {
 # reported "no update candidates" on tenants that plainly had them (Java 8, Jabra Direct 6.27.3702
 # -> 8.1.14601): the outdated apps never reached the comparison at all. The parameter is bound only
 # when a caller explicitly asks for one side of that filter.
+# Fuehrt die Inventar-Abfrage im Paket-Runspace aus, damit das Fenster waehrenddessen zeichnet.
+#
+# Rueckgabe:
+#   $null                      - der Runspace war nicht zu haben; der Aufrufer macht es inline
+#   @(...)                     - das Ergebnis der Abfrage
+#   wirft                      - der Fehler AUS der Abfrage, unveraendert, auf dem UI-Thread
+#
+# Der letzte Punkt ist der wichtige: Invoke-WithTransientRetry und die Truncation-Pruefung sollen
+# denselben Fehler sehen wie bei einem Inline-Aufruf, sonst waere die Auslagerung eine stille
+# Verhaltensaenderung an einer Stelle, an der Apps geloescht werden.
+function Get-Win32AppsOffThread {
+  param(
+    [Parameter(Mandatory)][hashtable]$Query,
+    [string]$Label = 'inventory read'
+  )
+  # Der Runspace fuehrt GENAU EINE Pipeline. Waehrend dieser Abfrage laeuft die Nachrichtenschleife
+  # weiter (das ist der Zweck), ein Klick auf "Dashboard" kann also eine zweite Inventar-Abfrage
+  # starten - und die lief in "The pipeline was not run because a pipeline is already running.
+  # Pipelines cannot be run concurrently.", woraufhin das Fenster "Laden der Apps aus Intune
+  # fehlgeschlagen" meldete (26.08.2026, 09:28:26). Ist der Runspace besetzt, wird nicht gewartet
+  # und nicht gedraengelt: $null heisst "mach es inline", und der Aufrufer kommt zum Ergebnis.
+  if ($script:pkgRunspaceInUse -or $script:packagingBusy) {
+    Write-LogDebug ("Inventory read '{0}': the background runspace is busy - running inline instead." -f $Label)
+    return $null
+  }
+  $rs = $null
+  try { $rs = Get-PackageRunspace } catch { $rs = $null }
+  if (-not $rs) { return $null }
+
+  $ps = $null
+  $script:pkgRunspaceInUse = $true
+  try {
+    $ps = [powershell]::Create()
+    $ps.Runspace = $rs
+    # Der Aufruf bekommt die Abfrage als Parameter - eine Variable aus dem UI-Runspace ist im
+    # zweiten Runspace nicht sichtbar.
+    [void]$ps.AddScript('param($q) Get-WtWin32Apps @q').AddArgument($Query)
+    $async = $ps.BeginInvoke()
+    # Nachrichtenschleife weiterlaufen lassen, waehrend der andere Thread arbeitet. Das ist der
+    # ganze Gewinn: das Fenster zeichnet und reagiert, statt als "Keine Rueckmeldung" dazustehen.
+    while (-not $async.AsyncWaitHandle.WaitOne(50)) {
+      [System.Windows.Forms.Application]::DoEvents()
+    }
+    $result = $ps.EndInvoke($async)
+    if ($ps.Streams.Error.Count -gt 0) {
+      # Fehler aus dem Runspace als echten Fehler auf diesem Thread weiterreichen.
+      throw ($ps.Streams.Error | ForEach-Object { $_.ToString() }) -join '; '
+    }
+    return @($result)
+  } catch {
+    # Zwei Faelle sind hier nicht zu unterscheiden: "Runspace kaputt" und "Abfrage fehlgeschlagen".
+    # Im Zweifel den Fehler weiterreichen - ihn zu schlucken und inline zu wiederholen wuerde eine
+    # echte Stoerung in eine doppelt so lange Wartezeit verwandeln.
+    Write-Log ("Inventory read '{0}' (off-thread) failed: {1}" -f $Label, $_.Exception.Message)
+    throw
+  } finally {
+    $script:pkgRunspaceInUse = $false
+    if ($ps) { try { $ps.Dispose() } catch { } }
+  }
+}
+
 function Get-Win32AppsResilient {
   param(
     [switch]$Superseded,
     [Nullable[bool]]$UpdateAvailable,
-    [string]$Label = 'inventory read'
+    [string]$Label = 'inventory read',
+    # Callers that already sit in their own retry loop (Resolve-DeployedUpdateTarget waits for Intune
+    # to list a freshly created app) pass 0: they still get the single code path and the truncation
+    # check, without nesting 3 retries inside their own 8 attempts.
+    [int]$MaxRetries = 3
   )
   $query = @{ Superseded = [bool]$Superseded; ErrorAction = 'Stop' }
   if ($null -ne $UpdateAvailable) { $query['Update'] = [bool]$UpdateAvailable }
-  return @(Invoke-WithTransientRetry -Label $Label -Action {
+  $read = {
+    # Bevorzugt im Paket-Runspace, damit das Fenster waehrend der laengsten Abfrage des Programms
+    # zeichnet. $null heisst nur "Runspace nicht verfuegbar" - dann wie bisher inline.
+    #
+    # Die Pruefung auf die Funktion ist kein Zierrat: die Unit-Tests laden diese Funktion einzeln aus
+    # der Quelle und stellen Get-WtWin32Apps als Mock bereit. Ohne die Pruefung wuerden sie einen
+    # echten Runspace aufmachen, das Modul importieren und am Mock vorbeilaufen - sie pruefen die
+    # Logik dieses Wrappers, nicht die Nebenlaeufigkeit.
+    if (Get-Command Get-Win32AppsOffThread -ErrorAction SilentlyContinue) {
+      $offThread = Get-Win32AppsOffThread -Query $query -Label $Label
+      if ($null -ne $offThread) { return $offThread }
+    }
     Get-WtWin32Apps @query
-  })
+  }
+  $apps = @(Invoke-WithTransientRetry -Label $Label -MaxRetries $MaxRetries -Action $read)
+
+  # Eine LEERE Antwort ist kein Fehler - und das ist die Falle, die einen Kunden mit 11 Apps als
+  # "Keine Apps in Intune gefunden" dastehen liess: die Modul-Wettlaufsituation ("Collection was
+  # modified") schlaegt nicht immer als Ausnahme durch, manchmal kommt einfach eine leere Liste
+  # zurueck. Invoke-WithTransientRetry sieht dann nichts, was es wiederholen koennte.
+  #
+  # Deshalb wird eine leere Antwort EINMAL gegengelesen, bevor sie geglaubt wird. Ein Tenant ohne
+  # verwaltete Apps kostet dadurch eine zusaetzliche Abfrage - eine Sekunde fuer die Zusicherung,
+  # dass "leer" wirklich leer heisst. Kommen beim zweiten Mal Apps, war die erste Antwort der Wettlauf.
+  if ($apps.Count -eq 0 -and $MaxRetries -gt 0) {
+    Write-Log ("Inventory read '{0}' came back EMPTY. An empty answer is not an error, so it was not retried - re-reading once to tell a real empty tenant from the module's enumeration race." -f $Label)
+    try { [System.Windows.Forms.Application]::DoEvents() } catch { }
+    $second = @(Invoke-WithTransientRetry -Label ("{0} (empty re-read)" -f $Label) -MaxRetries $MaxRetries -Action $read)
+    if ($second.Count -gt 0) {
+      Write-Log ("Inventory read '{0}': the re-read returned {1} app(s) - the first, empty answer was the module's race and is discarded." -f $Label, $second.Count)
+      $apps = $second
+    } else {
+      # Zweite Meinung von einer ANDEREN Stelle. Get-Win32AppInventoryViaGraph fragt Graph selbst,
+      # paginiert, und bildet denselben Filter nach (win32LobApp mit '[WinTuner|'-Marke). Sagt Graph
+      # ebenfalls null, ist "leer" belastbar und keine Vermutung mehr - genau diese Auskunft braucht
+      # die Meldung darueber, ob der Tenant leer ist oder die Abfrage kaputt war.
+      try {
+        $viaGraph = @(Get-Win32AppInventoryViaGraph -Superseded:$Superseded)
+        if ($viaGraph.Count -gt 0) {
+          Write-Log ("Inventory read '{0}': the module returned nothing, but a direct paged Graph read found {1} app(s) - using the Graph result." -f $Label, $viaGraph.Count)
+          $apps = $viaGraph
+        } elseif (-not $script:emptyInventoryExplained) {
+          # Die ausfuehrliche Fassung EINMAL pro Sitzung. Bei einem Tenant ohne WinTuner-Apps stand
+          # dieser Absatz sonst dreimal hintereinander im Protokoll (aktiv, abgeloest, Kachel) und
+          # verdeckte alles andere.
+          $script:emptyInventoryExplained = $true
+          Write-Log ("Inventory read '{0}': confirmed empty by the module AND by a direct Graph read - this tenant really has no WinTuner-managed {1} app(s). Apps created by hand or by another tool carry no '[WinTuner|' marker and are deliberately not listed here; they are visible under 'All tenant apps'. (Said once per session; later empty reads are logged in one line.)" -f $Label, $(if ($Superseded) { 'superseded' } else { 'active' }))
+        } else {
+          Write-Log ("Inventory read '{0}': confirmed empty by the module and by Graph (no WinTuner-managed {1} apps)." -f $Label, $(if ($Superseded) { 'superseded' } else { 'active' }))
+        }
+      } catch {
+        Write-Log ("Inventory read '{0}': the direct Graph cross-check failed ({1}); staying with the module's empty answer." -f $Label, $_.Exception.Message)
+      }
+    }
+  }
+
+  # Central truncation check: every inventory read that matters goes through here, so one place is
+  # enough to notice a partial first page - and to do something about it.
+  if (Test-Win32InventoryTruncated -Count $apps.Count) {
+    $kind = if ($Superseded) { 'superseded' } else { 'active' }
+    if (-not $script:win32InventoryTruncationWarned.ContainsKey($kind)) {
+      $script:win32InventoryTruncationWarned[$kind] = $true
+      Write-Log ("Inventory read '{0}' returned {1} apps, which is the module's page size - the module does not follow @odata.nextLink, so this list is very likely INCOMPLETE. Re-reading the inventory directly from Graph with pagination." -f $Label, $apps.Count)
+    }
+    # Swap in the complete list. Deliberately only in this branch: a normal tenant never reaches it,
+    # so the code path everyone else runs on is untouched, while the one case that is provably wrong
+    # gets a correct answer instead of only a warning.
+    try {
+      $paged = @(Get-Win32AppInventoryViaGraph -Superseded:$Superseded)
+      if ($paged.Count -ge $apps.Count) {
+        Write-Log ("Inventory read '{0}': using the paged Graph result ({1} apps) instead of the module's truncated {2}." -f $Label, $paged.Count, $apps.Count)
+        return $paged
+      }
+      # Fewer apps than the module returned means the reproduction of the module's filter does not
+      # match this tenant. Keeping the module's list is the conservative choice: too few apps in a
+      # deletion path is dangerous, and a short list here would be silent.
+      Write-Log ("Inventory read '{0}': the paged Graph result had FEWER apps ({1}) than the module returned ({2}); keeping the module result and staying with the warning." -f $Label, $paged.Count, $apps.Count)
+    } catch {
+      Write-Log ("Inventory read '{0}': the paged Graph fallback failed ({1}); continuing with the module's possibly truncated list." -f $Label, $_.Exception.Message)
+    }
+  }
+  return $apps
+}
+
+# Ein Inventar, das KEINE aktive App nennt, aber abgeloeste Versionen kennt, ist in sich
+# widerspruechlich: eine App ist nur deshalb abgeloest, weil eine neuere, aktive sie abgeloest hat.
+# Genau diese Kombination stand im Protokoll (managed=0, superseded=6) - der Tenant hatte Apps, die
+# Abfrage war kaputt. Als reine Rechnung testbar gehalten.
+function Test-InventoryContradiction {
+  param([int]$ActiveCount, [int]$SupersededCount)
+  return ($ActiveCount -eq 0 -and $SupersededCount -gt 0)
 }
 
 function Get-CachedWin32Apps {
@@ -637,9 +1158,21 @@ function Get-CachedWin32Apps {
       return @($entry.Apps)
     }
   }
-  # Cast required: the module declares -Superseded as Nullable[bool], and handing it a raw
-  # SwitchParameter fails to bind.
-  $apps = @(Get-WtWin32Apps -Superseded:([bool]$Superseded) -ErrorAction Stop)
+  # Routed through the resilient wrapper rather than calling the module directly: this read serves
+  # the screens, so the module's "Collection was modified" race must not surface as a failed refresh,
+  # and it gets the truncation check with everything else.
+  $apps = @(Get-Win32AppsResilient -Superseded:$Superseded -Label ("cached inventory ({0})" -f $key))
+  # Ein leeres Ergebnis wird NICHT ueber ein vorher gefuelltes geschrieben. Der Cache wird beim
+  # Tenant-Wechsel geleert, also gehoert ein vorhandener Eintrag zu DIESEM Kunden - und "vorhin 11,
+  # jetzt 0" ist keine Aenderung, die zwischen zwei Abfragen passiert. So wanderte die kaputte
+  # Antwort der Kachel-Abfrage in die Update-Suche, die daraufhin "Keine Apps" meldete.
+  if ($apps.Count -eq 0 -and $script:win32AppsCache.ContainsKey($key)) {
+    $previous = @($script:win32AppsCache[$key].Apps)
+    if ($previous.Count -gt 0) {
+      Write-Log ("Inventory ({0}): the fresh read returned 0 app(s) while {1} were known from this tenant - keeping the previous list and NOT caching the empty answer. Click the refresh again to re-read." -f $key, $previous.Count)
+      return $previous
+    }
+  }
   $script:win32AppsCache[$key] = @{ Time = [datetime]::UtcNow; Apps = $apps }
   return $apps
 }
@@ -647,4 +1180,11 @@ function Get-CachedWin32Apps {
 # Called after anything that changes the tenant, so the next read cannot serve a stale list.
 function Clear-Win32AppsCache {
   $script:win32AppsCache = @{}
+  # Die rohe Graph-Liste gehoert zum Tenant, und die Erklaerung zum leeren Inventar darf beim
+  # naechsten Kunden wieder ausfuehrlich sein - dort ist sie eine neue Auskunft.
+  Clear-GraphInventoryRawCache
+  $script:emptyInventoryExplained = $false
+  # A different tenant deserves its own truncation verdict - the previous customer's "list is fine"
+  # says nothing about this one's app count.
+  $script:win32InventoryTruncationWarned = @{}
 }

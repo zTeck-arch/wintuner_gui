@@ -54,6 +54,42 @@ $usedKeys = @([regex]::Matches($content, 'Get-UiString\s+["''](?<key>[A-Za-z][A-
 $missingKeys = @($usedKeys | Where-Object { -not $defined.Contains($_) })
 Assert-True ($missingKeys.Count -eq 0) "Undefined UI keys: $($missingKeys -join ', ')"
 
+# Die Gegenrichtung: Schluessel, die DEFINIERT aber nicht mehr benutzt werden. Die Pruefung oben
+# faengt nur den umgekehrten Fall, weshalb beim Umbau der Einstellungsseite drei Schluessel
+# uebrigblieben, deren Steuerelemente es nicht mehr gab - unsichtbar fuer jede Pruefung.
+#
+# Zwei Umwege muessen mitgezaehlt werden, sonst meldet die Pruefung fast nur Fehlalarme:
+#   -TextKey/-TitleKey/-InfoKey   Info-Badges und Kartentitel bekommen den Schluessel als Parameter.
+#   Get-UiString $variable Der Schluessel steckt in einer Variablen (z. B. die Dashboard-Kachel,
+#                          die je nach Einstellung einen von zwei Tooltips zeigt).
+# Der zweite Fall ist statisch nicht aufloesbar; deshalb ist das eine WARNUNG und kein Fehler -
+# ein zu Recht vorgehaltener Schluessel darf den Build nicht blockieren.
+$indirectKeys = @([regex]::Matches($content, '-(?:TextKey|TitleKey|InfoKey)\s+["''](?<key>[A-Za-z][A-Za-z0-9_]*)["'']') |
+  ForEach-Object { $_.Groups['key'].Value })
+$dynamicLookup = [regex]::IsMatch($content, 'Get-UiString\s+\$')
+$reachable = [Collections.Generic.HashSet[string]]::new([string[]]($usedKeys + $indirectKeys), [StringComparer]::OrdinalIgnoreCase)
+$deadKeys = @($enKeys | Where-Object { -not $reachable.Contains($_) } | Sort-Object)
+if ($deadKeys.Count -gt 0) {
+  $note = if ($dynamicLookup) { ' (einige davon koennen ueber eine Variable geholt werden)' } else { '' }
+  Write-Host ("  Hinweis: {0} UI-Schluessel werden nirgends gelesen{1}: {2}" -f $deadKeys.Count, $note, ($deadKeys -join ', ')) -ForegroundColor DarkYellow
+}
+
+# Ein deutsches Anfuehrungszeichen beendet einen einzeiligen PowerShell-String.
+#
+# In einem einzeiligen doppelt gequoteten String muss ein Anfuehrungszeichen "" geschrieben werden,
+# in einem Here-String (@"..."@) nicht. Die deutschen Texte benutzen typografische Anfuehrungszeichen,
+# und ,,Updates" beendet den String beim schliessenden Zeichen - beim Umbau der Einstellungsseite hat
+# genau das den Build zweimal gebrochen. Gefunden hat es der Parser, mit einer Zeilennummer in der
+# zusammengebauten Datei; diese Pruefung nennt stattdessen den Schluessel.
+$openingQuote = [char]0x201E   # ,, - oeffnendes deutsches Anfuehrungszeichen
+$badQuoteKeys = @()
+foreach ($line in ($content -split "`r?`n")) {
+  $m = [regex]::Match($line, '^    (?<key>[A-Za-z][A-Za-z0-9_]*)\s*=\s*"(?<body>.*)"\s*$')
+  if (-not $m.Success) { continue }
+  if ($m.Groups['body'].Value.Contains($openingQuote)) { $badQuoteKeys += $m.Groups['key'].Value }
+}
+Assert-True ($badQuoteKeys.Count -eq 0) ("Einzeilige UI-Strings mit deutschem Anfuehrungszeichen (bitte zwei gerade Anfuehrungszeichen verwenden oder einen Here-String): $($badQuoteKeys -join ', ')")
+
 # "(if (...) {...} else {...})" parses cleanly but fails at RUNTIME with "The term 'if' is not
 # recognized", because a plain parenthesis opens a command context. Only the subexpression form
 # "$(if ...)" works. The parser cannot catch this, so it is checked textually - it once shipped a
@@ -101,5 +137,95 @@ $single = $content.Substring($singleStart, $batchStart - $singleStart)
 $guardIndex = $single.IndexOf('Get-FreshExistingUpdateTarget')
 $buildIndex = $single.IndexOf('New-WingetPackageWithFallback')
 Assert-True ($guardIndex -ge 0 -and $buildIndex -gt $guardIndex) 'Fresh tenant duplicate guard must run before package build.'
+
+# Filesystem cmdlets must not take a wildcard-interpreting path.
+#
+# -Path treats [ and ] as a character-class pattern, so a package or log folder called
+# "Intune Pakete [Kunde]" is reported as non-existent while sitting right there. That is not
+# hypothetical: it produced a self-update that claimed success without replacing the file, and a
+# package folder reported as "not writable". Both were real findings.
+#
+# The rule is enforced on the ASSEMBLED script, so it covers every part at once. New-Item has no
+# -LiteralPath at all - use [System.IO.Directory]::CreateDirectory instead.
+$fsCmdlets = 'Test-Path', 'Get-Content', 'Set-Content', 'Add-Content', 'Remove-Item', 'Copy-Item',
+             'Move-Item', 'Rename-Item', 'Get-ChildItem', 'Get-Item', 'Out-File', 'New-Item'
+$pathOffenders = [Collections.Generic.List[string]]::new()
+$lines = $content -split "`r`n"
+for ($i = 0; $i -lt $lines.Count; $i++) {
+  $line = $lines[$i]
+  if ($line -match '^\s*#') { continue }
+  foreach ($cmdlet in $fsCmdlets) {
+    # -Path anywhere on the same line as the cmdlet. Good enough for a single-line style, and the
+    # whole source base is written that way.
+    if ($line -match ([regex]::Escape($cmdlet) + '\b') -and $line -match '\s-Path\b') {
+      $pathOffenders.Add(('line {0}: {1}' -f ($i + 1), $line.Trim()))
+      break
+    }
+  }
+}
+Assert-True ($pathOffenders.Count -eq 0) (
+  "Filesystem cmdlet called with -Path instead of -LiteralPath ({0} site(s)); a folder name containing [ or ] would silently not be found:`r`n  {1}" -f
+    $pathOffenders.Count, ($pathOffenders -join "`r`n  "))
+
+# Positional path arguments have the same problem and are easy to miss, because they do not even
+# mention a parameter name. Only the cmdlets whose first positional parameter IS the path.
+$positionalCmdlets = 'Test-Path', 'Get-Content', 'Remove-Item', 'Get-ChildItem', 'Get-Item'
+$positionalOffenders = [Collections.Generic.List[string]]::new()
+for ($i = 0; $i -lt $lines.Count; $i++) {
+  $line = $lines[$i]
+  if ($line -match '^\s*#') { continue }
+  foreach ($cmdlet in $positionalCmdlets) {
+    # A variable, a quote or a sub-expression straight after the cmdlet name means positional.
+    if ($line -match ([regex]::Escape($cmdlet) + '\s+[\$"''(]')) {
+      $positionalOffenders.Add(('line {0}: {1}' -f ($i + 1), $line.Trim()))
+      break
+    }
+  }
+}
+Assert-True ($positionalOffenders.Count -eq 0) (
+  "Filesystem cmdlet called with a positional path ({0} site(s)); use -LiteralPath so [ and ] in a folder name are taken literally:`r`n  {1}" -f
+    $positionalOffenders.Count, ($positionalOffenders -join "`r`n  "))
+
+# Jede Fortschrittsanzeige muss auch wieder verschwinden.
+#
+# Die Sichtbarkeit der Anzeige IST die Sperre gegen gleichzeitige Vorgaenge (Test-OperationRunning in
+# 70-Runtime liest sie). Ein Handler, der Show-Progress aufruft und im Fehlerfall - oder am Ende -
+# kein Hide-Progress erreicht, laesst die Anwendung dauerhaft "beschaeftigt" aussehen: jeder weitere
+# Klick wird abgewiesen oder in die Warteschlange gelegt, bis irgendein anderer Vorgang die Anzeige
+# zufaellig ausblendet. Genau so lag es beim Loeschen abgeloester Apps.
+#
+# Geprueft wird ueber den Parser, nicht mit einer Textsuche: gefragt ist der umgebende Skriptblock
+# (Funktion oder Ereignis), und nur der Parser weiss, wo der endet.
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$null)
+$showCalls = @($ast.FindAll({
+  param($node)
+  $node -is [System.Management.Automation.Language.CommandAst] -and
+  $node.GetCommandName() -eq 'Show-Progress'
+}, $true))
+$unbalanced = [Collections.Generic.List[string]]::new()
+foreach ($call in $showCalls) {
+  # Der NAECHSTE umgebende Handler oder die naechste umgebende Funktion - nicht irgendein
+  # Skriptblock weiter oben. Die erste Fassung dieser Regel lief bis zum Skript-Rumpf hoch, und der
+  # enthaelt natuerlich irgendwo ein Hide-Progress: die Regel war gruen und der Fehler blieb drin.
+  $scope = $null
+  $node = $call.Parent
+  while ($node) {
+    if ($node -is [System.Management.Automation.Language.FunctionDefinitionAst]) { $scope = $node; break }
+    if ($node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+        ([string]$node.Member.Value) -like 'Add_*') { $scope = $node; break }
+    $node = $node.Parent
+  }
+  $text = if ($scope) { $scope.Extent.Text } else { '' }
+  # Ausnahme mit Ansage: wer den Zustand ausdruecklich woanders wiederherstellt (der
+  # Winget-Index-Aufwaermer tut das in seiner Partnerfunktion), schreibt das als Marker in den
+  # Kommentar. Damit bleibt die Ausnahme sichtbar statt stillschweigend.
+  if ($text -notmatch 'Hide-Progress' -and $text -notmatch 'progress-restored-elsewhere') {
+    $where = if ($scope) { '' } else { ' (no enclosing function or event handler found)' }
+    $unbalanced.Add(('line {0}: {1}{2}' -f $call.Extent.StartLineNumber, $call.Extent.Text, $where))
+  }
+}
+Assert-True ($unbalanced.Count -eq 0) (
+  "Show-Progress without a Hide-Progress in the same scope ({0} site(s)); the progress display is the busy lock, so it would stay switched on and refuse every later action:`r`n  {1}" -f
+    $unbalanced.Count, ($unbalanced -join "`r`n  "))
 
 Write-Host "Static checks passed for WinTuner GUI $($version.Groups['v'].Value): $($functionNames.Count) functions, $($enKeys.Count) UI keys per language."

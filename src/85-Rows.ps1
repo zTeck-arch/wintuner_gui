@@ -1,4 +1,4 @@
-# Builds a row for one update candidate (name + both versions), mirroring its checked state.
+﻿# Builds a row for one update candidate (name + both versions), mirroring its checked state.
 function New-UpdateRow {
   param($App)
   $it = New-Object System.Windows.Forms.ListViewItem([string]$App.Name)
@@ -20,8 +20,15 @@ function New-UpdateRow {
   $noteParts = [System.Collections.Generic.List[string]]::new()
   $actionNote = if ($App.TargetAlreadyDeployed) { Get-UiString 'UpdateStateExisting' } else { Get-UiString 'UpdateStateNew' }
   $noteParts.Add([string]$actionNote)
+  # Two separate statements, because they mean different things to the reader: "the predecessors
+  # really carry different assignments" versus "one of them could not be read". A predecessor with no
+  # assignment at all is neither - it has nothing to hand over, so it is not mentioned here.
   if ($App.PSObject.Properties['ScopeWarning'] -and $App.ScopeWarning) {
     $noteParts.Add((Get-UiString 'UpdateStateScopeWarning'))
+    $it.ForeColor = [System.Drawing.Color]::DarkOrange
+  }
+  if ($App.PSObject.Properties['ScopeUnknown'] -and $App.ScopeUnknown) {
+    $noteParts.Add((Get-UiString 'UpdateStateScopeUnknown'))
     $it.ForeColor = [System.Drawing.Color]::DarkOrange
   }
   # Only shown when every scope probe succeeded and came back empty - see Group-UpdateCandidates.
@@ -93,7 +100,10 @@ $updateListBox.Add_MouseLeave({
 # the screenshot when the elastic card was resized.
 $updatesEmptyLabel = New-Object System.Windows.Forms.Label
 $updatesEmptyLabel.Tag = 'hint'
-$updatesEmptyLabel.Text = Get-UiString 'UpdatesEmptyHint'
+# Beim Aufbau schon MIT Verbindungszustand: ohne Anmeldung stand hier "auf 'Nach Updates suchen'
+# klicken" - und genau das geht dann nicht. Set-ConnectedUIState pflegt den Text spaeter weiter,
+# lief aber nur bei An- und Abmeldung, nie beim Start.
+Set-ListEmptyText -Label $updatesEmptyLabel -NormalKey 'UpdatesEmptyHint'
 $updatesEmptyLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
 $updatesEmptyLabel.Location = $updateListBox.Location
 $updatesEmptyLabel.Size = $updateListBox.Size
@@ -126,7 +136,12 @@ $updateSelectedButton.Width = 196
 $updateSelectedButton.Enabled = $false
 $cardUpdates.Controls.Add($updateSelectedButton)
 
+# Zurueckgenommen auf btn-secondary und mit der Zahl im Text (siehe Update-UpdatesEmptyState):
+# "Ausgewaehlte aktualisieren" und "ALLE aktualisieren" standen gleich gross und gleich betont
+# nebeneinander, und die ganze Warnung hing an der Grossschreibung. Wer die Liste gefiltert hatte,
+# sah nicht mehr, wie viele Apps "ALLE" bedeutet - die Zahl steht jetzt VOR dem Klick da.
 $updateAllButton = New-Object System.Windows.Forms.Button
+$updateAllButton.Tag = 'btn-secondary'
 $updateAllButton.Text = Get-UiString 'UpdateAllButton'
 $updateAllButton.Location = New-Object System.Drawing.Point(468,222)
 $updateAllButton.Width = 244
@@ -140,22 +155,70 @@ $cardUpdates.Controls.Add($updateAllButton)
 # Sizes are computed explicitly here rather than via Anchor, because anchor margins are captured at
 # construction time – when this panel was still tiny – which previously over-stretched a card far
 # beyond the window (see the Discovered card incident).
-$script:supersededCardHeight = 120
+# Hoehe der Abgeloeste-Karte: nach INHALT, nicht fest.
+#
+# Sie ersetzt ein einzeiliges Auswahlfeld und braucht sichtbare Zeilen, sonst waere die
+# Mehrfachauswahl nur theoretisch bedienbar. Eine feste Hoehe von 220 px nahm sie sich aber auch
+# dann, wenn die Liste leer ist - und das ist der Normalfall, solange man auf die Update-Liste
+# darueber schaut. Zusammen mit der dritten Karte fehlten der Update-Liste damit 200 px: bei einem
+# 853 px hohen Fenster blieben ihr 97 px, also vier Zeilen mit Bildlaufleiste bei zwei Treffern.
+#
+# Jetzt: drei Zeilen im Leerzustand, waechst mit dem Inhalt bis acht. Die Karte, in der etwas steht,
+# bekommt den Platz - und die Update-Liste bekommt ihn zurueck, sobald die andere leer ist.
+# Leer: drei Zeilen, damit die Update-Liste darueber den Platz bekommt. MIT Inhalt: mindestens
+# fuenf sichtbare Zeilen. Vorher wurden bei sechs gefundenen Apps zwei angezeigt - nicht wegen
+# dieser Rechnung, sondern weil nach dem Fuellen der Liste niemand die Anordnung neu berechnete
+# (siehe Update-SupersededListState). Beides gehoert zusammen: Zahl UND Zeitpunkt.
+$script:supersededRowsMin = 3
+$script:supersededRowsWithContent = 5
+$script:supersededRowsMax = 10
+$script:supersededCardHeight = 220
+function Get-SupersededCardHeight {
+  $rows = $script:supersededRowsMin
+  try {
+    $count = [int]$supersededListBox.Items.Count
+    if ($count -gt 0) {
+      $rows = [Math]::Max($script:supersededRowsWithContent, [Math]::Min($count, $script:supersededRowsMax))
+    }
+  } catch { }
+  # Untergrenze 18: eine CheckedListBox zeichnet ihre Zeile hoeher, als ItemHeight beim Aufbau
+  # sagt. Mit 17 gerechnet passten von drei eingeplanten Zeilen nur zwei ins Bild (gemessen).
+  $rowHeight = 18
+  try { if ([int]$supersededListBox.ItemHeight -gt $rowHeight) { $rowHeight = [int]$supersededListBox.ItemHeight } } catch { }
+  # 72 ueber der Liste (Titel + Suchknopf), 10 Abstand + 30 Knopfreihe + 16 Rand darunter,
+  # +4 fuer den Rahmen der Liste - sonst kostet er die letzte eingeplante Zeile.
+  return (72 + ($rows * $rowHeight) + 4 + 10 + 30 + 16)
+}
+# Die dritte Karte traegt eine erklaerende Zeile, deren Hoehe von der Schrift abhaengt - sie wird
+# deshalb aus dem Label gelesen statt geraten, sobald es existiert.
+$script:versionCleanupCardHeight = 96
 function Update-UpdatesLayout {
   try {
     if (-not $tabUpdate -or -not $cardUpdates -or -not $cardSuperseded) { return }
     $avail = $tabUpdate.ClientSize.Height
     if ($avail -lt 200) { return }
     $topY = 48; $gap = 12; $bottomPad = 6
-    $updH = $avail - $topY - $gap - $script:supersededCardHeight - $bottomPad
-    if ($updH -lt 180) { $updH = 180 }          # never collapse below a usable size
+    # Masse der Knopfreihe, gebraucht sowohl fuer die Mindesthoehe der Karte als auch weiter unten.
+    $btnHMin = 30; $btnGapMin = 10; $btnPadMin = 16
+    if ($versionCleanupHintLabel) {
+      $script:versionCleanupCardHeight = [Math]::Max(96, $versionCleanupHintLabel.Bottom + 14)
+    }
+    if ($supersededListBox) { $script:supersededCardHeight = Get-SupersededCardHeight }
+    $updH = $avail - $topY - (2 * $gap) - $script:supersededCardHeight - $script:versionCleanupCardHeight - $bottomPad
+    # Die Mindesthoehe der Karte muss aus ihrem Inhalt kommen, nicht aus einer runden Zahl. Solange
+    # hier 180 stand und die Liste getrennt davon auf 80 begrenzt war, widersprachen sich die beiden
+    # Grenzen: 72 (Filterzeile) + 80 (Liste) + 40 (Knopfreihe) + 16 = 208 passen nicht in 180, und
+    # die Knopfreihe stand halb ausserhalb der Karte. Aufgefallen, als die Abgeloeste-Karte von 120
+    # auf 220 px wuchs und die Rechnung erstmals in diesen Bereich geriet. Die Sektion scrollt.
+    $minUpdH = 72 + 80 + $btnGapMin + $btnHMin + $btnPadMin
+    if ($updH -lt $minUpdH) { $updH = $minUpdH }
     $cardUpdates.Height  = $updH
     # Inside the card: list fills everything between the filter row (Y=72) and the button row.
     # The button HEIGHT is set here as well: the layout reserved 32px while the buttons kept their
     # 23px default, so the row floated in the reserved space and ended up visually crowding the
     # card's bottom border ("the card overlaps the buttons"). Reserving and setting the same value
     # keeps a clean, constant 16px below the row.
-    $btnH = 30; $btnGap = 10; $btnPadBottom = 16
+    $btnH = $btnHMin; $btnGap = $btnGapMin; $btnPadBottom = $btnPadMin
     $listH = $updH - 72 - $btnH - $btnGap - $btnPadBottom
     if ($listH -lt 80) { $listH = 80 }
     $updateListBox.Height = $listH
@@ -165,6 +228,12 @@ function Update-UpdatesLayout {
     # like "150.0.7871.187" stay readable.
     $listW = [Math]::Max(698, $cardUpdates.ClientSize.Width - 28)
     $updateListBox.Width = $listW
+    # Die vertikale Bildlaufleiste liegt INNERHALB der Liste und verkleinert die Flaeche, auf der
+    # die Spalten Platz haben. Ohne diesen Abzug ergab die Verteilung 1577 px Spalten in 1568 px
+    # Sichtflaeche - neun Pixel zu viel, und die Liste bekam zusaetzlich eine waagerechte
+    # Bildlaufleiste. Immer abziehen, nicht nur wenn sie gerade sichtbar ist: sie erscheint, sobald
+    # eine Zeile mehr dazukommt, und dann waere die Verteilung wieder falsch.
+    $listW = $listW - [System.Windows.Forms.SystemInformation]::VerticalScrollBarWidth - 2
     $extra = $listW - 698
     if ($extra -gt 0 -and $updateListBox.Columns.Count -ge 5) {
       $updateListBox.Columns[0].Width = 235 + [int]($extra * 0.40)
@@ -174,16 +243,78 @@ function Update-UpdatesLayout {
       $updateListBox.Columns[4].Width = 145 + [int]($extra * 0.20)
     }
     if ($updatesEmptyLabel) { $updatesEmptyLabel.Size = $updateListBox.Size }
+    # Die Knopfreihe wird an ihren Beschriftungen gemessen und von links aufgereiht, statt vier
+    # Pixelbreiten zu pflegen: "Ausgewaehlte Apps aktualisieren" und "ALLE aktualisieren (auch nicht
+    # ausgewaehlte)" waren in der deutschen Fassung beide abgeschnitten - und bei einem Knopf, der
+    # einen Update-Lauf im Kundentenant startet, ist eine halbe Beschriftung das falsche Detail zum
+    # Sparen. Reicht die Breite nicht, behaelt der letzte Knopf den Rest; abgeschnitten wird dann
+    # immer noch, aber erst als letzte Massnahme und nicht schon bei der Entwurfsbreite.
     $btnY = 72 + $listH + $btnGap
-    foreach ($b in @($checkAllButton, $uncheckAllButton, $updateSelectedButton, $updateAllButton)) {
-      if ($b) { $b.Top = $btnY; $b.Height = $btnH }
+    $btnX = 14
+    $btnSpacing = 6
+    $row = @($checkAllButton, $uncheckAllButton, $updateSelectedButton, $updateAllButton)
+    foreach ($b in $row) {
+      if (-not $b) { continue }
+      $b.Top = $btnY
+      $b.Height = $btnH
+      $needed = 120
+      try {
+        $t = [string]$b.Text
+        if ($t) { $needed = [Math]::Max(110, [System.Windows.Forms.TextRenderer]::MeasureText($t, $b.Font).Width + 26) }
+      } catch { }
+      $b.Left = $btnX
+      $b.Width = $needed
+      $btnX += $needed + $btnSpacing
+    }
+    # Ueberhang nach rechts abfangen: lieber alle vier gleichmaessig schmaler als einen aus der Karte.
+    $rowRight = $btnX - $btnSpacing
+    $rowRoom = $cardUpdates.ClientSize.Width - 28
+    if ($rowRight -gt $rowRoom -and $rowRight -gt 0) {
+      $factor = $rowRoom / $rowRight
+      $btnX = 14
+      foreach ($b in $row) {
+        if (-not $b) { continue }
+        $b.Left = $btnX
+        $b.Width = [Math]::Max(70, [int]($b.Width * $factor))
+        $btnX += $b.Width + $btnSpacing
+      }
     }
     $cardSuperseded.Top    = $cardUpdates.Bottom + $gap
     $cardSuperseded.Height = $script:supersededCardHeight
+    # Liste und Knopfreihe der Abgeloeste-Karte an die Kartenbreite bringen.
+    if ($supersededListBox) {
+      $supW = [Math]::Max(698, $cardSuperseded.ClientSize.Width - 28)
+      $supH = [Math]::Max(51, $script:supersededCardHeight - 72 - 30 - 10 - 16)
+      $supersededListBox.Size = New-Object System.Drawing.Size($supW, $supH)
+      if ($supersededEmptyLabel) { $supersededEmptyLabel.Size = $supersededListBox.Size }
+      $supRowY = 72 + $supH + 10
+      $supX = 14
+      foreach ($b in @($supersededCheckAllButton, $supersededUncheckAllButton, $deleteSelectedAppButton, $removeOldAppsButton)) {
+        if (-not $b) { continue }
+        $w = 120
+        try {
+          $t = [string]$b.Text
+          if ($t) { $w = [Math]::Max(110, [System.Windows.Forms.TextRenderer]::MeasureText($t, $b.Font).Width + 26) }
+        } catch { }
+        $b.Top = $supRowY; $b.Height = 30; $b.Left = $supX; $b.Width = $w
+        $supX += $w + 6
+      }
+    }
+    if ($cardVersionCleanup) {
+      # Der Hinweis stand auf festen 430 px Umbruchbreite und brach auf einem breiten Bildschirm
+      # nach einem Drittel der Karte um, waehrend rechts daneben nichts stand.
+      if ($versionCleanupHintLabel) {
+        $hintW = [Math]::Max(400, $cardVersionCleanup.ClientSize.Width - 300)
+        $versionCleanupHintLabel.MaximumSize = New-Object System.Drawing.Size($hintW, 0)
+        $script:versionCleanupCardHeight = [Math]::Max(96, $versionCleanupHintLabel.Bottom + 14)
+      }
+      $cardVersionCleanup.Top    = $cardSuperseded.Bottom + $gap
+      $cardVersionCleanup.Height = $script:versionCleanupCardHeight
+    }
   } catch { Write-LogDebug ("Updates layout: {0}" -f $_.Exception.Message) }
 }
 
-$cardSuperseded = New-Card -X 16 -Y 318 -W 726 -H 120
+$cardSuperseded = New-Card -X 16 -Y 318 -W 726 -H 220
 $tabUpdate.Controls.Add($cardSuperseded)
 
 $supersededHeaderLabel = New-Object System.Windows.Forms.Label
@@ -201,46 +332,136 @@ $supersededSearchButton.Width = 250
 $supersededSearchButton.Enabled = $false
 $cardSuperseded.Controls.Add($supersededSearchButton)
 
-$supersededDropdown = New-Object System.Windows.Forms.ComboBox
-$supersededDropdown.Location = New-Object System.Drawing.Point(272,38)
-$supersededDropdown.Width = 440
-$supersededDropdown.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
-$cardSuperseded.Controls.Add($supersededDropdown)
+# Auswahlliste statt Auswahlfeld: in einer ComboBox war genau eine App sichtbar, die Anzahl gar
+# nicht, und mehrere gezielt zu loeschen war unmoeglich - waehrend daneben "Alle abgeloesten Apps
+# loeschen" stand. Man konnte also EINE oder ALLE loeschen und nichts dazwischen. Die Update-Karte
+# darueber macht es in derselben Sektion mit Checkboxen vor; jetzt tun es beide gleich.
+$supersededListBox = New-Object System.Windows.Forms.CheckedListBox
+$supersededListBox.Location = New-Object System.Drawing.Point(14,72)
+$supersededListBox.Size = New-Object System.Drawing.Size(698, 96)
+$supersededListBox.CheckOnClick = $true
+$supersededListBox.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+$cardSuperseded.Controls.Add($supersededListBox)
+
+# Leerzustand als Beschriftung UEBER der Liste, nach demselben Muster wie in der Update-Karte:
+# entweder Liste oder Hinweis, niemals beides - ein natives Listenfeld malt sonst darueber.
+$supersededEmptyLabel = New-Object System.Windows.Forms.Label
+$supersededEmptyLabel.Tag = 'list-overlay'
+Set-ListEmptyText -Label $supersededEmptyLabel -NormalKey 'SupersededEmptyHint'
+$supersededEmptyLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+$supersededEmptyLabel.Location = $supersededListBox.Location
+$supersededEmptyLabel.Size = $supersededListBox.Size
+$cardSuperseded.Controls.Add($supersededEmptyLabel)
+$supersededListBox.Visible = $false
+$supersededEmptyLabel.Visible = $true
+$supersededEmptyLabel.BringToFront()
+
+$supersededCheckAllButton = New-Object System.Windows.Forms.Button
+$supersededCheckAllButton.Tag = 'btn-secondary'
+$supersededCheckAllButton.Text = Get-UiString 'CheckAllButton'
+$supersededCheckAllButton.Location = New-Object System.Drawing.Point(14,178)
+$supersededCheckAllButton.Height = 30
+$supersededCheckAllButton.Enabled = $false
+$cardSuperseded.Controls.Add($supersededCheckAllButton)
+
+$supersededUncheckAllButton = New-Object System.Windows.Forms.Button
+$supersededUncheckAllButton.Tag = 'btn-secondary'
+$supersededUncheckAllButton.Text = Get-UiString 'UncheckAllButton'
+$supersededUncheckAllButton.Location = New-Object System.Drawing.Point(150,178)
+$supersededUncheckAllButton.Height = 30
+$supersededUncheckAllButton.Enabled = $false
+$cardSuperseded.Controls.Add($supersededUncheckAllButton)
+
+$supersededCheckAllButton.Add_Click({
+  for ($i = 0; $i -lt $supersededListBox.Items.Count; $i++) { $supersededListBox.SetItemChecked($i, $true) }
+})
+$supersededUncheckAllButton.Add_Click({
+  for ($i = 0; $i -lt $supersededListBox.Items.Count; $i++) { $supersededListBox.SetItemChecked($i, $false) }
+})
 
 $deleteSelectedAppButton = New-Object System.Windows.Forms.Button
 $deleteSelectedAppButton.Text = Get-UiString 'DeleteSelectedAppButton'
-$deleteSelectedAppButton.Location = New-Object System.Drawing.Point(14,76)
-$deleteSelectedAppButton.Width = 250
+$deleteSelectedAppButton.Location = New-Object System.Drawing.Point(286,178)
+$deleteSelectedAppButton.Height = 30
 $deleteSelectedAppButton.Enabled = $false
 $cardSuperseded.Controls.Add($deleteSelectedAppButton)
 
 $removeOldAppsButton = New-Object System.Windows.Forms.Button
+$removeOldAppsButton.Tag = 'btn-secondary'
 $removeOldAppsButton.Text = Get-UiString 'RemoveOldAppsButton'
-$removeOldAppsButton.Location = New-Object System.Drawing.Point(272,76)
+$removeOldAppsButton.Location = New-Object System.Drawing.Point(430,178)
 $script:keepVersionCount = if ([int]$script:settings.KeepVersionCount -ge 1) { [int]$script:settings.KeepVersionCount } else { 2 }
-$removeOldAppsButton.Width = 230
+$removeOldAppsButton.Height = 30
 $removeOldAppsButton.Enabled = $false
 $cardSuperseded.Controls.Add($removeOldAppsButton)
+
+# Zustand der Liste: Hinweis ODER Liste, und die vier Knoepfe nur dann bedienbar, wenn es etwas
+# zu bedienen gibt. Der Suchknopf bleibt immer aktiv - er ist der Weg zu einem Ergebnis.
+function Update-SupersededListState {
+  try {
+    $count = $supersededListBox.Items.Count
+    Set-ListEmptyText -Label $supersededEmptyLabel -NormalKey 'SupersededEmptyHint'
+    $supersededListBox.Visible = ($count -gt 0)
+    $supersededEmptyLabel.Visible = ($count -eq 0)
+    if ($count -eq 0) { $supersededEmptyLabel.BringToFront() }
+    foreach ($b in @($supersededCheckAllButton, $supersededUncheckAllButton, $deleteSelectedAppButton)) {
+      if ($b) { $b.Enabled = ($count -gt 0) }
+    }
+    # Die Karte richtet sich nach der ZEILENZAHL - also muss sie neu vermessen werden, sobald die
+    # Liste gefuellt ist. Ohne diesen Aufruf behielt sie die Hoehe des Leerzustands (drei Zeilen),
+    # und von sechs gefundenen Apps waren zwei zu sehen.
+    if (Get-Command Update-UpdatesLayout -ErrorAction SilentlyContinue) {
+      try { Update-UpdatesLayout } catch { Write-LogDebug 'superseded layout after fill' }
+    }
+  } catch { Write-LogDebug 'superseded list state' }
+}
+
+# --- Card 3: version history of ALL managed apps ---
+#
+# Eigene Karte, weil die REICHWEITE eine andere ist. Der Knopf stand in der Karte "Abgelöste (alte)
+# App-Versionen", direkt neben einer Liste abgelöster Apps - und wirkte auf jede verwaltete App im
+# Tenant. Sein Tooltip musste die Karte um ihn herum richtigstellen ("Wirkt auf ALLE verwalteten
+# Apps, nicht nur auf die hier gelisteten abgelösten"). Ein Tooltip, der seine Umgebung korrigieren
+# muss, ist der Beweis, dass die Umgebung falsch ist - erst recht bei einem Knopf, der löscht.
+$cardVersionCleanup = New-Card -X 16 -Y 450 -W 726 -H 96
+$tabUpdate.Controls.Add($cardVersionCleanup)
+
+$versionCleanupHeaderLabel = New-Object System.Windows.Forms.Label
+$versionCleanupHeaderLabel.Text = Get-UiString 'UpdatesCardVersionCleanup'
+$versionCleanupHeaderLabel.Location = New-Object System.Drawing.Point(14,10)
+$versionCleanupHeaderLabel.AutoSize = $true
+$versionCleanupHeaderLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$cardVersionCleanup.Controls.Add($versionCleanupHeaderLabel)
+[void](Add-SectionInfoBadge -Parent $cardVersionCleanup -AfterLabel $versionCleanupHeaderLabel -TextKey 'InfoCardVersionCleanup')
 
 # "Keep only N versions": trims each app's version history down to the newest N (default 2), i.e.
 # the current one plus its predecessor. Apps that only have one version are never touched.
 $versionCleanupButton = New-Object System.Windows.Forms.Button
 $versionCleanupButton.Tag = 'btn-secondary'
 $versionCleanupButton.Text = (Get-UiString 'VersionCleanupButton') -f $script:keepVersionCount
-$versionCleanupButton.Location = New-Object System.Drawing.Point(512,76)
-$versionCleanupButton.Width = 200
-$cardSuperseded.Controls.Add($versionCleanupButton)
+$versionCleanupButton.Location = New-Object System.Drawing.Point(14,38)
+$versionCleanupButton.Width = 250
+$versionCleanupButton.Height = 30
+$cardVersionCleanup.Controls.Add($versionCleanupButton)
 $versionCleanupButton.Add_Click({
   if (-not (Test-Connected)) { return }
   if (Test-UiBusy) { return }
   Invoke-VersionCleanup -KeepCount $script:keepVersionCount
 })
 
+$versionCleanupHintLabel = New-Object System.Windows.Forms.Label
+$versionCleanupHintLabel.Tag = 'hint'
+$versionCleanupHintLabel.Text = Get-UiString 'HintVersionCleanupCard'
+$versionCleanupHintLabel.AutoSize = $true
+$versionCleanupHintLabel.MaximumSize = New-Object System.Drawing.Size(430, 0)
+$versionCleanupHintLabel.Location = New-Object System.Drawing.Point(280, 34)
+$cardVersionCleanup.Controls.Add($versionCleanupHintLabel)
+
 # ==================================================
 # Section: Discovered Apps
 # ==================================================
 $tabDiscovered = New-Object System.Windows.Forms.Panel
-Add-Section -Key 'discovered' -Panel $tabDiscovered -Label (Get-UiString 'TabDiscovered')
+Add-Section -Key 'discovered' -Panel $tabDiscovered -Label (Get-UiString 'TabDiscovered') -Group 'manage'
 
 # Section title
 $discoveredHeaderLabel = New-Object System.Windows.Forms.Label
@@ -312,15 +533,14 @@ $discoveredAssignFavButton = New-Object System.Windows.Forms.Button
 $discoveredAssignFavButton.Tag = 'btn-secondary'
 $discoveredAssignFavButton.Text = Get-UiString 'FavAddButton'
 $discoveredAssignFavButton.Location = New-Object System.Drawing.Point(566, 70)
-$discoveredAssignFavButton.Size = New-Object System.Drawing.Size(32, 26)
-$discoveredAssignFavButton.Visible = $false
+$discoveredAssignFavButton.Size = New-Object System.Drawing.Size(96, 26)
+$discoveredAssignFavButton.Visible = $true
 $discoveredAssignFavButton.Add_Click({ Show-GroupFavoriteDialog -GroupIdBox $discoveredAssignGroupIdBox })
 $cardScan.Controls.Add($discoveredAssignFavButton)
 
 $discoveredAssignTargetCombo.Add_SelectedIndexChanged({
   $isCustom = ($discoveredAssignTargetCombo.SelectedItem -eq (Get-UiString 'AssignCustomGroup'))
   $discoveredAssignGroupIdBox.Visible = $isCustom
-  $discoveredAssignFavButton.Visible = $isCustom
 })
 Register-AssignTargetCombo -TargetCombo $discoveredAssignTargetCombo
 
@@ -382,9 +602,11 @@ $cardDetected.Controls.Add($discoveredPublisherLabel)
 $discoveredPublisherBox = New-Object System.Windows.Forms.ComboBox
 $discoveredPublisherBox.Top = 33
 $discoveredPublisherBox.Left = $discoveredPublisherLabel.Left + $discoveredPublisherLabel.PreferredWidth + $gap
-$discoveredPublisherBox.Width = 140
+# 176 statt 140: "<Alle Herausgeber>" ist laenger als "<All Publishers>" und wurde abgeschnitten -
+# dieselbe Klasse Fehler wie bei den Knoepfen (F17), nur in einem Auswahlfeld.
+$discoveredPublisherBox.Width = 176
 $discoveredPublisherBox.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
-[void]$discoveredPublisherBox.Items.Add("<All Publishers>")
+[void]$discoveredPublisherBox.Items.Add((Get-UiString 'DiscoveredPublisherAll'))
 $discoveredPublisherBox.SelectedIndex = 0
 $cardDetected.Controls.Add($discoveredPublisherBox)
 
@@ -400,8 +622,8 @@ $discoveredSortBox.Top = 33
 $discoveredSortBox.Left = $discoveredSortLabel.Left + $discoveredSortLabel.PreferredWidth + $gap
 $discoveredSortBox.Width = 120
 $discoveredSortBox.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
-[void]$discoveredSortBox.Items.Add("Device Count")
-[void]$discoveredSortBox.Items.Add("Alphabetical")
+[void]$discoveredSortBox.Items.Add((Get-UiString 'DiscoveredSortByDevices'))
+[void]$discoveredSortBox.Items.Add((Get-UiString 'DiscoveredSortAlphabetical'))
 $discoveredSortBox.SelectedIndex = 0
 $cardDetected.Controls.Add($discoveredSortBox)
 
@@ -409,14 +631,16 @@ $checkAllDiscoveredButton = New-Object System.Windows.Forms.Button
 $checkAllDiscoveredButton.Tag = 'btn-secondary'
 $checkAllDiscoveredButton.Text = Get-UiString 'CheckAllDiscoveredButton'
 $checkAllDiscoveredButton.Location = New-Object System.Drawing.Point(14,66)
-$checkAllDiscoveredButton.Width = 110
+# 124 statt 110: "Alle auswaehlen" samt Haken braucht 111 px plus Innenabstand - es fehlte genau
+# ein Pixel, und das letzte Zeichen wurde abgeschnitten.
+$checkAllDiscoveredButton.Width = 124
 $checkAllDiscoveredButton.Enabled = $false
 $cardDetected.Controls.Add($checkAllDiscoveredButton)
 
 $uncheckAllDiscoveredButton = New-Object System.Windows.Forms.Button
 $uncheckAllDiscoveredButton.Tag = 'btn-secondary'
 $uncheckAllDiscoveredButton.Text = Get-UiString 'UncheckAllDiscoveredButton'
-$uncheckAllDiscoveredButton.Location = New-Object System.Drawing.Point(132,66)
+$uncheckAllDiscoveredButton.Location = New-Object System.Drawing.Point(146,66)
 $uncheckAllDiscoveredButton.Width = 120
 $uncheckAllDiscoveredButton.Enabled = $false
 $cardDetected.Controls.Add($uncheckAllDiscoveredButton)
@@ -459,7 +683,7 @@ function New-DiscoveredRow {
 # (never both), so the centred hint always renders cleanly.
 $discoveredEmptyLabel = New-Object System.Windows.Forms.Label
 $discoveredEmptyLabel.Tag = 'list-overlay'
-$discoveredEmptyLabel.Text = Get-UiString 'DiscoveredEmptyHint'
+Set-ListEmptyText -Label $discoveredEmptyLabel -NormalKey 'DiscoveredEmptyHint'
 $discoveredEmptyLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
 $discoveredEmptyLabel.Location = $discoveredListBox.Location
 $discoveredEmptyLabel.Size = $discoveredListBox.Size
@@ -472,12 +696,120 @@ $discoveredEmptyLabel.Visible = $true
 $script:discoveredRaw = @()
 
 # ==================================================
+# Section: Delivery settings (bulk editor)
+# ==================================================
+#
+# Derselbe Editor, der frueher nur als Modaldialog hinter "Extras" lag. Fuer ein Feature, mit dem
+# man Benachrichtigungen, Verfuegbarkeit, Fristen, Neustartverhalten und Zustellprioritaet fuer
+# beliebig viele Apps auf einmal setzt, war das zu wenig Platz und zu tief versteckt.
+#
+# Der Inhalt wird von Show-AppSettingsDialog gebaut - dieselbe Funktion, dasselbe Verhalten, nur
+# mit einem Panel statt einem Fenster als Elternobjekt. Der Dialogweg bleibt: der Einzelfall-Knopf
+# in "Alle Tenant-Apps" ruft ihn weiterhin ohne -HostPanel auf.
+$tabAppSettings = New-Object System.Windows.Forms.Panel
+$tabAppSettings.AutoScroll = $true
+Add-Section -Key 'appsettings' -Panel $tabAppSettings -Label (Get-UiString 'TabAppSettings') -Group 'manage'
+
+$appSettingsHeaderLabel = New-Object System.Windows.Forms.Label
+$appSettingsHeaderLabel.Text = Get-UiString 'AppSettingsTitle'
+$appSettingsHeaderLabel.Location = New-Object System.Drawing.Point(16, 12)
+$appSettingsHeaderLabel.AutoSize = $true
+$appSettingsHeaderLabel.Font = New-Object System.Drawing.Font("Segoe UI", 13, [System.Drawing.FontStyle]::Bold)
+$tabAppSettings.Controls.Add($appSettingsHeaderLabel)
+[void](Add-SectionInfoBadge -Parent $tabAppSettings -AfterLabel $appSettingsHeaderLabel -TextKey 'InfoAppSettings')
+
+# Eigenes Panel statt direkt in die Sektion: der Editor setzt seine Steuerelemente ab y=10, das
+# wuerde sonst unter dem Titel liegen. Die Groesse ist die des frueheren Dialogs - die Anker darin
+# beziehen sich darauf, und Update-AppSettingsLayout zieht sie auf die Sektionsbreite.
+$appSettingsHost = New-Object System.Windows.Forms.Panel
+$appSettingsHost.Location = New-Object System.Drawing.Point(16, 48)
+$appSettingsHost.Size = New-Object System.Drawing.Size(726, 790)
+$tabAppSettings.Controls.Add($appSettingsHost)
+Show-AppSettingsDialog -HostPanel $appSettingsHost
+
+# ==================================================
+# Section: Leistungsnachweis
+# ==================================================
+#
+# War ein Menueeintrag unter "Extras". Eine Auswertung, die man liest, umschaltet und in ein Ticket
+# kopiert, gehoert an einen sichtbaren Ort - und sie ist eine Sache DIESES Rechners: gespeist wird
+# sie aus der lokalen Aufzeichnung (%LOCALAPPDATA%\WinTunerGUI\activity-history.json), nicht aus
+# Intune. Deshalb steht sie in der Gruppe "Dieser Rechner".
+$tabWorkRecord = New-Object System.Windows.Forms.Panel
+$tabWorkRecord.AutoScroll = $true
+Add-Section -Key 'workrecord' -Panel $tabWorkRecord -Label (Get-UiString 'NavWorkRecord') -Group 'local'
+
+$workRecordHeaderLabel = New-Object System.Windows.Forms.Label
+$workRecordHeaderLabel.Text = Get-UiString 'LeistungDialogTitle'
+$workRecordHeaderLabel.Location = New-Object System.Drawing.Point(16, 12)
+$workRecordHeaderLabel.AutoSize = $true
+$workRecordHeaderLabel.Font = New-Object System.Drawing.Font("Segoe UI", 13, [System.Drawing.FontStyle]::Bold)
+$tabWorkRecord.Controls.Add($workRecordHeaderLabel)
+[void](Add-SectionInfoBadge -Parent $tabWorkRecord -AfterLabel $workRecordHeaderLabel -TextKey 'InfoWorkRecord')
+
+$workRecordHost = New-Object System.Windows.Forms.Panel
+$workRecordHost.Location = New-Object System.Drawing.Point(16, 48)
+$workRecordHost.Size = New-Object System.Drawing.Size(726, 480)
+$tabWorkRecord.Controls.Add($workRecordHost)
+Show-LeistungstextDialog -HostPanel $workRecordHost
+
+function Update-WorkRecordSectionLayout {
+  try {
+    if (-not $tabWorkRecord -or -not $workRecordHost) { return }
+    $w = [Math]::Max(560, $tabWorkRecord.ClientSize.Width - 32)
+    $h = [Math]::Max(300, $tabWorkRecord.ClientSize.Height - 54)
+    $workRecordHost.Size = New-Object System.Drawing.Size($w, $h)
+    if ((Get-Command Update-WorkRecordLayout -ErrorAction SilentlyContinue) -and
+        $script:workRecordUi -and $script:workRecordUi.Embedded) {
+      Update-WorkRecordLayout
+    }
+  } catch { Write-LogDebug 'work record section layout' }
+}
+
+function Update-AppSettingsLayout {
+  try {
+    if (-not $tabAppSettings -or -not $appSettingsHost) { return }
+    $w = [Math]::Max(726, $tabAppSettings.ClientSize.Width - 32)
+    # Die feste Mindesthoehe von 790 px war der Grund fuer die Bildlaufleiste: der Editor bekam
+    # immer seine Dialoghoehe, auch wenn der Bereich nur 625 px hoch war - und der Knopf "Auf
+    # markierte Apps anwenden" lag damit unter der Kante. Jetzt bekommt er genau den Platz, den es
+    # gibt, und ordnet seinen Inhalt darin an (siehe Update-AppSettingsEditorLayout).
+    $h = [Math]::Max(420, $tabAppSettings.ClientSize.Height - 54)
+    $appSettingsHost.Size = New-Object System.Drawing.Size($w, $h)
+    if ((Get-Command Update-AppSettingsEditorLayout -ErrorAction SilentlyContinue) -and
+        $script:appSettingsUi -and $script:appSettingsUi.Embedded) {
+      Update-AppSettingsEditorLayout
+    }
+  } catch { Write-LogDebug 'app settings layout' }
+}
+
+# ==================================================
 # Section: Settings
 # ==================================================
+#
+# One card per QUESTION the technician actually has, in the order those questions come up:
+#   1 Packaging      - where does this machine build packages, and how do I clean that up
+#   2 Update search  - does the tool look for updates on its own (and it only ever LOOKS)
+#   3 After an update- what happens to the old version in Intune; the only deleting options
+#   4 Prompts        - does a change still ask before it reaches the tenant
+#   5 Tool updates   - self-update of this script, nothing to do with Intune apps
+#   6 Files          - log and settings paths, and the sanitized export for a ticket
+#
+# Grouping matters more than it looks: the previous page had "check for updates on login" sitting
+# directly above two options that DELETE apps in Intune, in one card called "General", with no
+# explanation on any of them. Three switches that only differ in what they destroy read as
+# interchangeable when they are stacked like that. Every option now carries a line stating what it
+# does, whether it only reads, and what it costs - see Add-SettingRow in 65-Theme.
+#
+# Two switches that used to hide in the Tools menu (keep assignments before deleting, dashboard
+# full scan) and one that hid there behind a risk dialog (skip confirmations) live here now: they
+# are settings, they are persisted like settings, and having them in a menu meant they were saved
+# on click while everything on this page waited for "Save settings" - the same kind of setting
+# behaving in two different ways depending on where it was found.
 $tabSettings = New-Object System.Windows.Forms.Panel
-# Three stacked cards (General / App updates / Files) exceed the panel on small windows -> scroll.
+# Six stacked cards exceed the panel on any normal window -> scroll.
 $tabSettings.AutoScroll = $true
-Add-Section -Key 'settings' -Panel $tabSettings -Label (Get-UiString 'TabSettings')
+Add-Section -Key 'settings' -Panel $tabSettings -Label (Get-UiString 'TabSettings') -Group 'local'
 
 # Section title
 $settingsHeaderLabel = New-Object System.Windows.Forms.Label
@@ -488,77 +820,195 @@ $settingsHeaderLabel.Font = New-Object System.Drawing.Font("Segoe UI", 13, [Syst
 $tabSettings.Controls.Add($settingsHeaderLabel)
 [void](Add-SectionInfoBadge -Parent $tabSettings -AfterLabel $settingsHeaderLabel -TextKey 'InfoSettings')
 
-# --- Card 1: General ---
-$cardGeneral = New-Card -X 16 -Y 48 -W 726 -H 296
-$tabSettings.Controls.Add($cardGeneral)
+# Cards are re-stacked by Update-SettingsLayout in this order, so a card that grows (longer
+# explanations in German, a bigger retro-theme font) pushes the ones below it down instead of
+# overlapping them. The old page positioned every card at a fixed Y and did overlap.
+$script:settingsCards = New-Object 'System.Collections.Generic.List[object]'
+$script:settingsCardWidth = 726
 
-$generalStepLabel = New-Object System.Windows.Forms.Label
-$generalStepLabel.Text = Get-UiString 'SettingsCardGeneral'
-$generalStepLabel.Location = New-Object System.Drawing.Point(14,8)
-$generalStepLabel.AutoSize = $true
-$generalStepLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-$cardGeneral.Controls.Add($generalStepLabel)
-[void](Add-SectionInfoBadge -Parent $cardGeneral -AfterLabel $generalStepLabel -TextKey 'InfoCardGeneral')
+# Adds a card with its bold title and info badge, and registers it for the stacking pass.
+function New-SettingsCard {
+  param([Parameter(Mandatory)][string]$TitleKey, [Parameter(Mandatory)][string]$InfoKey)
+  $card = New-Card -X 16 -Y 48 -W $script:settingsCardWidth -H 120
+  $tabSettings.Controls.Add($card)
+  $title = New-Object System.Windows.Forms.Label
+  $title.Text = Get-UiString $TitleKey
+  $title.Location = New-Object System.Drawing.Point(14,8)
+  $title.AutoSize = $true
+  $title.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+  $card.Controls.Add($title)
+  [void](Add-SectionInfoBadge -Parent $card -AfterLabel $title -TextKey $InfoKey)
+  $script:settingsCards.Add($card)
+  return $card
+}
 
-# Default Package Path
+# Settings-tab action buttons share one width so the stacked column lines up (wide enough
+# for the longest German label, "Einstellungen speichern").
+$script:settingsButtonWidth = 200
+
+# --- Card 1: packaging on this computer ----------------------------------------------------------
+$cardPackaging = New-SettingsCard -TitleKey 'SettingsCardPackaging' -InfoKey 'InfoCardPackaging'
+
+# Label + field + browse button on one line, hosted in a panel so the whole row can be stacked as
+# a unit like every other option.
+$pathRow = New-Object System.Windows.Forms.Panel
+$pathRow.Tag = 'row-host'
+$pathRow.Size = New-Object System.Drawing.Size(698, 32)
+
 $defaultPathLabel = New-Object System.Windows.Forms.Label
 $defaultPathLabel.Text = Get-UiString 'DefaultPathLabel'
-$defaultPathLabel.Location = New-Object System.Drawing.Point(14,42)
+$defaultPathLabel.Location = New-Object System.Drawing.Point(0,7)
 $defaultPathLabel.AutoSize = $true
-$cardGeneral.Controls.Add($defaultPathLabel)
+$pathRow.Controls.Add($defaultPathLabel)
 
 # Wrapped in a rounded input host (like the deploy path field) instead of a bare FixedSingle box:
 # a plain TextBox has almost no left text padding, so the first character (the drive letter "C")
 # looked clipped against the border. The host gives it the consistent rounded look + 10px padding.
 $defaultPathTextBox = New-Object System.Windows.Forms.TextBox
-$defaultPathTextBox.Text = if ($script:settings.DefaultPackagePath) { $script:settings.DefaultPackagePath } else { "C:\Temp" }
-$defaultPathHost = New-RoundedInput -Inner $defaultPathTextBox -X 180 -Y 36 -W 386 -H 30
-$cardGeneral.Controls.Add($defaultPathHost)
+# Fall back to the safe per-user default, NOT "C:\Temp": that folder grants Modify to Authenticated
+# Users, so another signed-in user could tamper with a finished .intunewin between build and upload.
+# Get-DefaultPackagePath is the single source for that safe location (also used in 80-Views/83-OwnPackage).
+$defaultPathTextBox.Text = if ($script:settings.DefaultPackagePath) { $script:settings.DefaultPackagePath } else { Get-DefaultPackagePath }
+$defaultPathHost = New-RoundedInput -Inner $defaultPathTextBox -X 166 -Y 1 -W 386 -H 30
+$pathRow.Controls.Add($defaultPathHost)
 
 $browsePathButton = New-Object System.Windows.Forms.Button
 $browsePathButton.Tag = 'btn-secondary'
 $browsePathButton.Text = Get-UiString 'BrowsePathButton'
-$browsePathButton.Location = New-Object System.Drawing.Point(578,36)
+$browsePathButton.Location = New-Object System.Drawing.Point(564,1)
 $browsePathButton.Width = 134
 $browsePathButton.Height = 30
-$cardGeneral.Controls.Add($browsePathButton)
+$pathRow.Controls.Add($browsePathButton)
 
-# Auto-Check Updates on Login
-$autoCheckUpdatesCheckbox = New-Object System.Windows.Forms.CheckBox
-$autoCheckUpdatesCheckbox.Text = Get-UiString 'AutoCheckUpdatesCheckbox'
-$autoCheckUpdatesCheckbox.Location = New-Object System.Drawing.Point(14,78)
-$autoCheckUpdatesCheckbox.AutoSize = $true
-$autoCheckUpdatesCheckbox.Checked = [bool]$script:settings.AutoCheckUpdates
+[void](Add-SettingRow -Card $cardPackaging -Control $pathRow -Hint (Get-UiString 'HintPackagePath'))
+
+# Local disk housekeeping. Both act on this machine only - neither touches the tenant, which is
+# what separates them from every other button on this page.
+$packagingButtonRow = New-Object System.Windows.Forms.Panel
+$packagingButtonRow.Tag = 'row-host'
+$packagingButtonRow.Size = New-Object System.Drawing.Size(698, 34)
+
+$prunePackagesButton = New-Object System.Windows.Forms.Button
+$prunePackagesButton.Tag = 'btn-secondary'
+$prunePackagesButton.Text = Get-UiString 'PrunePackagesButton'
+$prunePackagesButton.Location = New-Object System.Drawing.Point(0,0)
+$prunePackagesButton.Width = $script:settingsButtonWidth
+$prunePackagesButton.Height = 34
+$packagingButtonRow.Controls.Add($prunePackagesButton)
+
+$clearCacheButton = New-Object System.Windows.Forms.Button
+$clearCacheButton.Tag = 'btn-secondary'
+$clearCacheButton.Text = Get-UiString 'ClearCacheButton'
+$clearCacheButton.Location = New-Object System.Drawing.Point(210,0)
+$clearCacheButton.Width = $script:settingsButtonWidth
+$clearCacheButton.Height = 34
+$packagingButtonRow.Controls.Add($clearCacheButton)
+
+[void](Add-SettingRow -Card $cardPackaging -Control $packagingButtonRow -SpaceBefore 4)
+
+# Umgezogen aus dem Bereich "Lokale Pakete": eine Startup-Entscheidung gehoert zu den anderen. Sie
+# folgt jetzt auch derselben Regel wie der Rest dieser Seite - sie gilt nach "Einstellungen
+# speichern", nicht schon beim Anhaken.
+$favoriteAutoCheckbox = New-Object System.Windows.Forms.CheckBox
+$favoriteAutoCheckbox.Text = Get-UiString 'FavoriteAutoCheckbox'
+$favoriteAutoCheckbox.AutoSize = $true
+$favoriteAutoCheckbox.Checked = [bool]$script:settings.AutoUpdateFavoritesOnStartup
+[void](Add-SettingRow -Card $cardPackaging -Control $favoriteAutoCheckbox -Hint (Get-UiString 'HintFavoriteAuto') -SpaceBefore 6)
+
+# --- Card 2: searching for app updates -----------------------------------------------------------
+$cardUpdateSearch = New-SettingsCard -TitleKey 'SettingsCardUpdateSearch' -InfoKey 'InfoCardUpdateSearch'
+
+# The answer to "does this thing update apps on its own?", stated before the two options rather
+# than left to be inferred from them.
+$noAutoUpdateLabel = New-Object System.Windows.Forms.Label
+$noAutoUpdateLabel.Tag = 'hint'
+$noAutoUpdateLabel.Text = Get-UiString 'SettingsNoAutoUpdateHint'
+$noAutoUpdateLabel.AutoSize = $true
+$noAutoUpdateLabel.MaximumSize = New-Object System.Drawing.Size(680, 0)
+[void](Add-SettingRow -Card $cardUpdateSearch -Control $noAutoUpdateLabel)
+
 # NOTE: this setting runs the INTUNE app update search right after login (see the login handler)
-# – it has nothing to do with the GitHub self-update of the GUI itself. It was previously gated
+# - it has nothing to do with the GitHub self-update of the GUI itself. It was previously gated
 # on $script:githubRepo, which forced the box permanently off/inert whenever no self-update repo
 # was configured. That gate is gone; the option works standalone and is off by default, because in
 # large tenants the login-time scan walks every app and can take a long time.
-$cardGeneral.Controls.Add($autoCheckUpdatesCheckbox)
+$autoCheckUpdatesCheckbox = New-Object System.Windows.Forms.CheckBox
+$autoCheckUpdatesCheckbox.Text = Get-UiString 'AutoCheckUpdatesCheckbox'
+$autoCheckUpdatesCheckbox.AutoSize = $true
+$autoCheckUpdatesCheckbox.Checked = [bool]$script:settings.AutoCheckUpdates
+[void](Add-SettingRow -Card $cardUpdateSearch -Control $autoCheckUpdatesCheckbox -Hint (Get-UiString 'HintAutoCheckUpdates') -SpaceBefore 6)
 
-# Ablöse: auto-remove the old (now superseded) app right after a successful update
-$autoRemoveSupersededCheckbox = New-Object System.Windows.Forms.CheckBox
-$autoRemoveSupersededCheckbox.Text = Get-UiString 'AutoRemoveSupersededCheckbox'
-$autoRemoveSupersededCheckbox.Location = New-Object System.Drawing.Point(14,106)
-$autoRemoveSupersededCheckbox.AutoSize = $true
-$autoRemoveSupersededCheckbox.Checked = [bool]$script:settings.AutoRemoveSuperseded
-$cardGeneral.Controls.Add($autoRemoveSupersededCheckbox)
+# Steht hier, weil es dieselbe Frage beantwortet wie die Zeile darueber: was passiert direkt nach
+# der Anmeldung, ohne dass jemand klickt.
+$elevatedLoginCheckbox = New-Object System.Windows.Forms.CheckBox
+$elevatedLoginCheckbox.Text = Get-UiString 'ElevatedLoginCheckbox'
+$elevatedLoginCheckbox.AutoSize = $true
+$elevatedLoginCheckbox.Checked = [bool]$script:settings.RequestOptionalScopesOnLogin
+[void](Add-SettingRow -Card $cardUpdateSearch -Control $elevatedLoginCheckbox -Hint (Get-UiString 'HintElevatedLogin') -SpaceBefore 6)
 
-# Automatic version trimming after an update run: keeps the newest N versions per app.
-$autoVersionCleanupCheckbox = New-Object System.Windows.Forms.CheckBox
-$autoVersionCleanupCheckbox.Text = (Get-UiString 'AutoVersionCleanupCheckbox') -f $script:keepVersionCount
-$autoVersionCleanupCheckbox.Location = New-Object System.Drawing.Point(14,130)
-$autoVersionCleanupCheckbox.AutoSize = $true
-$autoVersionCleanupCheckbox.Checked = [bool]$script:settings.AutoVersionCleanup
-$cardGeneral.Controls.Add($autoVersionCleanupCheckbox)
+# The dashboard tile can either trust Intune's flag (instant) or do the real comparison (one package
+# lookup per app). Off by default because the dashboard is the first thing shown after signing in.
+# Moved here out of the Tools menu: it decides how a NUMBER is counted, which is nobody's idea of a
+# tool, and it belongs next to the update search that pays the same cost.
+$dashboardFullScanCheckbox = New-Object System.Windows.Forms.CheckBox
+$dashboardFullScanCheckbox.Text = Get-UiString 'DashboardFullScanCheckbox'
+$dashboardFullScanCheckbox.AutoSize = $true
+$dashboardFullScanCheckbox.Checked = [bool]$script:settings.DashboardUpdatesFullScan
+[void](Add-SettingRow -Card $cardUpdateSearch -Control $dashboardFullScanCheckbox -Hint (Get-UiString 'HintDashboardFullScan'))
+
+# --- Card 3: what happens to the old version after an update -------------------------------------
+$cardAfterUpdate = New-SettingsCard -TitleKey 'SettingsCardAfterUpdate' -InfoKey 'InfoCardAfterUpdate'
 
 # Scope hand-over: only the newest version stays assigned after an update.
 $moveAssignmentsCheckbox = New-Object System.Windows.Forms.CheckBox
 $moveAssignmentsCheckbox.Text = Get-UiString 'MoveAssignmentsCheckbox'
-$moveAssignmentsCheckbox.Location = New-Object System.Drawing.Point(14,154)
 $moveAssignmentsCheckbox.AutoSize = $true
 $moveAssignmentsCheckbox.Checked = [bool]$script:settings.MoveAssignmentsOnUpdate
-$cardGeneral.Controls.Add($moveAssignmentsCheckbox)
+[void](Add-SettingRow -Card $cardAfterUpdate -Control $moveAssignmentsCheckbox -Hint (Get-UiString 'HintMoveAssignments'))
+
+# The either/or pair gets a heading of its own and an indent, so "at most one of these two" is
+# visible in the layout and not only in a sentence underneath them.
+$cleanupGroupLabel = New-Object System.Windows.Forms.Label
+$cleanupGroupLabel.Text = Get-UiString 'CleanupGroupLabel'
+$cleanupGroupLabel.AutoSize = $true
+$cleanupGroupLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+[void](Add-SettingRow -Card $cardAfterUpdate -Control $cleanupGroupLabel -SpaceBefore 10)
+
+# Das Sicherheitsnetz als eigene Aussage, nicht als Nebensatz in einem Optionshinweis.
+#
+# Es ist fest verdrahtet (Get-AppAssignmentProbe + Get-AppInstallationProbe) und war deshalb nie
+# eine Einstellung - genau darum hat es jemand hier gesucht und nicht gefunden. Eine Regel, die
+# immer gilt, gehoert ueber die Optionen, nicht in eine davon.
+# Fette Kopfzeile in normaler Textfarbe: als grauer Absatz zwischen grauen Absaetzen ging die
+# Aussage unter - genau die Rueckmeldung. Ein WinForms-Label kann nicht teilweise fett, also zwei
+# Beschriftungen: die Regel als Ueberschrift, die Begruendung als Hinweis darunter.
+$cleanupSafetyNetTitle = New-Object System.Windows.Forms.Label
+$cleanupSafetyNetTitle.Text = Get-UiString 'CleanupSafetyNetTitle'
+$cleanupSafetyNetTitle.AutoSize = $true
+$cleanupSafetyNetTitle.MaximumSize = New-Object System.Drawing.Size(680, 0)
+$cleanupSafetyNetTitle.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+[void](Add-SettingRow -Card $cardAfterUpdate -Control $cleanupSafetyNetTitle -Indent 32)
+
+$cleanupSafetyNetLabel = New-Object System.Windows.Forms.Label
+$cleanupSafetyNetLabel.Tag = 'hint'
+$cleanupSafetyNetLabel.Text = Get-UiString 'CleanupSafetyNetAlways'
+$cleanupSafetyNetLabel.AutoSize = $true
+$cleanupSafetyNetLabel.MaximumSize = New-Object System.Drawing.Size(680, 0)
+[void](Add-SettingRow -Card $cardAfterUpdate -Control $cleanupSafetyNetLabel -Indent 32)
+
+# Ablöse: auto-remove the old (now superseded) app right after a successful update
+$autoRemoveSupersededCheckbox = New-Object System.Windows.Forms.CheckBox
+$autoRemoveSupersededCheckbox.Text = Get-UiString 'AutoRemoveSupersededCheckbox'
+$autoRemoveSupersededCheckbox.AutoSize = $true
+$autoRemoveSupersededCheckbox.Checked = [bool]$script:settings.AutoRemoveSuperseded
+[void](Add-SettingRow -Card $cardAfterUpdate -Control $autoRemoveSupersededCheckbox -Hint (Get-UiString 'HintAutoRemoveSuperseded') -Indent 32)
+
+# Automatic version trimming after an update run: keeps the newest N versions per app.
+$autoVersionCleanupCheckbox = New-Object System.Windows.Forms.CheckBox
+$autoVersionCleanupCheckbox.Text = (Get-UiString 'AutoVersionCleanupCheckbox') -f $script:keepVersionCount
+$autoVersionCleanupCheckbox.AutoSize = $true
+$autoVersionCleanupCheckbox.Checked = [bool]$script:settings.AutoVersionCleanup
+[void](Add-SettingRow -Card $cardAfterUpdate -Control $autoVersionCleanupCheckbox -Hint (Get-UiString 'HintAutoVersionCleanup') -Indent 32)
 
 # Either/or, enforced here as well as in the settings model (Resolve-CleanupOptionConflict): ticking
 # one of the two cleanup options clears the other, so the state that silently deleted a predecessor
@@ -586,22 +1036,28 @@ $autoVersionCleanupCheckbox.Add_CheckedChanged({
   } finally { $script:cleanupOptionSyncing = $false }
 })
 
-# How many versions survive. The number appears in three places - this checkbox, the button in the
-# superseded card and that button's tooltip - so they are refreshed together from one helper rather
-# than each reading the setting whenever it happens to be rebuilt.
+# How many versions survive. The number appears in three places - the checkbox above, the button in
+# the superseded card and that button's tooltip - so they are refreshed together from one helper
+# rather than each reading the setting whenever it happens to be rebuilt.
+$keepVersionRow = New-Object System.Windows.Forms.Panel
+$keepVersionRow.Tag = 'row-host'
+$keepVersionRow.Size = New-Object System.Drawing.Size(660, 28)
+
 $keepVersionCountLabel = New-Object System.Windows.Forms.Label
 $keepVersionCountLabel.Text = Get-UiString 'KeepVersionCountLabel'
-$keepVersionCountLabel.Location = New-Object System.Drawing.Point(14, 182)
+$keepVersionCountLabel.Location = New-Object System.Drawing.Point(0,5)
 $keepVersionCountLabel.AutoSize = $true
-$cardGeneral.Controls.Add($keepVersionCountLabel)
+$keepVersionRow.Controls.Add($keepVersionCountLabel)
 
 $keepVersionCountInput = New-Object System.Windows.Forms.NumericUpDown
 $keepVersionCountInput.Minimum = 1     # keeping zero versions would mean deleting the current one
 $keepVersionCountInput.Maximum = 20
 $keepVersionCountInput.Value = $script:keepVersionCount
-$keepVersionCountInput.Location = New-Object System.Drawing.Point(250, 178)
+$keepVersionCountInput.Location = New-Object System.Drawing.Point(236,1)
 $keepVersionCountInput.Width = 60
-$cardGeneral.Controls.Add($keepVersionCountInput)
+$keepVersionRow.Controls.Add($keepVersionCountInput)
+
+[void](Add-SettingRow -Card $cardAfterUpdate -Control $keepVersionRow -Hint (Get-UiString 'HintKeepVersionCount') -Indent 32)
 
 function Update-KeepVersionCountUi {
   $count = $script:keepVersionCount
@@ -611,56 +1067,357 @@ function Update-KeepVersionCountUi {
   try { if ($toolTip) { $toolTip.SetToolTip($versionCleanupButton, ((Get-UiString 'TtVersionCleanupButton') -f $count)) } } catch { Write-LogDebug 'keep-count tooltip' }
 }
 
+# Deliberately does NOT change $script:keepVersionCount.
+#
+# That variable is what "Clean up versions" and the automatic post-batch cleanup delete by, and the
+# automatic one runs without asking. Spinning this box used to change how many versions survive in
+# the tenant immediately - before saving, and with the button next to it still showing the old
+# number. Turning the dial in a settings card must not silently widen a deletion.
+#
+# The labels stay on the saved value on purpose too: the cleanup button states what it will actually
+# do, and a preview number here would make it lie until the user happens to press Save.
 $keepVersionCountInput.Add_ValueChanged({
-  $script:keepVersionCount = [int]$keepVersionCountInput.Value
-  Update-KeepVersionCountUi
+  if ([int]$keepVersionCountInput.Value -ne [int]$script:keepVersionCount) {
+    try { Update-Status (Get-UiString 'KeepVersionCountUnsaved') } catch { Write-LogDebug 'keep-count unsaved hint' }
+  }
 })
 
-$cleanupExclusiveHint = New-Object System.Windows.Forms.Label
-$cleanupExclusiveHint.Tag = 'hint'
-$cleanupExclusiveHint.Text = Get-UiString 'CleanupExclusiveHint'
-$cleanupExclusiveHint.Location = New-Object System.Drawing.Point(14, 210)
-$cleanupExclusiveHint.Size = New-Object System.Drawing.Size(698, 34)   # two wrapped lines in both languages
-$cardGeneral.Controls.Add($cleanupExclusiveHint)
+# Safety net for a deletion that turns out to have been wrong. Moved out of the Tools menu for the
+# same reason as the two above - and it belongs in the card whose options do the deleting.
+$saveScopeCheckbox = New-Object System.Windows.Forms.CheckBox
+$saveScopeCheckbox.Text = Get-UiString 'SaveScopeCheckbox'
+$saveScopeCheckbox.AutoSize = $true
+$saveScopeCheckbox.Checked = [bool]$script:settings.SaveScopeBeforeRemoval
+[void](Add-SettingRow -Card $cardAfterUpdate -Control $saveScopeCheckbox -Hint (Get-UiString 'HintSaveScope') -SpaceBefore 10)
 
-# Theme selection lives in the top-menu "Theme" picker now (not here). $themeSelectorCombo is kept
-# as $null so later references (tooltips etc.) stay harmless.
-$themeSelectorCombo = $null
+# --- Card 4: confirmation prompts ----------------------------------------------------------------
+$cardSafety = New-SettingsCard -TitleKey 'SettingsCardSafety' -InfoKey 'InfoCardSafety'
 
-# Language selection lives in the top-menu "Language" picker now (next to "Theme"), like the theme
-# it is a display preference rather than a tenant/Intune setting. $languageSelectorCombo is kept as
-# $null so later references (tooltips etc.) stay harmless.
-$languageSelectorCombo = $null
+$suppressConfirmationsCheckbox = New-Object System.Windows.Forms.CheckBox
+$suppressConfirmationsCheckbox.Text = Get-UiString 'SuppressConfirmationsCheckbox'
+$suppressConfirmationsCheckbox.AutoSize = $true
+$suppressConfirmationsCheckbox.Checked = (Test-ChangeConfirmationsSuppressed)
+[void](Add-SettingRow -Card $cardSafety -Control $suppressConfirmationsCheckbox -Hint (Get-UiString 'HintSuppressConfirmations'))
 
-# Settings-tab action buttons share one width so the stacked column lines up (wide enough
-# for the longest German label, "Einstellungen speichern").
-$script:settingsButtonWidth = 200
+# Turning the prompts OFF has to be acknowledged; turning them back on never does - that direction
+# is always the safe one. The acknowledgement is asked at tick time rather than at save time,
+# because a risk notice that appears minutes later, attached to a "Save settings" click, is not a
+# notice anybody connects to the box they ticked.
+$script:suppressConfirmSyncing = $false
+$suppressConfirmationsCheckbox.Add_CheckedChanged({
+  if ($script:suppressConfirmSyncing) { return }
+  if (-not $suppressConfirmationsCheckbox.Checked) { return }
+  $answer = [System.Windows.Forms.MessageBox]::Show(
+    (Get-UiString 'SuppressConfirmationsRiskDialog'),
+    (Get-UiString 'SuppressConfirmationsRiskTitle'),
+    [System.Windows.Forms.MessageBoxButtons]::YesNo,
+    [System.Windows.Forms.MessageBoxIcon]::Warning,
+    [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
+  if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
+    $script:suppressConfirmSyncing = $true
+    try { $suppressConfirmationsCheckbox.Checked = $false } finally { $script:suppressConfirmSyncing = $false }
+  }
+})
 
-# Save Settings + Clear Version Cache buttons (same width, side by side)
+# --- Card 5: updates of this tool (self-update) --------------------------------------------------
+$cardAppUpdates = New-SettingsCard -TitleKey 'UpdateSectionLabel' -InfoKey 'InfoCardAppUpdates'
+
+$currentVersionLabel = New-Object System.Windows.Forms.Label
+$currentVersionLabel.Text = (Get-UiString 'CurrentVersionLabel') -f $script:appVersion
+$currentVersionLabel.AutoSize = $true
+[void](Add-SettingRow -Card $cardAppUpdates -Control $currentVersionLabel)
+
+# Ohne konfiguriertes Repository tut hier nichts etwas - dann sagt der Hinweis genau das, statt
+# eine Option anzubieten, deren Wirkung ausbleibt und die man fuer defekt haelt.
+$checkUpdateOnStartupCheckbox = New-Object System.Windows.Forms.CheckBox
+$checkUpdateOnStartupCheckbox.Text = Get-UiString 'CheckUpdateOnStartupCheckbox'
+$checkUpdateOnStartupCheckbox.AutoSize = $true
+$checkUpdateOnStartupCheckbox.Checked = [bool]$script:settings.CheckAppUpdateOnStartup
+$script:selfUpdateConfigured = -not [string]::IsNullOrWhiteSpace($script:githubRepo)
+if (-not $script:selfUpdateConfigured) { $checkUpdateOnStartupCheckbox.Enabled = $false }
+[void](Add-SettingRow -Card $cardAppUpdates -Control $checkUpdateOnStartupCheckbox `
+  -Hint (Get-UiString $(if ($script:selfUpdateConfigured) { 'HintCheckUpdateOnStartup' } else { 'HintCheckUpdateNoRepo' })) `
+  -SpaceBefore 4)
+
+$checkUpdateButton = New-Object System.Windows.Forms.Button
+$checkUpdateButton.Text = Get-UiString 'CheckUpdateButton'
+$checkUpdateButton.Width = $script:settingsButtonWidth
+$checkUpdateButton.Height = 34
+# Disabled until a self-update repo is configured (see $script:githubRepo).
+if ([string]::IsNullOrWhiteSpace($script:githubRepo)) { $checkUpdateButton.Enabled = $false }
+[void](Add-SettingRow -Card $cardAppUpdates -Control $checkUpdateButton -Hint (Get-UiString 'HintSelfUpdate') -SpaceBefore 4)
+
+$checkUpdateButton.Add_Click({
+  if (Test-UiBusy) { return }
+  $checkUpdateButton.Enabled = $false
+  # Runs on the UI thread, like every other long call in this app. It used to go through
+  # Invoke-AsyncOperation (a BackgroundWorker), where the scriptblock never executed at all - a
+  # worker thread has no PowerShell runspace - so the result was always $null and the check
+  # silently reported "up to date". One HTTP GET with a 10s timeout is fine inline.
+  Update-Status (Get-UiString 'UpdCheckingStatus')
+  [System.Windows.Forms.Application]::DoEvents()
+  try {
+    Invoke-UpdateCheckFeedback -UpdateResult (Test-AppUpdateAvailable) -Context 'Manual'
+  } finally {
+    $checkUpdateButton.Enabled = $true
+  }
+})
+
+# --- Card 6: files & diagnostics -----------------------------------------------------------------
+# The log path was only visible inside Help > About, which nobody opens while troubleshooting.
+# Showing both paths here (selectable read-only fields, so they can be copied into a ticket)
+# plus a button to open the folder makes them findable for a technician.
+$cardFiles = New-SettingsCard -TitleKey 'FilesSectionLabel' -InfoKey 'InfoCardFiles'
+
+$logPathRow = New-Object System.Windows.Forms.Panel
+$logPathRow.Tag = 'row-host'
+$logPathRow.Size = New-Object System.Drawing.Size(698, 30)
+
+$logPathLabel = New-Object System.Windows.Forms.Label
+$logPathLabel.Text = Get-UiString 'LogFilePathLabel'
+$logPathLabel.Location = New-Object System.Drawing.Point(0,6)
+$logPathLabel.AutoSize = $true
+$logPathRow.Controls.Add($logPathLabel)
+
+$logPathBox = New-Object System.Windows.Forms.TextBox
+$logPathBox.Text = $script:logFilePath
+$logPathBox.ReadOnly = $true
+$logPathBox.Width = 546
+$logPathHost = New-RoundedInput -Inner $logPathBox -X 136 -Y 0 -W 546 -H 28
+$logPathRow.Controls.Add($logPathHost)
+[void](Add-SettingRow -Card $cardFiles -Control $logPathRow)
+
+$settingsPathRow = New-Object System.Windows.Forms.Panel
+$settingsPathRow.Tag = 'row-host'
+$settingsPathRow.Size = New-Object System.Drawing.Size(698, 30)
+
+$settingsPathLabel = New-Object System.Windows.Forms.Label
+$settingsPathLabel.Text = Get-UiString 'SettingsFilePathLabel'
+$settingsPathLabel.Location = New-Object System.Drawing.Point(0,6)
+$settingsPathLabel.AutoSize = $true
+$settingsPathRow.Controls.Add($settingsPathLabel)
+
+$settingsPathBox = New-Object System.Windows.Forms.TextBox
+$settingsPathBox.Text = $script:settingsPath
+$settingsPathBox.ReadOnly = $true
+$settingsPathBox.Width = 546
+$settingsPathHost = New-RoundedInput -Inner $settingsPathBox -X 136 -Y 0 -W 546 -H 28
+$settingsPathRow.Controls.Add($settingsPathHost)
+[void](Add-SettingRow -Card $cardFiles -Control $settingsPathRow -Hint (Get-UiString 'FilesSectionHint'))
+
+$filesButtonRow = New-Object System.Windows.Forms.Panel
+$filesButtonRow.Tag = 'row-host'
+$filesButtonRow.Size = New-Object System.Drawing.Size(698, 32)
+
+$openLogButton = New-Object System.Windows.Forms.Button
+$openLogButton.Tag = 'btn-secondary'
+$openLogButton.Text = Get-UiString 'MenuOpenLogFile'
+$openLogButton.Location = New-Object System.Drawing.Point(0, 0)
+$openLogButton.Width = $script:settingsButtonWidth
+$openLogButton.Height = 30
+$filesButtonRow.Controls.Add($openLogButton)
+
+$openLogFolderButton = New-Object System.Windows.Forms.Button
+$openLogFolderButton.Tag = 'btn-secondary'
+$openLogFolderButton.Text = Get-UiString 'OpenLogFolderButton'
+$openLogFolderButton.Location = New-Object System.Drawing.Point(210, 0)
+$openLogFolderButton.Width = $script:settingsButtonWidth
+$openLogFolderButton.Height = 30
+$filesButtonRow.Controls.Add($openLogFolderButton)
+
+# Writes a pseudonymized copy of the log to %TEMP% so it can be attached to a bug report without
+# leaking customer identifiers (UPNs, GUIDs, user name/profile path -> stable placeholders).
+$exportLogButton = New-Object System.Windows.Forms.Button
+$exportLogButton.Tag = 'btn-secondary'
+$exportLogButton.Text = Get-UiString 'ExportSanitizedLogButton'
+$exportLogButton.Location = New-Object System.Drawing.Point(420, 0)
+$exportLogButton.Width = $script:settingsButtonWidth
+$exportLogButton.Height = 30
+$filesButtonRow.Controls.Add($exportLogButton)
+
+# Die drei Knoepfe an ihren Beschriftungen messen und aufreihen. Bei fester Breite von 200 px war
+# "Log fuer Fehlerbericht exportieren" abgeschnitten - und gerade dieser Knopf ist der, den jemand
+# im Stoerungsfall zum ersten Mal sucht.
+$filesButtonX = 0
+foreach ($b in @($openLogButton, $openLogFolderButton, $exportLogButton)) {
+  if (-not $b) { continue }
+  $w = $script:settingsButtonWidth
+  try {
+    $t = [string]$b.Text
+    if ($t) { $w = [Math]::Max($w, [System.Windows.Forms.TextRenderer]::MeasureText($t, $b.Font).Width + 26) }
+  } catch { }
+  $b.Left = $filesButtonX
+  $b.Width = $w
+  $filesButtonX += $w + 10
+}
+$filesButtonRow.Width = [Math]::Max($filesButtonRow.Width, $filesButtonX)
+
+[void](Add-SettingRow -Card $cardFiles -Control $filesButtonRow -SpaceBefore 4)
+
+$openLogButton.Add_Click({
+  try {
+    if (Test-Path -LiteralPath $script:logFilePath) {
+      Start-Process -FilePath $script:logFilePath -ErrorAction Stop
+    } else {
+      [void][System.Windows.Forms.MessageBox]::Show(
+        ((Get-UiString 'LogFileMissingDialog') -f $script:logFilePath),
+        (Get-UiString 'InfoTitle'),
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information)
+    }
+  } catch { Write-Log "Open log failed: $($_.Exception.Message)" }
+})
+
+$exportLogButton.Add_Click({
+  try {
+    if (-not (Test-Path -LiteralPath $script:logFilePath)) {
+      [void][System.Windows.Forms.MessageBox]::Show(
+        ((Get-UiString 'LogFileMissingDialog') -f $script:logFilePath),
+        (Get-UiString 'InfoTitle'),
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information)
+      return
+    }
+    $raw = Get-Content -LiteralPath $script:logFilePath -Raw -ErrorAction Stop
+    $sanitized = (Get-UiString 'SanitizedLogHeader') + "`r`n`r`n" + (Get-SanitizedLogText -Text $raw)
+    $out = Join-Path ([IO.Path]::GetTempPath()) ("WinTuner_GUI-log-sanitized-{0}.txt" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    [IO.File]::WriteAllText($out, $sanitized, [Text.UTF8Encoding]::new($false))
+    Write-Log "Sanitized log exported for a bug report."
+    try { Start-Process explorer.exe -ArgumentList ('/select,"{0}"' -f $out) -ErrorAction SilentlyContinue } catch { }
+    [void][System.Windows.Forms.MessageBox]::Show(
+      ((Get-UiString 'SanitizedLogDoneDialog') -f $out),
+      (Get-UiString 'InfoTitle'),
+      [System.Windows.Forms.MessageBoxButtons]::OK,
+      [System.Windows.Forms.MessageBoxIcon]::Information)
+  } catch { Write-Log "Sanitized log export failed: $($_.Exception.Message)" }
+})
+
+$openLogFolderButton.Add_Click({
+  # Select the log in Explorer when it exists, otherwise just open the folder it would go to.
+  try {
+    if (Test-Path -LiteralPath $script:logFilePath) {
+      Start-Process explorer.exe -ArgumentList ('/select,"{0}"' -f $script:logFilePath) -ErrorAction Stop
+    } else {
+      Start-Process explorer.exe -ArgumentList (Split-Path -Parent $script:logFilePath) -ErrorAction Stop
+    }
+  } catch { Write-Log "Open log folder failed: $($_.Exception.Message)" }
+})
+
+# --- Save bar ------------------------------------------------------------------------------------
+# One Save for the whole page. It used to sit in the middle of the first card, which read as "save
+# the general options" while three more cards below it were saved by the same click.
+$cardSave = New-Card -X 16 -Y 48 -W $script:settingsCardWidth -H 100
+$tabSettings.Controls.Add($cardSave)
+$script:settingsCards.Add($cardSave)
+# No card title here, so the first row starts at the top padding instead of below one.
+$script:settingRowStart[$cardSave.GetHashCode()] = 14
+
 $saveSettingsButton = New-Object System.Windows.Forms.Button
 $saveSettingsButton.Text = Get-UiString 'SaveSettingsButton'
-$saveSettingsButton.Location = New-Object System.Drawing.Point(14,250)
 $saveSettingsButton.Width = $script:settingsButtonWidth
 $saveSettingsButton.Height = 34
-$cardGeneral.Controls.Add($saveSettingsButton)
+[void](Add-SettingRow -Card $cardSave -Control $saveSettingsButton -Hint (Get-UiString 'SettingsSaveHint'))
 
-$clearCacheButton = New-Object System.Windows.Forms.Button
-$clearCacheButton.Tag = 'btn-secondary'
-$clearCacheButton.Text = Get-UiString 'ClearCacheButton'
-$clearCacheButton.Location = New-Object System.Drawing.Point(224,250)
-$clearCacheButton.Width = $script:settingsButtonWidth
-$clearCacheButton.Height = 34
-$cardGeneral.Controls.Add($clearCacheButton)
+# Browse Path Button Handler
+$browsePathButton.Add_Click({
+  $folderBrowser = New-Object System.Windows.Forms.FolderBrowserDialog
+  $folderBrowser.Description = Get-UiString 'SelectDefaultFolderTitle'
+  $folderBrowser.SelectedPath = $defaultPathTextBox.Text
 
-# Local disk housekeeping. Sits next to the cache button because both act on this machine only -
-# neither touches the tenant, which is what separates them from everything above.
-$prunePackagesButton = New-Object System.Windows.Forms.Button
-$prunePackagesButton.Tag = 'btn-secondary'
-$prunePackagesButton.Text = Get-UiString 'PrunePackagesButton'
-$prunePackagesButton.Location = New-Object System.Drawing.Point(434,250)
-$prunePackagesButton.Width = $script:settingsButtonWidth
-$prunePackagesButton.Height = 34
-$cardGeneral.Controls.Add($prunePackagesButton)
+  if ($folderBrowser.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    $defaultPathTextBox.Text = $folderBrowser.SelectedPath
+    Update-Status (Get-UiString 'PathUpdatedStatus')
+  }
+})
+
+# Save Settings Button Handler
+$saveSettingsButton.Add_Click({
+  if (Test-UiBusy) { return }
+  try {
+    $script:settings.DefaultPackagePath = $defaultPathTextBox.Text
+    $script:settings.AutoCheckUpdates = $autoCheckUpdatesCheckbox.Checked
+    $script:settings.RequestOptionalScopesOnLogin = $elevatedLoginCheckbox.Checked
+    $script:settings.AutoRemoveSuperseded = $autoRemoveSupersededCheckbox.Checked
+    if ($autoVersionCleanupCheckbox) { $script:settings.AutoVersionCleanup = $autoVersionCleanupCheckbox.Checked }
+    if ($moveAssignmentsCheckbox) { $script:settings.MoveAssignmentsOnUpdate = $moveAssignmentsCheckbox.Checked }
+    if ($saveScopeCheckbox) { $script:settings.SaveScopeBeforeRemoval = $saveScopeCheckbox.Checked }
+    if ($favoriteAutoCheckbox) { $script:settings.AutoUpdateFavoritesOnStartup = $favoriteAutoCheckbox.Checked }
+    if ($checkUpdateOnStartupCheckbox) { $script:settings.CheckAppUpdateOnStartup = $checkUpdateOnStartupCheckbox.Checked }
+    # The tile has to be recounted when this changed, otherwise the number on the dashboard was
+    # produced by the other method and no longer matches the setting.
+    $fullScanChanged = $false
+    if ($dashboardFullScanCheckbox) {
+      $fullScanChanged = ([bool]$script:settings.DashboardUpdatesFullScan -ne [bool]$dashboardFullScanCheckbox.Checked)
+      $script:settings.DashboardUpdatesFullScan = $dashboardFullScanCheckbox.Checked
+    }
+    if ($suppressConfirmationsCheckbox) {
+      # The risk notice was already answered when the box was ticked (see its CheckedChanged), so a
+      # ticked box here means it was accepted. Tied to the version: a new release may add prompts
+      # the user has never seen, so the acknowledgement is asked again after an update.
+      $script:settings.SuppressChangeConfirmations = [bool]$suppressConfirmationsCheckbox.Checked
+      $script:settings.ChangeConfirmationRiskAcceptedVersion =
+        if ($suppressConfirmationsCheckbox.Checked) { [string]$script:appVersion } else { "" }
+    }
+    if ($keepVersionCountInput) {
+      $script:keepVersionCount = [int]$keepVersionCountInput.Value
+      $script:settings.KeepVersionCount = $script:keepVersionCount
+      Update-KeepVersionCountUi
+    }
+    # The checkboxes already exclude each other, so this normally changes nothing. It is the last
+    # gate before the values are persisted: no combination that the update engine must not see can
+    # reach settings.json, whatever produced it.
+    if (Resolve-CleanupOptionConflict) {
+      $script:cleanupOptionSyncing = $true
+      try {
+        $autoRemoveSupersededCheckbox.Checked = [bool]$script:settings.AutoRemoveSuperseded
+        $autoVersionCleanupCheckbox.Checked = [bool]$script:settings.AutoVersionCleanup
+      } finally { $script:cleanupOptionSyncing = $false }
+      Update-Status (Get-UiString 'CleanupExclusiveStatus')
+    }
+
+    # Update pathBox on WinGet Apps tab with new default
+    if ($pathBox) {
+      $pathBox.Text = $script:settings.DefaultPackagePath
+    }
+
+    Save-Settings
+    # Derselbe Abdruck wie beim Start, nur mit anderem Vorsatz: im Protokoll steht damit an beiden
+    # Stellen dasselbe Format, und man sieht, was ab hier gilt.
+    foreach ($line in (Get-SettingsSnapshotLines -Prefix 'Settings saved')) { Write-Log $line }
+    Update-Status (Get-UiString 'SettingsSavedStatus')
+    if ($fullScanChanged) {
+      try { if ($script:isConnected) { Refresh-Dashboard -Force } } catch { Write-LogDebug 'dashboard refresh after save' }
+    }
+
+    [System.Windows.Forms.MessageBox]::Show(
+      (Get-UiString 'SettingsSavedDialog'),
+      (Get-UiString 'SettingsSavedTitle'),
+      [System.Windows.Forms.MessageBoxButtons]::OK,
+      [System.Windows.Forms.MessageBoxIcon]::Information
+    )
+  } catch {
+    Update-Status ((Get-UiString 'SaveSettingsFailedStatus') -f $_.Exception.Message)
+    Write-Log "Settings save error: $($_.Exception.Message)"
+
+    [System.Windows.Forms.MessageBox]::Show(
+      ((Get-UiString 'SaveSettingsFailedDialog') -f $_.Exception.Message),
+      (Get-UiString 'ErrorTitle'),
+      [System.Windows.Forms.MessageBoxButtons]::OK,
+      [System.Windows.Forms.MessageBoxIcon]::Error
+    )
+  }
+})
+
+# Clear Version Cache Button Handler
+$clearCacheButton.Add_Click({
+  if (Test-UiBusy) { return }
+  $script:wingetVersionCache = @{}
+  $script:diskCache = @{}
+  $script:diskCacheLoaded = $false
+  Remove-Item -LiteralPath $script:versionCachePath -Force -ErrorAction SilentlyContinue
+  Write-Log "Version cache cleared."
+  Update-Status (Get-UiString 'CacheClearedStatus')
+})
 
 $prunePackagesButton.Add_Click({
   if (Test-UiBusy) { return }
@@ -714,211 +1471,14 @@ $prunePackagesButton.Add_Click({
   }
 })
 
-# Browse Path Button Handler
-$browsePathButton.Add_Click({
-  $folderBrowser = New-Object System.Windows.Forms.FolderBrowserDialog
-  $folderBrowser.Description = Get-UiString 'SelectDefaultFolderTitle'
-  $folderBrowser.SelectedPath = $defaultPathTextBox.Text
+# Theme selection lives in the top-menu "Theme" picker now (not here). $themeSelectorCombo is kept
+# as $null so later references (tooltips etc.) stay harmless.
+$themeSelectorCombo = $null
 
-  if ($folderBrowser.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-    $defaultPathTextBox.Text = $folderBrowser.SelectedPath
-    Update-Status (Get-UiString 'PathUpdatedStatus')
-  }
-})
-
-# Save Settings Button Handler
-$saveSettingsButton.Add_Click({
-  if (Test-UiBusy) { return }
-  try {
-    $script:settings.DefaultPackagePath = $defaultPathTextBox.Text
-    $script:settings.AutoCheckUpdates = $autoCheckUpdatesCheckbox.Checked
-    $script:settings.AutoRemoveSuperseded = $autoRemoveSupersededCheckbox.Checked
-    if ($autoVersionCleanupCheckbox) { $script:settings.AutoVersionCleanup = $autoVersionCleanupCheckbox.Checked }
-    if ($moveAssignmentsCheckbox) { $script:settings.MoveAssignmentsOnUpdate = $moveAssignmentsCheckbox.Checked }
-    if ($keepVersionCountInput) {
-      $script:keepVersionCount = [int]$keepVersionCountInput.Value
-      $script:settings.KeepVersionCount = $script:keepVersionCount
-      Update-KeepVersionCountUi
-    }
-    # The checkboxes already exclude each other, so this normally changes nothing. It is the last
-    # gate before the values are persisted: no combination that the update engine must not see can
-    # reach settings.json, whatever produced it.
-    if (Resolve-CleanupOptionConflict) {
-      $script:cleanupOptionSyncing = $true
-      try {
-        $autoRemoveSupersededCheckbox.Checked = [bool]$script:settings.AutoRemoveSuperseded
-        $autoVersionCleanupCheckbox.Checked = [bool]$script:settings.AutoVersionCleanup
-      } finally { $script:cleanupOptionSyncing = $false }
-      Update-Status (Get-UiString 'CleanupExclusiveStatus')
-    }
-
-    # Update pathBox on WinGet Apps tab with new default
-    if ($pathBox) {
-      $pathBox.Text = $script:settings.DefaultPackagePath
-    }
-
-    Save-Settings
-    Update-Status (Get-UiString 'SettingsSavedStatus')
-
-    [System.Windows.Forms.MessageBox]::Show(
-      (Get-UiString 'SettingsSavedDialog'),
-      (Get-UiString 'SettingsSavedTitle'),
-      [System.Windows.Forms.MessageBoxButtons]::OK,
-      [System.Windows.Forms.MessageBoxIcon]::Information
-    )
-  } catch {
-    Update-Status ((Get-UiString 'SaveSettingsFailedStatus') -f $_.Exception.Message)
-    Write-Log "Settings save error: $($_.Exception.Message)"
-
-    [System.Windows.Forms.MessageBox]::Show(
-      ((Get-UiString 'SaveSettingsFailedDialog') -f $_.Exception.Message),
-      (Get-UiString 'ErrorTitle'),
-      [System.Windows.Forms.MessageBoxButtons]::OK,
-      [System.Windows.Forms.MessageBoxIcon]::Error
-    )
-  }
-})
-
-# Clear Version Cache Button Handler
-$clearCacheButton.Add_Click({
-  if (Test-UiBusy) { return }
-  $script:wingetVersionCache = @{}
-  $script:diskCache = @{}
-  $script:diskCacheLoaded = $false
-  Remove-Item $script:versionCachePath -Force -ErrorAction SilentlyContinue
-  Write-Log "Version cache cleared."
-  Update-Status (Get-UiString 'CacheClearedStatus')
-})
-
-# --- Card 2: Application Updates (self-update of this tool) ---
-$cardAppUpdates = New-Card -X 16 -Y 356 -W 726 -H 112
-$tabSettings.Controls.Add($cardAppUpdates)
-
-$updateSectionLabel = New-Object System.Windows.Forms.Label
-$updateSectionLabel.Text = Get-UiString 'UpdateSectionLabel'
-$updateSectionLabel.Location = New-Object System.Drawing.Point(14, 8)
-$updateSectionLabel.AutoSize = $true
-$updateSectionLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-$cardAppUpdates.Controls.Add($updateSectionLabel)
-[void](Add-SectionInfoBadge -Parent $cardAppUpdates -AfterLabel $updateSectionLabel -TextKey 'InfoCardAppUpdates')
-
-$currentVersionLabel = New-Object System.Windows.Forms.Label
-$currentVersionLabel.Text = (Get-UiString 'CurrentVersionLabel') -f $script:appVersion
-$currentVersionLabel.Location = New-Object System.Drawing.Point(14, 36)
-$currentVersionLabel.AutoSize = $true
-$cardAppUpdates.Controls.Add($currentVersionLabel)
-
-$checkUpdateButton = New-Object System.Windows.Forms.Button
-$checkUpdateButton.Text = Get-UiString 'CheckUpdateButton'
-$checkUpdateButton.Location = New-Object System.Drawing.Point(14, 64)
-$checkUpdateButton.Width = $script:settingsButtonWidth
-$checkUpdateButton.Height = 34
-# Disabled until a self-update repo is configured (see $script:githubRepo).
-if ([string]::IsNullOrWhiteSpace($script:githubRepo)) { $checkUpdateButton.Enabled = $false }
-$cardAppUpdates.Controls.Add($checkUpdateButton)
-
-$checkUpdateButton.Add_Click({
-  if (Test-UiBusy) { return }
-  $checkUpdateButton.Enabled = $false
-  # Runs on the UI thread, like every other long call in this app. It used to go through
-  # Invoke-AsyncOperation (a BackgroundWorker), where the scriptblock never executed at all - a
-  # worker thread has no PowerShell runspace - so the result was always $null and the check
-  # silently reported "up to date". One HTTP GET with a 10s timeout is fine inline.
-  Update-Status (Get-UiString 'UpdCheckingStatus')
-  [System.Windows.Forms.Application]::DoEvents()
-  try {
-    Invoke-UpdateCheckFeedback -UpdateResult (Test-AppUpdateAvailable) -Context 'Manual'
-  } finally {
-    $checkUpdateButton.Enabled = $true
-  }
-})
-
-# --- Card 3: Files & diagnostics ---
-# The log path was only visible inside Help > About, which nobody opens while troubleshooting.
-# Showing both paths here (selectable read-only fields, so they can be copied into a ticket)
-# plus a button to open the folder makes them findable for a technician.
-$cardFiles = New-Card -X 16 -Y 480 -W 726 -H 192
-$tabSettings.Controls.Add($cardFiles)
-
-$filesSectionLabel = New-Object System.Windows.Forms.Label
-$filesSectionLabel.Text = Get-UiString 'FilesSectionLabel'
-$filesSectionLabel.Location = New-Object System.Drawing.Point(14, 8)
-$filesSectionLabel.AutoSize = $true
-$filesSectionLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-$cardFiles.Controls.Add($filesSectionLabel)
-[void](Add-SectionInfoBadge -Parent $cardFiles -AfterLabel $filesSectionLabel -TextKey 'InfoCardFiles')
-
-$logPathLabel = New-Object System.Windows.Forms.Label
-$logPathLabel.Text = Get-UiString 'LogFilePathLabel'
-$logPathLabel.Location = New-Object System.Drawing.Point(14, 42)
-$logPathLabel.AutoSize = $true
-$cardFiles.Controls.Add($logPathLabel)
-
-$logPathBox = New-Object System.Windows.Forms.TextBox
-$logPathBox.Text = $script:logFilePath
-$logPathBox.ReadOnly = $true
-$logPathBox.Width = 546
-$logPathHost = New-RoundedInput -Inner $logPathBox -X 150 -Y 36 -W 546 -H 28
-$cardFiles.Controls.Add($logPathHost)
-
-$settingsPathLabel = New-Object System.Windows.Forms.Label
-$settingsPathLabel.Text = Get-UiString 'SettingsFilePathLabel'
-$settingsPathLabel.Location = New-Object System.Drawing.Point(14, 76)
-$settingsPathLabel.AutoSize = $true
-$cardFiles.Controls.Add($settingsPathLabel)
-
-$settingsPathBox = New-Object System.Windows.Forms.TextBox
-$settingsPathBox.Text = $script:settingsPath
-$settingsPathBox.ReadOnly = $true
-$settingsPathBox.Width = 546
-$settingsPathHost = New-RoundedInput -Inner $settingsPathBox -X 150 -Y 70 -W 546 -H 28
-$cardFiles.Controls.Add($settingsPathHost)
-
-$openLogButton = New-Object System.Windows.Forms.Button
-$openLogButton.Tag = 'btn-secondary'
-$openLogButton.Text = Get-UiString 'MenuOpenLogFile'
-$openLogButton.Location = New-Object System.Drawing.Point(14, 144)
-$openLogButton.Width = $script:settingsButtonWidth
-$openLogButton.Height = 30
-$cardFiles.Controls.Add($openLogButton)
-$openLogButton.Add_Click({
-  try {
-    if (Test-Path $script:logFilePath) {
-      Start-Process -FilePath $script:logFilePath -ErrorAction Stop
-    } else {
-      [void][System.Windows.Forms.MessageBox]::Show(
-        ((Get-UiString 'LogFileMissingDialog') -f $script:logFilePath),
-        (Get-UiString 'InfoTitle'),
-        [System.Windows.Forms.MessageBoxButtons]::OK,
-        [System.Windows.Forms.MessageBoxIcon]::Information)
-    }
-  } catch { Write-Log "Open log failed: $($_.Exception.Message)" }
-})
-
-$openLogFolderButton = New-Object System.Windows.Forms.Button
-$openLogFolderButton.Tag = 'btn-secondary'
-$openLogFolderButton.Text = Get-UiString 'OpenLogFolderButton'
-$openLogFolderButton.Location = New-Object System.Drawing.Point(224, 144)
-$openLogFolderButton.Width = $script:settingsButtonWidth
-$openLogFolderButton.Height = 30
-$cardFiles.Controls.Add($openLogFolderButton)
-$filesHintLabel = New-Object System.Windows.Forms.Label
-$filesHintLabel.Tag = 'hint'
-$filesHintLabel.Text = Get-UiString 'FilesSectionHint'
-$filesHintLabel.Location = New-Object System.Drawing.Point(14, 100)
-$filesHintLabel.Size = New-Object System.Drawing.Size(698, 38)   # two full lines: the sentence wraps and was clipped at 26 px
-$cardFiles.Controls.Add($filesHintLabel)
-
-$openLogFolderButton.Add_Click({
-  # Select the log in Explorer when it exists, otherwise just open the folder it would go to.
-  try {
-    if (Test-Path $script:logFilePath) {
-      Start-Process explorer.exe -ArgumentList ('/select,"{0}"' -f $script:logFilePath) -ErrorAction Stop
-    } else {
-      Start-Process explorer.exe -ArgumentList (Split-Path -Parent $script:logFilePath) -ErrorAction Stop
-    }
-  } catch { Write-Log "Open log folder failed: $($_.Exception.Message)" }
-})
+# Language selection lives in the top-menu "Language" picker now (next to "Theme"), like the theme
+# it is a display preference rather than a tenant/Intune setting. $languageSelectorCombo is kept as
+# $null so later references (tooltips etc.) stay harmless.
+$languageSelectorCombo = $null
 
 # Hashtable: AppName -> {PackageID, Version}
 $script:packageMap = @{}
@@ -954,8 +1514,18 @@ function Update-SelectedPackageVersionLabel {
 # Graph; it only clears what is already on screen.
 function Clear-TenantViews {
   try {
+    # Der Sammel-Editor haelt eine Liste des VORIGEN Tenants; beim naechsten Oeffnen neu laden.
+    $script:appSettingsLoaded = $false
     # First and most important: a cached inventory belongs to the previous tenant.
     if (Get-Command Clear-Win32AppsCache -ErrorAction SilentlyContinue) { Clear-Win32AppsCache }
+    # Gruppennamen gehoeren genauso zum Kunden wie das Inventar - eine GUID des vorigen Tenants
+    # duerfte hier nie mit dem Namen von dort auftauchen.
+    if (Get-Command Clear-EntraGroupNameCache -ErrorAction SilentlyContinue) { Clear-EntraGroupNameCache }
+    # Versionen sind kundenunabhaengig - aber ein Tenant-Wechsel ist der Punkt, an dem man frische
+    # Zahlen erwartet, und die zweite Anmeldung soll nicht auf der ersten sitzen.
+    if (Get-Command Clear-LatestVersionCache -ErrorAction SilentlyContinue) { Clear-LatestVersionCache }
+    # Welche Installationsquelle antwortet, ist eine Eigenschaft DES TENANTS.
+    if (Get-Command Clear-InstallProbeSource -ErrorAction SilentlyContinue) { Clear-InstallProbeSource }
     # Update scan
     $script:updateApps = @()
     if ($updateListBox) { $updateListBox.Items.Clear() }
@@ -972,7 +1542,10 @@ function Clear-TenantViews {
 
     # Superseded apps
     $script:supersededApps = @()
-    if ($supersededDropdown) { $supersededDropdown.Items.Clear(); $supersededDropdown.Text = '' }
+    if ($supersededListBox) { $supersededListBox.Items.Clear() }
+    if (Get-Command Update-SupersededListState -ErrorAction SilentlyContinue) {
+      try { Update-SupersededListState } catch { }
+    }
 
     # Tenant-wide app list
     $script:tenantApps = @()
@@ -980,8 +1553,20 @@ function Clear-TenantViews {
     if ($tenantDetailBox) { $tenantDetailBox.Text = '' }
     foreach ($b in @($tenantAssignButton, $tenantEditButton)) { if ($b) { $b.Enabled = $false } }
 
-    # Microsoft Store inventory
+    # Microsoft Store inventory - the cached list belongs to the previous tenant too.
+    $script:tenantStoreApps = @()
     if ($storeTenantListView) { $storeTenantListView.Items.Clear() }
+
+    # Group / filter id text fields: these hold Entra group and assignment-filter GUIDs of the
+    # PREVIOUS customer and are read straight into new assignments. Clear them so nothing carries over.
+    foreach ($idBox in @($assignGroupIdBox, $script:storeAssignGroupIdBox, $discoveredAssignGroupIdBox, $script:deployFilterIdBox)) {
+      if ($idBox) { $idBox.Text = '' }
+    }
+    # Rebuild the assignment-target combos: without a session Get-GroupFavorites returns @(), so the
+    # combos fall back to the fixed entries and the selection to "unassigned".
+    if (Get-Command Update-AllAssignTargetCombos -ErrorAction SilentlyContinue) {
+      try { Update-AllAssignTargetCombos } catch { }
+    }
 
     # Discovered apps
     $script:discoveredRaw = @()

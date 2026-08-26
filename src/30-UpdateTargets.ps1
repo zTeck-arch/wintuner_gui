@@ -89,7 +89,10 @@ function Test-RequiresExistingTargetFollowUp {
 
 function Find-ExistingUpdateTarget {
   param(
-    [Parameter(Mandatory)][object[]]$Apps,
+    # AllowEmptyCollection: a brand-new tenant (or one whose apps are all superseded) hands an empty
+    # active inventory here. Without it PowerShell rejects @() at binding time and the very first
+    # upload into every new customer tenant fails permanently - there is no self-healing path.
+    [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Apps,
     [Parameter(Mandatory)][string]$PackageId,
     [Parameter(Mandatory)][string]$Version,
     [string]$ExcludeGraphId,
@@ -128,7 +131,8 @@ function Find-ExistingUpdateTarget {
 
 function Find-NewerTenantPackageTarget {
   param(
-    [Parameter(Mandatory)][object[]]$Apps,
+    # See Find-ExistingUpdateTarget: an empty active inventory is legitimate and must bind.
+    [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Apps,
     [Parameter(Mandatory)][string]$PackageId,
     [Parameter(Mandatory)][string]$Version,
     [string]$ExcludeGraphId,
@@ -170,8 +174,13 @@ function Get-FreshExistingUpdateTarget {
     [string]$PreferredName
   )
 
-  $activeApps = @(Get-WtWin32Apps -Superseded:$false -ErrorAction Stop)
-  $supersededApps = @(Get-WtWin32Apps -Superseded:$true -ErrorAction Stop)
+  # Through the resilient wrapper on purpose. This is the duplicate guard that runs immediately
+  # before an upload, inside a batch that is pumping DoEvents - exactly the conditions that trigger
+  # the module's "Collection was modified" race. A bare call would abort the app with "Duplicate
+  # safety check failed" on the first attempt, which is the failure 0.15.7 set out to remove.
+  # Deliberately NOT cached: see the cache comment in 25-WinGetData.ps1.
+  $activeApps = @(Get-Win32AppsResilient -Label 'fresh update target (active)')
+  $supersededApps = @(Get-Win32AppsResilient -Superseded -Label 'fresh update target (superseded)')
   $activeApps = @(Remove-SupersededInventoryOverlap -ActiveApps $activeApps -SupersededApps $supersededApps)
   $resolvedIds = @{}
   $unresolvedPotential = [System.Collections.Generic.List[object]]::new()
@@ -349,7 +358,10 @@ function Resolve-DeployedUpdateTarget {
   )
   for ($attempt = 1; $attempt -le 8; $attempt++) {
     try {
-      $apps = @(Get-WtWin32Apps -Superseded:$false -ErrorAction Stop)
+      # -MaxRetries 0: this loop is already the retry, with escalating delays, and it also covers the
+      # "app not visible yet" case. Going through the wrapper anyway keeps one inventory code path
+      # and picks up the truncation check.
+      $apps = @(Get-Win32AppsResilient -Label ("deployed target resolution (attempt {0}/8)" -f $attempt) -MaxRetries 0)
       $target = Find-ExistingUpdateTarget -Apps $apps -PackageId $PackageId -Version $Version -ExcludeGraphId $ExcludeGraphId -PreferredName $PreferredName
       if ($target -and $target.GraphId) {
         $resolved = [string]$target.GraphId
@@ -402,21 +414,119 @@ function Get-PreviousWingetVersion {
   return $null
 }
 
+# Word-set similarity as a Jaccard index (shared words / total distinct words), 0..100.
+#
+# The denominator MUST be the union, not [math]::Min: with Min, any name that is a subset of another
+# scored 100 ("Adobe Acrobat" vs "Adobe Acrobat Reader DC"), so a shorter, WRONG candidate could
+# overbid the correct longer match and be auto-resolved as the WinGet package. Union makes a subset
+# score by how much it actually overlaps, so identical names = 100 and disjoint names = 0.
 function Get-StringSimilarity {
   param($str1, $str2)
   if (-not $str1 -or -not $str2) { return 0 }
   $clean1 = $str1.ToLower() -replace '[^\w\s]', ' '
   $clean2 = $str2.ToLower() -replace '[^\w\s]', ' '
-  $words1 = @($clean1 -split '\s+' | Where-Object { $_.Trim() -ne '' })
-  $words2 = @($clean2 -split '\s+' | Where-Object { $_.Trim() -ne '' })
-  if ($words1.Count -eq 0 -or $words2.Count -eq 0) { return 0 }
+  $set1 = [System.Collections.Generic.HashSet[string]]::new(
+    [string[]]@($clean1 -split '\s+' | Where-Object { $_.Trim() -ne '' }), [StringComparer]::OrdinalIgnoreCase)
+  $set2 = [System.Collections.Generic.HashSet[string]]::new(
+    [string[]]@($clean2 -split '\s+' | Where-Object { $_.Trim() -ne '' }), [StringComparer]::OrdinalIgnoreCase)
+  if ($set1.Count -eq 0 -or $set2.Count -eq 0) { return 0 }
 
-  $matchCount = 0
-  foreach ($w in $words1) { if ($words2 -contains $w) { $matchCount++ } }
-  $minWords = [math]::Min($words1.Count, $words2.Count)
-  return [math]::Round(($matchCount / $minWords) * 100)
+  $intersection = [System.Collections.Generic.HashSet[string]]::new($set1, [StringComparer]::OrdinalIgnoreCase)
+  $intersection.IntersectWith($set2)
+  $union = [System.Collections.Generic.HashSet[string]]::new($set1, [StringComparer]::OrdinalIgnoreCase)
+  $union.UnionWith($set2)
+  return [math]::Round(($intersection.Count / $union.Count) * 100)
 }
 
+
+# Counts how many app objects really have a newer version available.
+#
+# This exists because the dashboard tile and the update scan were answering two DIFFERENT questions
+# with the same word. The tile asked Intune ("-Update $true", i.e. Intune's own UpdateAvailable
+# flag); the scan compares the deployed version against the newest one WinTuner and WinGet know
+# about. The two numbers can differ by any amount, and the tile is the first number anyone sees.
+#
+# It uses exactly the helpers the scan uses - Resolve-WingetIdForApp, Get-FreshLatestPackageVersion,
+# Test-IsNewerVersion, Find-NewerTenantPackageTarget - so the VERDICT on a single app cannot drift
+# apart from the scan's. What it deliberately does not do is the scan's other work: resolving upload
+# targets, grouping predecessors, marking blocked rows. A tile needs a number, not a work list.
+#
+# Returns a hashtable so nothing is silently unaccounted for:
+#   Outdated              - a newer version exists and Intune does not already have it
+#   UpToDate              - checked, nothing newer
+#   AlreadyNewerInTenant  - newer version exists but is ALREADY deployed, so there is nothing to do
+#   NoWingetId            - no package id could be resolved, so it cannot be compared at all
+#   Failed                - the lookup itself failed
+#   Checked               - how many were actually looked at
+# Outdated + UpToDate + AlreadyNewerInTenant + NoWingetId + Failed == Checked, by construction.
+function Measure-AvailableUpdates {
+  param(
+    [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Apps,
+    # Called per app so a caller with a progress bar can show movement. Kept optional: the dashboard
+    # has no bar of its own.
+    [scriptblock]$OnProgress
+  )
+  $out = @{ Outdated = 0; UpToDate = 0; AlreadyNewerInTenant = 0; NoWingetId = 0; Failed = 0; Checked = 0 }
+  $usable = @($Apps | Where-Object { $_ -and $_.CurrentVersion -and $_.GraphId })
+  if ($usable.Count -eq 0) { return $out }
+
+  # Resolved once per app up front, exactly as the scan does - Find-NewerTenantPackageTarget needs
+  # the whole map to answer "is a newer version already in the tenant".
+  $resolvedIds = @{}
+  foreach ($a in $usable) {
+    try { $resolvedIds[[string]$a.GraphId] = [string](Resolve-WingetIdForApp -App $a) }
+    catch { $resolvedIds[[string]$a.GraphId] = '' }
+  }
+
+  # One lookup per PACKAGE, not per app: several deployed versions of the same product share it.
+  $freshByPackageId = @{}
+  $index = 0
+  foreach ($app in $usable) {
+    $index++
+    $out.Checked++
+    if ($OnProgress) { try { & $OnProgress $index $usable.Count ([string]$app.Name) } catch { } }
+
+    $wingetId = [string]$resolvedIds[[string]$app.GraphId]
+    if ([string]::IsNullOrWhiteSpace($wingetId)) { $out.NoWingetId++; continue }
+    try {
+      $cacheKey = $wingetId.ToLowerInvariant()
+      if (-not $freshByPackageId.ContainsKey($cacheKey)) {
+        $freshByPackageId[$cacheKey] = Get-FreshLatestPackageVersion -PackageId $wingetId
+      }
+      $fresh = $freshByPackageId[$cacheKey]
+      if (-not $fresh -or -not $fresh.Latest) { $out.Failed++; continue }
+      $latest = [string]$fresh.Latest
+      if (-not (Test-IsNewerVersion $latest $app.CurrentVersion)) { $out.UpToDate++; continue }
+      # A newest version Intune ALREADY holds is not an outstanding update - counting it would make
+      # the tile demand an upload that could only produce a duplicate.
+      #
+      # Two ways it can already be there, and BOTH have to be checked. Find-NewerTenantPackageTarget
+      # only matches something STRICTLY newer than $latest; the ordinary case is the tenant holding
+      # exactly $latest, which needs the equal-version lookup. Missing that counted every already
+      # updated product as outstanding again.
+      $alreadyThere = $false
+      $tenantNewer = Find-NewerTenantPackageTarget -Apps $usable -PackageId $wingetId -Version $latest `
+        -ExcludeGraphId ([string]$app.GraphId) -ResolvedIds $resolvedIds
+      if ($tenantNewer -and $tenantNewer.GraphId) {
+        $alreadyThere = $true
+      } else {
+        try {
+          $sameVersion = Find-ExistingUpdateTarget -Apps $usable -PackageId $wingetId -Version $latest `
+            -ExcludeGraphId ([string]$app.GraphId) -ResolvedIds $resolvedIds
+          if ($sameVersion -and $sameVersion.GraphId) { $alreadyThere = $true }
+        } catch {
+          # Ambiguous means several objects carry that package id AND version - it is emphatically
+          # present, just messily. Either way it is not a missing upload.
+          $alreadyThere = $true
+        }
+      }
+      if ($alreadyThere) { $out.AlreadyNewerInTenant++ } else { $out.Outdated++ }
+    } catch {
+      $out.Failed++
+    }
+  }
+  return $out
+}
 
 function Show-VersionPickerDialog {
   param([string]$Title,[string[]]$Versions)

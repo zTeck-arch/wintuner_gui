@@ -1,4 +1,4 @@
-# Returns the current-language string for $Key (falls back to English, then the key
+﻿# Returns the current-language string for $Key (falls back to English, then the key
 # name itself, so a missing translation never crashes the UI).
 function Get-UiString {
   param([Parameter(Mandatory=$true)][string]$Key)
@@ -100,6 +100,10 @@ function Test-AppUpdateAvailable {
     ReleaseNotes    = $null
     ErrorMessage    = $null
     NotConfigured   = $false
+    # 404 ist etwas anderes als "kein Netz": das Repository heisst anders oder hat noch kein
+    # Release. Ohne diese Unterscheidung stand in der Statuszeile "bitte Internetverbindung
+    # pruefen", waehrend die Verbindung tadellos war.
+    NotFound        = $false
   }
 
   # No self-update repo configured (see $script:githubRepo at the top of the file) –
@@ -111,7 +115,9 @@ function Test-AppUpdateAvailable {
   }
 
   try {
-    Write-Log "Checking for app updates from GitHub..."
+    # "App updates" hiess hier das Programm selbst - im Protokoll direkt neben dem Intune-Scan
+    # gelesen, war das nicht zu unterscheiden. Jetzt sagt die Zeile, worum es geht.
+    Write-Log ("Checking GitHub for a newer version of WinTuner GUI itself ({0})..." -f $script:githubApiUrl)
 
     $headers = @{
       'Accept'     = 'application/vnd.github.v3+json'
@@ -162,10 +168,54 @@ function Test-AppUpdateAvailable {
 
   } catch {
     $result.ErrorMessage = $_.Exception.Message
-    Write-Log "Update check failed: $($_.Exception.Message)"
+    $status = 0
+    try { if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode } } catch { $status = 0 }
+    if ($status -eq 404 -or $_.Exception.Message -match '404') {
+      $result.NotFound = $true
+      Write-Log ("Update check: GitHub answered 404 for {0}. Either the repository '{1}' does not exist under that name (renamed?) or it has no published release yet." -f $script:githubApiUrl, $script:githubRepo)
+    } else {
+      Write-Log "Update check failed: $($_.Exception.Message)"
+    }
   }
 
   return $result
+}
+
+# Refuses a self-update URL that is not plain HTTPS, and names the host it is about to trust.
+#
+# The two URLs the self-update fetches - the script and its checksum - are taken verbatim from the
+# GitHub API response and were handed to Invoke-WebRequest unexamined. Nothing forced the scheme, so
+# an 'http://' or a 'file://' in that response would have been followed just as happily, and the log
+# never said which host the replacement of the running script came from.
+#
+# This is NOT presented as protection against a compromised GitHub account or a hostile release: if
+# the API answer itself is untrustworthy, so is any URL in it, and the allowlist below would wave it
+# through. What it does buy is real but modest: no downgrade to an unencrypted transport, no local or
+# UNC path masquerading as a download, and a host recorded in the log for afterwards.
+#
+# Pure so it can be tested without the network.
+function Test-SelfUpdateUrlAcceptable {
+  param(
+    [string]$Url,
+    [string[]]$AllowedHosts = @('github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com', 'api.github.com')
+  )
+  $out = [pscustomobject]@{ Acceptable = $false; UrlHost = ''; Reason = '' }
+  if ([string]::IsNullOrWhiteSpace($Url)) { $out.Reason = 'empty URL'; return $out }
+  $uri = $null
+  if (-not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$uri)) { $out.Reason = 'not an absolute URL'; return $out }
+  $out.UrlHost = [string]$uri.Host
+  if ($uri.Scheme -ne 'https') { $out.Reason = ("scheme '{0}' is not https" -f $uri.Scheme); return $out }
+  # Subdomain match is deliberate: GitHub serves release assets from hosts it changes over time.
+  $isAllowed = $false
+  foreach ($allowed in $AllowedHosts) {
+    if ([string]::Equals($out.UrlHost, $allowed, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $out.UrlHost.EndsWith('.' + $allowed, [System.StringComparison]::OrdinalIgnoreCase)) {
+      $isAllowed = $true; break
+    }
+  }
+  if (-not $isAllowed) { $out.Reason = ("host '{0}' is not a known GitHub download host" -f $out.UrlHost); return $out }
+  $out.Acceptable = $true
+  return $out
 }
 
 # How many previous versions stay recoverable next to the script. Two is enough to step back past a
@@ -207,6 +257,46 @@ function Remove-OldSelfUpdateBackups {
   }
 }
 
+# Replaces the running script at $CurrentPath with the already-staged file at $StagedPath, keeping a
+# timestamped backup, then VERIFIES the on-disk result carries $ExpectedVersion before returning.
+#
+# Two things this guards against, learned the hard way:
+#   * [IO.File] methods take literal paths for source AND destination. Copy-Item/Move-Item still glob
+#     '[' and ']' in -Path/-Destination, so a script in a folder like 'WinTuner [test]' had its move
+#     silently skipped while the caller reported success.
+#   * Reading the file back and checking the version turns ANY silent non-replacement (bracket path,
+#     locked file, a move that failed without throwing) into a thrown error instead of a false
+#     "update installed" that leaves the user on the old version.
+function Install-SelfUpdateFile {
+  param(
+    [Parameter(Mandatory)][string]$StagedPath,
+    [Parameter(Mandatory)][string]$CurrentPath,
+    [Parameter(Mandatory)][string]$BackupPath,
+    [Parameter(Mandatory)][string]$ExpectedVersion
+  )
+  if (Test-Path -LiteralPath $CurrentPath) {
+    [System.IO.File]::Copy($CurrentPath, $BackupPath, $true)
+    Write-Log "Backup created: $BackupPath"
+    Remove-OldSelfUpdateBackups -ScriptPath $CurrentPath -Keep $script:selfUpdateBackupsToKeep
+  }
+
+  try {
+    [System.IO.File]::Move($StagedPath, $CurrentPath, $true)
+  } catch {
+    if ((Test-Path -LiteralPath $BackupPath) -and -not (Test-Path -LiteralPath $CurrentPath)) {
+      try { [System.IO.File]::Copy($BackupPath, $CurrentPath, $true) } catch { }
+    }
+    throw
+  }
+
+  $installed = Get-Content -LiteralPath $CurrentPath -Raw -ErrorAction Stop
+  $installedMatch = [regex]::Match($installed, '(?m)^\s*\$script:appVersion\s*=\s*["''](?<version>[^"'']+)["'']\s*$')
+  if (-not $installedMatch.Success -or
+      -not (Test-VersionsEquivalent -Left ([string]$installedMatch.Groups['version'].Value) -Right $ExpectedVersion)) {
+    throw "Self-update verification failed: the script on disk does not report version $ExpectedVersion after replacement."
+  }
+}
+
 function Invoke-AppSelfUpdate {
   param(
     [Parameter(Mandatory=$true)]
@@ -233,10 +323,25 @@ function Invoke-AppSelfUpdate {
       throw (Get-UiString 'UpdPathUnknown')
     }
 
+    # Both URLs are checked before either is fetched: the checksum is what makes the script
+    # trustworthy, so a checksum from somewhere else is worth no more than no checksum at all.
+    foreach ($candidate in @(
+      @{ Label = 'script';   Url = $DownloadUrl },
+      @{ Label = 'checksum'; Url = $HashUrl })) {
+      $verdict = Test-SelfUpdateUrlAcceptable -Url ([string]$candidate.Url)
+      if (-not $verdict.Acceptable) {
+        Write-Log ("Self-update aborted: the {0} URL was rejected ({1}). URL: {2}" -f $candidate.Label, $verdict.Reason, $candidate.Url)
+        throw ((Get-UiString 'UpdUrlRejected') -f $candidate.Label, $verdict.Reason)
+      }
+    }
+
     Write-Log "Downloading update from: $DownloadUrl"
+    Write-Log ("Self-update hosts: script from '{0}', checksum from '{1}'." -f
+      (Test-SelfUpdateUrlAcceptable -Url $DownloadUrl).UrlHost,
+      (Test-SelfUpdateUrlAcceptable -Url $HashUrl).UrlHost)
     Update-Status (Get-UiString 'UpdDownloadingStatus')
 
-    $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) ("WinTunerGUI_{0}.ps1" -f [guid]::NewGuid().ToString('N'))
+    $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) ("WinTuner_GUI_ntg_{0}.ps1" -f [guid]::NewGuid().ToString('N'))
 
     # Temporarily clear PSDefaultParameterValues to prevent parameter binding conflicts
     # (wildcard entries like '*:ProgressAction' can corrupt URI resolution in some PS7 builds)
@@ -250,16 +355,19 @@ function Invoke-AppSelfUpdate {
     }
 
     # Validate download
-    if (-not (Test-Path $tempFile)) {
+    if (-not (Test-Path -LiteralPath $tempFile)) {
       throw "Download failed: temp file not found"
     }
-    $fileSize = (Get-Item $tempFile).Length
+    $fileSize = (Get-Item -LiteralPath $tempFile).Length
     if ($fileSize -lt 1000) {
       throw "Download failed: file too small ($fileSize bytes)"
     }
-    $content = Get-Content $tempFile -Raw -ErrorAction Stop
-    if ($content -notmatch 'WinTuner GUI') {
-      throw "Download validation failed: file doesn't appear to be WinTuner GUI"
+    $content = Get-Content -LiteralPath $tempFile -Raw -ErrorAction Stop
+    # Beide Namen gelten: der heruntergeladene Stand kann aus der Zeit vor der Umbenennung
+    # stammen (dann steht "WinTuner GUI" darin) oder danach. Nur einen zu akzeptieren, laesst
+    # genau den einen Ubergang scheitern, der die Umbenennung ueberhaupt ausliefert.
+    if ($content -notmatch 'WinTuner GUI' -and $content -notmatch 'WinTuner GUI') {
+      throw "Download validation failed: file appears to be neither WinTuner GUI nor its predecessor WinTuner GUI"
     }
 
     # A checksum is mandatory for in-place updates. Network errors and malformed checksum files are
@@ -274,7 +382,7 @@ function Invoke-AppSelfUpdate {
     }
     $expectedHash = (($hashText.Trim() -split '\s+')[0]).ToUpperInvariant()
     if ($expectedHash -notmatch '^[A-F0-9]{64}$') { throw 'The release checksum asset is malformed.' }
-    $actualHash = (Get-FileHash $tempFile -Algorithm SHA256).Hash.ToUpperInvariant()
+    $actualHash = (Get-FileHash -LiteralPath $tempFile -Algorithm SHA256).Hash.ToUpperInvariant()
     if ($actualHash -ne $expectedHash) {
       throw "SHA256 mismatch: download may be corrupt or tampered! Expected: $expectedHash, Got: $actualHash"
     }
@@ -299,33 +407,21 @@ function Invoke-AppSelfUpdate {
     # contain". Older ones are pruned - see Remove-OldSelfUpdateBackups.
     $backupPath = "{0}.{1}.backup" -f $currentPath, (Get-Date -Format 'yyyyMMdd-HHmmss')
     $stagedPath = "$currentPath.update"
-    Copy-Item -Path $tempFile -Destination $stagedPath -Force -ErrorAction Stop
-    if (Test-Path $currentPath) {
-      Copy-Item -Path $currentPath -Destination $backupPath -Force -ErrorAction Stop
-      Write-Log "Backup created: $backupPath"
-      Remove-OldSelfUpdateBackups -ScriptPath $currentPath -Keep $script:selfUpdateBackupsToKeep
-    }
+    # Stage the verified bytes beside the running script (same volume), then replace-and-verify.
+    [System.IO.File]::Copy($tempFile, $stagedPath, $true)
+    Install-SelfUpdateFile -StagedPath $stagedPath -CurrentPath $currentPath -BackupPath $backupPath -ExpectedVersion $ExpectedVersion
+    Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
 
-    try {
-      Move-Item -Path $stagedPath -Destination $currentPath -Force -ErrorAction Stop
-    } catch {
-      if ((Test-Path $backupPath) -and -not (Test-Path $currentPath)) {
-        Copy-Item -Path $backupPath -Destination $currentPath -Force -ErrorAction SilentlyContinue
-      }
-      throw
-    }
-    Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
-
-    Write-Log "Script replaced successfully. Restart required."
+    Write-Log "Script replaced and verified ($ExpectedVersion). Restart required."
     return $true
 
   } catch {
     Write-Log "Self-update failed: $($_.Exception.Message)"
-    if ($tempFile -and (Test-Path $tempFile)) {
-      Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+    if ($tempFile -and (Test-Path -LiteralPath $tempFile)) {
+      Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
     }
-    if ($stagedPath -and (Test-Path $stagedPath)) {
-      Remove-Item $stagedPath -Force -ErrorAction SilentlyContinue
+    if ($stagedPath -and (Test-Path -LiteralPath $stagedPath)) {
+      Remove-Item -LiteralPath $stagedPath -Force -ErrorAction SilentlyContinue
     }
     [System.Windows.Forms.MessageBox]::Show(
       ((Get-UiString 'UpdSelfUpdateFailedDialog') -f $_.Exception.Message, "https://github.com/$($script:githubRepo)/releases/latest"),
@@ -363,6 +459,19 @@ function Invoke-UpdateCheckFeedback {
   $errorDetail = if ($UpdateResult -and $UpdateResult.Error) { $UpdateResult.Error } `
                  elseif ($UpdateResult -and $UpdateResult.ErrorMessage) { $UpdateResult.ErrorMessage } `
                  else { $null }
+
+  # 404: kein Netzproblem. Eigene Meldung, die den Repository-Namen nennt.
+  if ($UpdateResult -and $UpdateResult.NotFound) {
+    if ($isManual) {
+      [void][System.Windows.Forms.MessageBox]::Show(
+        ((Get-UiString 'UpdRepoNotFoundDialog') -f $script:githubRepo),
+        (Get-UiString 'UpdCheckFailedTitle'),
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Information)
+    }
+    Update-Status ((Get-UiString 'UpdRepoNotFoundStatus') -f $script:githubRepo)
+    return
+  }
 
   if ($errorDetail) {
     if ($isManual) {

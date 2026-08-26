@@ -1,8 +1,12 @@
-# --- Self-update source (GitHub) ---
-# Put YOUR OWN GitHub repository here in the form "owner/repo" to enable the built-in
-# "Check for Updates" feature against your releases. Leave it empty ("") to disable the
-# update check entirely (the button and the login auto-check are then skipped silently).
-$script:githubRepo  = ""
+﻿# --- Self-update source (GitHub) ---
+# Repository in der Form "owner/repo", gegen dessen Releases die Selbstaktualisierung prueft.
+# Ist der Wert leer (""), sind Knopf und Startsuche stillschweigend abgeschaltet.
+#
+# Der Release-Arbeitsablauf ueberschreibt diese Zeile beim Bauen des Release-Artefakts mit
+# $env:GITHUB_REPOSITORY (siehe .github/workflows/release.yml, "Validate tag and build release
+# assets"). Eine heruntergeladene Fassung traegt also immer das Repository, aus dem sie stammt -
+# auch nach einer Umbenennung. Der Eintrag hier gilt fuer selbst gebaute Kopien aus src\.
+$script:githubRepo  = "zTeck-arch/wintuner_gui"
 $script:githubApiUrl = if ($script:githubRepo) { "https://api.github.com/repos/$($script:githubRepo)/releases/latest" } else { "" }
 $script:updateAssetName = 'WinTuner_GUI_ntg.ps1'
 $script:updateHashAssetName = 'WinTuner_GUI_ntg.ps1.sha256'

@@ -133,8 +133,13 @@ function Invoke-VersionCleanup {
             [void]$protectedItems.Add(("{0} {1} - {2}" -f $g.Name, $item.Raw, $reasonText))
           } else {
             $reason = 'Intune still reports successful installations'
-            $installedOn = if ($null -ne $installationProbe.Count) { [int]$installationProbe.Count } else { 0 }
-            $reasonText = (Get-UiString 'CleanupKeptReasonInstalled') -f $installedOn
+            # Count can be $null when only the device-status path answered (it stops at the first hit
+            # and never counts). Show the no-number message then instead of a misleading "0 device(s)".
+            $reasonText = if ($null -ne $installationProbe.Count) {
+              (Get-UiString 'CleanupKeptReasonInstalled') -f ([int]$installationProbe.Count)
+            } else {
+              Get-UiString 'CleanupKeptReasonInstalledNoCount'
+            }
             [void]$protectedItems.Add(("{0} {1} - {2}" -f $g.Name, $item.Raw, $reasonText))
           }
           Write-Log ("Version cleanup: kept {0} {1} ({2}) because {3}." -f $g.Name, $item.Raw, $item.App.GraphId, $reason)
@@ -204,6 +209,13 @@ function Update-SingleApp {
     EffectiveVersion = $null
     OldVersionRemoved = $false
     AssignmentsMoved = $false
+    NewVersionAssignmentsCleared = $false
+    # Separate from OldVersionRemoved on purpose. "Superseded" and "deleted" are two different
+    # outcomes for the predecessor, and the performance record used to print the word for the
+    # first while reporting the second - so a run that DELETED two apps read as if it had merely
+    # superseded them, and the "old versions removed" tally stayed at zero.
+    SupersedenceCreated = $false
+    PredecessorHadAssignments = $false
     SupersedenceSkipped = $false
     NewAppId = $ExistingTargetGraphId
   }
@@ -306,6 +318,8 @@ function Update-SingleApp {
 
       if ($safeToDelete) {
         try {
+          $null = Save-AppScopeSnapshot -AppId $GraphId -AppName $AppName -Version $CurrentVersion `
+            -Reason (Get-UiString 'ScopeSnapshotReasonConsolidation')
           Invoke-WtRemoveWin32App -AppId $GraphId
           $result.OldVersionRemoved = $true
           Write-Log ("Consolidation: removed unused old app {0} {1} ({2}); target {3} already existed." -f $AppName, $CurrentVersion, $GraphId, $ExistingTargetGraphId)
@@ -371,6 +385,9 @@ function Update-SingleApp {
     $preDeployInstallationProbe = $null
     if ($GraphId) {
       $assignmentProbe = Get-AppAssignmentProbe -AppId $GraphId -AppName $AppName
+      # Remembered for the performance record: whether the predecessor was assigned decides whether
+      # a hand-over happened at all, and the record has to say so.
+      $result.PredecessorHadAssignments = [bool]($assignmentProbe.Succeeded -and $assignmentProbe.HasAssignments)
       if ($assignmentProbe.Succeeded -and -not $assignmentProbe.HasAssignments) {
         $deployWithoutSupersedence = $true
         $result.SupersedenceSkipped = $true
@@ -402,13 +419,20 @@ function Update-SingleApp {
 
     if ($GraphId -and -not $deployWithoutSupersedence) {
       $deploySplat.GraphId = $GraphId
-      # -KeepAssignments means "keep the assignments ON THE APP THAT IS SUPERSEDED" (module help
-      # text). Setting it unconditionally is what left BOTH versions in scope after an update, so
-      # it is now the inverse of the "move assignments to the new version" option.
+      # IMPORTANT module semantics: Deploy-WtWin32App ALWAYS copies the predecessor's assignments
+      # onto the new version during supersedence. -KeepAssignments does NOT stop that copy; it only
+      # stops the module from emptying the OLD app afterwards. So:
+      #   * hand-over ON  (default): deploy without KeepAssignments -> module copies to new AND empties
+      #     old. Move-AppAssignments below is a safety net. Result: new assigned, old empty.
+      #   * hand-over OFF: deploy WITH KeepAssignments -> old keeps its assignments. The new version is
+      #     still assigned by the copy, so we explicitly clear it after resolution (see below) to make
+      #     "the new one is deployed unassigned" actually true.
       if (-not $script:settings.MoveAssignmentsOnUpdate) { $deploySplat.KeepAssignments = $true }
       $deploySplat.PackageId = $wingetId
       $deploySplat.Version = $effectiveVersion
       Write-Log ("Deploying by GraphId ({0}) + PackageId/Version (KeepAssignments={1})" -f $GraphId, [bool]$deploySplat.KeepAssignments)
+      # Handing the predecessor GraphId to the module IS the supersedence request.
+      $result.SupersedenceCreated = $true
     } else {
       $deploySplat.PackageId = $wingetId
       $deploySplat.Version = $effectiveVersion
@@ -455,8 +479,35 @@ function Update-SingleApp {
         if (Move-AppAssignments -OldAppId $GraphId -NewAppId $newAppId -AppName $AppName) {
           $result.AssignmentsMoved = $true
         }
+        # Record the hand-over even when Move-AppAssignments found nothing left to move.
+        #
+        # That is the NORMAL outcome: Deploy-WtWin32App always copies the predecessor's assignments
+        # onto the new version and clears the old one, so by the time we look there is nothing left.
+        # Move-AppAssignments then returns early without recording, and the record showed no
+        # assignment work at all for a run whose whole point was handing the scope over.
+        if ($result.PredecessorHadAssignments -and -not $result.AssignmentsMoved) {
+          try {
+            Add-SessionActivity -Kind 'AssignmentsChanged' -Name $AppName `
+              -ToVersion $effectiveVersion -Detail (Get-UiString 'ActivityAssignmentHandedOver')
+          } catch { }
+        }
       } else {
         Write-Log ("Assignments: the new target GraphId for {0} could not be resolved from Intune - predecessor keeps its assignments (check the portal)." -f $AppName)
+      }
+    }
+
+    # Hand-over OFF: the module copied the predecessor's assignments onto the new version anyway.
+    # Clear them so the new app is genuinely unassigned, matching what the update notice promised.
+    # The old app keeps its assignments (KeepAssignments was set on the deploy).
+    if ($GraphId -and -not $deployWithoutSupersedence -and -not $script:settings.MoveAssignmentsOnUpdate) {
+      if ($newAppId) {
+        if (Clear-AppAssignments -AppId $newAppId -AppName $AppName) {
+          $result.NewVersionAssignmentsCleared = $true
+        } else {
+          Write-Log ("Assignments: could not clear the new version of {0} - it may remain assigned alongside the old one (check the portal)." -f $AppName)
+        }
+      } else {
+        Write-Log ("Assignments: new target GraphId for {0} not resolved - cannot clear the new version's copied assignments (check the portal)." -f $AppName)
       }
     }
 
@@ -476,6 +527,8 @@ function Update-SingleApp {
         $postDeployInstallationProbe.Succeeded -and -not $postDeployInstallationProbe.HasInstallations)
       if ($safeToDeleteUnusedPredecessor) {
         try {
+          $null = Save-AppScopeSnapshot -AppId $GraphId -AppName $AppName -Version $CurrentVersion `
+            -Reason (Get-UiString 'ScopeSnapshotReasonUpdateCleanup')
           Invoke-WtRemoveWin32App -AppId $GraphId
           $result.Message += " (unused old version removed; no supersedence created)"
           $result.OldVersionRemoved = $true
@@ -567,6 +620,15 @@ function Update-SingleApp {
 # The performance record (Leistungsnachweis) has its OWN language, independent of the app UI
 # language, because it is pasted into a ticket system. Default German; switchable in the dialog.
 $script:leistungLang = 'de'
+# Der Kunde ist die DOMAENE, nicht das Konto: beim Dienstleister liegen die Rechte oft auf einem
+# zweiten Konto desselben Tenants. Leer bleibt leer - ein Eintrag ohne Tenant wird nie einem
+# Kunden zugeschlagen.
+function Get-ActivityTenantDomain {
+  param([string]$Upn)
+  if ([string]::IsNullOrWhiteSpace($Upn) -or $Upn -notmatch '@') { return "" }
+  try { return ($Upn -split '@')[-1].Trim().ToLowerInvariant() } catch { return "" }
+}
+
 function Get-SessionLeistungstext {
   param([string]$Lang)
   if ([string]::IsNullOrWhiteSpace($Lang)) { $Lang = $script:leistungLang }
@@ -574,25 +636,35 @@ function Get-SessionLeistungstext {
   $tpl = if ($Lang -eq 'en') {
     @{ Intro = "The following applications were updated and deployed in the customer's Intune environment, including the required assignments and supersedence of old applications:"
        None = "Nothing has been recorded for this tenant in this session yet."
-       Removed = " (old version superseded)"
-       RemovedMany = " ({0} old versions superseded)"
+       NotSignedIn = "Sign in to a tenant to see its performance record."
+       OrphanHead = "Note: {0} entr(y/ies) below could not be attributed to a tenant - they were recorded while the session was disconnected. Please check whether they belong to this customer:"
+       Superseded = " (predecessor superseded, kept in Intune)"
+       SupersededMany = " ({0} predecessors superseded, kept in Intune)"
+       Removed = " (predecessor deleted)"
+       RemovedMany = " ({0} predecessors deleted)"
+       SupersededAndRemoved = " ({0} superseded and kept, {1} deleted)"
        HeadUpdates = "Updated:"
        HeadDeployed = "Newly deployed:"
        HeadVersionRemoved = "Old versions removed:"
        HeadSupersededRemoved = "Superseded apps deleted:"
        HeadAssignments = "Assignments changed:"
-       Summary = "Summary: {0} app(s) updated, {1} old version(s) superseded during the update, {2} newly deployed, {3} old version(s) removed, {4} superseded app(s) deleted." }
+       Summary = "Summary: {0} app(s) updated, {1} predecessor(s) superseded and kept, {2} predecessor(s) deleted during the update, {3} newly deployed, {4} assignment change(s), {5} old version(s) removed by the version cleanup, {6} superseded app(s) deleted manually." }
   } else {
     @{ Intro = "Folgende Anwendungen in der Intune Kundenumgebung aktualisiert und bereitgestellt sowie benötigte Zuweisungen und Ablöse von alten Anwendungen vorgenommen:"
        None = "Für diesen Tenant wurde in dieser Sitzung noch nichts erfasst."
-       Removed = " (alte Version abgelöst)"
-       RemovedMany = " ({0} alte Versionen abgelöst)"
+       NotSignedIn = "Bitte an einem Tenant anmelden, um dessen Leistungsnachweis zu sehen."
+       OrphanHead = "Hinweis: {0} Eintrag/Einträge konnten keinem Tenant zugeordnet werden - sie wurden erfasst, während die Sitzung getrennt war. Bitte prüfen, ob sie zu diesem Kunden gehören:"
+       Superseded = " (Vorgänger abgelöst, in Intune behalten)"
+       SupersededMany = " ({0} Vorgänger abgelöst, in Intune behalten)"
+       Removed = " (Vorgänger gelöscht)"
+       RemovedMany = " ({0} Vorgänger gelöscht)"
+       SupersededAndRemoved = " ({0} abgelöst und behalten, {1} gelöscht)"
        HeadUpdates = "Aktualisiert:"
        HeadDeployed = "Neu bereitgestellt:"
        HeadVersionRemoved = "Alte Versionen entfernt:"
        HeadSupersededRemoved = "Abgelöste Apps gelöscht:"
        HeadAssignments = "Zuweisungen geändert:"
-       Summary = "Zusammenfassung: {0} App(s) aktualisiert, {1} alte Version(en) beim Update abgelöst, {2} neu bereitgestellt, {3} alte Version(en) entfernt, {4} abgelöste App(s) gelöscht." }
+       Summary = "Zusammenfassung: {0} App(s) aktualisiert, {1} Vorgänger abgelöst und behalten, {2} Vorgänger beim Update gelöscht, {3} neu bereitgestellt, {4} Zuweisungsänderung(en), {5} alte Version(en) durch die Versionsbereinigung entfernt, {6} abgelöste App(s) manuell gelöscht." }
   }
 
   $lines = [System.Collections.Generic.List[string]]::new()
@@ -603,16 +675,49 @@ function Get-SessionLeistungstext {
   # tenant are displayed in a separate, read-only header and intentionally excluded from this
   # copyable ticket text.
   $tenant = [string]$script:currentUserUpn
+  # No tenant = signed out: NEVER fall back to "all tenants". This text is meant to be pasted into a
+  # customer ticket, so showing another customer's activity here would leak it. Ask to sign in instead.
+  if ([string]::IsNullOrWhiteSpace($tenant)) {
+    $lines.Add($tpl.NotSignedIn)
+    return ($lines -join "`r`n")
+  }
   # The previous session's record is filtered by tenant just like the current one - a record for
   # customer A must never appear while customer B is signed in.
+  #
+  # Verglichen wird die DOMAENE, nicht die ganze Adresse: beim Dienstleister liegen die Rechte
+  # regelmaessig auf einem zweiten Konto desselben Kunden, und wer sich damit anmeldet, sah seinen
+  # eigenen Nachweis nicht mehr. Dieselbe Grenze wie bei den Gruppen-Favoriten - der Kunde ist die
+  # Domaene, nicht das Konto.
+  $tenantDomain = Get-ActivityTenantDomain -Upn $tenant
   $source = if ($script:leistungShowPrevious) { $script:previousSessionActivity } else { $script:sessionActivity }
-  $entries = if ($source) {
-    if ([string]::IsNullOrWhiteSpace($tenant)) { @($source) }
-    else { @($source | Where-Object { [string]::Equals([string]$_.Tenant, $tenant, [System.StringComparison]::OrdinalIgnoreCase) }) }
-  } else { @() }
+  $all = if ($source) { @($source) } else { @() }
+  $entries = @($all | Where-Object {
+    $d = Get-ActivityTenantDomain -Upn ([string]$_.Tenant)
+    $d -and $tenantDomain -and [string]::Equals($d, $tenantDomain, [System.StringComparison]::OrdinalIgnoreCase)
+  })
+  # Eintraege OHNE Tenant konnten nicht zugeordnet werden - so etwas entstand, wenn waehrend eines
+  # Laufs getrennt wurde (behoben, aber alte Aufzeichnungen tragen es noch). Sie werden getrennt und
+  # ausdruecklich benannt angehaengt, statt sie stillschweigend diesem Kunden zuzuschlagen: sie
+  # koennten von einem anderen sein, und dieser Text landet in einem Kundenticket.
+  $orphans = @($all | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Tenant) })
+  $orphanLines = [System.Collections.Generic.List[string]]::new()
+  if ($orphans.Count -gt 0) {
+    $orphanLines.Add("")
+    $orphanLines.Add($tpl.OrphanHead -f $orphans.Count)
+    foreach ($o in $orphans) {
+      $from = [string]$o.FromVersion; $to = [string]$o.ToVersion
+      $versions = if ($from -and $to) { "$from -> $to" } elseif ($to) { $to } else { $from }
+      $stamp = ''
+      $ts = $o.Timestamp -as [datetime]
+      if ($null -ne $ts) { $stamp = " [{0:dd.MM.yyyy HH:mm}]" -f $ts }
+      $orphanLines.Add("- $([string]$o.Name)$(if ($versions) { ": $versions" })$stamp")
+    }
+    Write-Log ("Performance record: {0} entr(y/ies) without a tenant were listed separately - they were recorded while the session was disconnected." -f $orphans.Count)
+  }
   if ($entries.Count -eq 0) {
     $lines.Add($tpl.None)
-    return ($lines -join "`r`n")
+    foreach ($l in $orphanLines) { $lines.Add($l) }
+    return (($lines -join "`r`n").TrimEnd())
   }
 
   # Entries from older releases carry no Kind - they were always updates.
@@ -629,6 +734,7 @@ function Get-SessionLeistungstext {
   }
 
   $removedCount = 0
+  $supersededKeptCount = 0
   $updates = @(if ($byKind.ContainsKey('Update')) { $byKind['Update'] } else { @() })
   $updateGroupCount = 0
   if ($updates.Count -gt 0) {
@@ -645,7 +751,7 @@ function Get-SessionLeistungstext {
         $groups[$key] = [pscustomobject]@{
           Name = [string]$item.Name; ToVersion = [string]$item.ToVersion
           From = [System.Collections.Generic.List[string]]::new()
-          SortKeys = [System.Collections.Generic.List[string]]::new(); Removed = 0
+          SortKeys = [System.Collections.Generic.List[string]]::new(); Removed = 0; Superseded = 0
         }
         [void]$groupOrder.Add($key)
       }
@@ -660,7 +766,13 @@ function Get-SessionLeistungstext {
         [void]$groups[$key].SortKeys.Add(('{0:D10}.{1:D10}.{2:D10}.{3:D10}' -f
           [uint64]$padded[0], [uint64]$padded[1], [uint64]$padded[2], [uint64]$padded[3]))
       }
-      if ($item.OldVersionRemoved) { $groups[$key].Removed++; $removedCount++ }
+      # Deleted and superseded-but-kept are counted apart, so the line can name what really
+      # happened to each predecessor instead of calling every outcome "superseded".
+      if ($item.OldVersionRemoved) {
+        $groups[$key].Removed++; $removedCount++
+      } elseif ($item.PSObject.Properties['SupersedenceCreated'] -and $item.SupersedenceCreated) {
+        $groups[$key].Superseded++; $supersededKeptCount++
+      }
     }
     $updateGroupCount = $groupOrder.Count
     foreach ($key in $groupOrder) {
@@ -673,8 +785,12 @@ function Get-SessionLeistungstext {
       }
       $ordered = @($pairs | Sort-Object -Property Key | ForEach-Object { $_.Version })
       $suffix = ""
-      if ($g.Removed -gt 0) {
+      if ($g.Removed -gt 0 -and $g.Superseded -gt 0) {
+        $suffix = $tpl.SupersededAndRemoved -f $g.Superseded, $g.Removed
+      } elseif ($g.Removed -gt 0) {
         $suffix = if ($g.Removed -eq 1) { $tpl.Removed } else { $tpl.RemovedMany -f $g.Removed }
+      } elseif ($g.Superseded -gt 0) {
+        $suffix = if ($g.Superseded -eq 1) { $tpl.Superseded } else { $tpl.SupersededMany -f $g.Superseded }
       }
       $lines.Add("- $($g.Name): $($ordered -join ', ') -> $($g.ToVersion)$suffix")
     }
@@ -703,14 +819,14 @@ function Get-SessionLeistungstext {
     $lines.Add("")
   }
 
-  # The assignment tally used to be reported here too, but AssignmentsChanged is never recorded as a
-  # session activity, so it was always "0 assignment change(s)" - which read as "no assignments were
-  # made" even though a deployment always sets them. The intro sentence credits the assignments
-  # qualitatively; the summary now counts only what is actually tracked.
+  # Assignment changes ARE tracked now (deploy, settings change, and the hand-over during an update
+  # - including the case where the module had already moved them, which used to go unrecorded), so
+  # the summary counts them instead of staying silent about them.
   $countOf = { param($k) @(if ($byKind.ContainsKey($k)) { $byKind[$k] } else { @() }).Count }
-  $lines.Add(($tpl.Summary -f $updateGroupCount, $removedCount,
-    (& $countOf 'Deployed'), (& $countOf 'VersionRemoved'),
-    (& $countOf 'SupersededRemoved')))
+  $lines.Add(($tpl.Summary -f $updateGroupCount, $supersededKeptCount, $removedCount,
+    (& $countOf 'Deployed'), (& $countOf 'AssignmentsChanged'),
+    (& $countOf 'VersionRemoved'), (& $countOf 'SupersededRemoved')))
+  foreach ($l in $orphanLines) { $lines.Add($l) }
 
   return (($lines -join "`r`n").TrimEnd())
 }
@@ -732,15 +848,64 @@ function Get-SessionLeistungsHeader {
 # moment: the ticket is usually written after the work, often after the tool was already closed.
 # Each entry is therefore appended to disk as it happens - not only at shutdown, which a crash or
 # a forced close would skip.
-$script:activityHistoryPath = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'WinTunerGUI\activity-history.json'
+# Held in LocalApplicationData (per-user, not roamed), like the logs: it contains customer data
+# (tenant UPNs, app names, versions) and must not follow the user to other machines. The old Roaming
+# copy is migrated once on first start. See SECURITY.md for what it holds and how long.
+$script:activityHistoryPath = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'WinTunerGUI\activity-history.json'
+# Zwei Altlasten, in der Reihenfolge ihrer Entstehung: erst lag die Datei im Roaming-Profil,
+# dann unter dem alten Anwendungsnamen. Beide werden beim ersten Start berücksichtigt, damit
+# ein Nachweis aus einer der beiden Epochen nicht verschwindet - er ist nicht rekonstruierbar.
+$script:activityHistoryLegacyPaths = @(
+  (Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'WinTunerGUI\activity-history.json'),
+  (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'WinTunerGUI\activity-history.json'),
+  (Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'WinTunerGUI\activity-history.json')
+)
 $script:previousSessionActivity = @()
+
+# Drops entries older than the retention window (same window as the logs). The record only ever needs
+# the last and the previous session, not months of customer history sitting on disk.
+function Select-RecentActivity {
+  param([object[]]$Entries, [int]$RetentionWeeks = $script:logRetentionWeeks, [datetime]$Now = (Get-Date))
+  $cutoff = $Now.AddDays(-7 * $RetentionWeeks)
+  return @($Entries | Where-Object {
+    # After JSON load Timestamp is already a DateTime; -as handles that and a parseable string, and
+    # yields $null for anything unreadable - which we keep rather than silently lose data.
+    $ts = $_.Timestamp -as [datetime]
+    if ($null -ne $ts) { $ts -ge $cutoff } else { $true }
+  })
+}
 
 function Import-PreviousSessionActivity {
   try {
+    # Einmal-Übernahme aus den alten Ablageorten. KOPIERT statt verschoben: wer auf eine Fassung
+    # vor der Umbenennung zurückrollt, muss seinen Nachweis dort noch vorfinden.
+    if (-not (Test-Path -LiteralPath $script:activityHistoryPath)) {
+      foreach ($legacy in @($script:activityHistoryLegacyPaths)) {
+        if (-not (Test-Path -LiteralPath $legacy)) { continue }
+        try {
+          $dir = Split-Path $script:activityHistoryPath -Parent
+          if ($dir -and -not (Test-Path -LiteralPath $dir)) { [void][System.IO.Directory]::CreateDirectory($dir) }
+          Copy-Item -LiteralPath $legacy -Destination $script:activityHistoryPath -Force -ErrorAction Stop
+          Write-Log ("Performance record taken over from its previous location: {0}" -f $legacy)
+        } catch {
+          Write-Log ("Performance record could not be taken over from {0}: {1}" -f $legacy, $_.Exception.Message)
+        }
+        break   # der erste vorhandene Ort gewinnt, in der Reihenfolge der Liste
+      }
+    }
     if (-not (Test-Path -LiteralPath $script:activityHistoryPath)) { return }
     $raw = Get-Content -LiteralPath $script:activityHistoryPath -Raw -ErrorAction Stop
     if ([string]::IsNullOrWhiteSpace($raw)) { return }
-    $script:previousSessionActivity = @($raw | ConvertFrom-Json)
+    $loaded = @($raw | ConvertFrom-Json)
+    $script:previousSessionActivity = Select-RecentActivity -Entries $loaded
+    if ($script:previousSessionActivity.Count -lt $loaded.Count) {
+      # Rewrite the file trimmed so the stale entries do not linger even if this session records nothing.
+      try {
+        $json = @($script:previousSessionActivity) | ConvertTo-Json -Depth 6
+        [IO.File]::WriteAllText($script:activityHistoryPath, $json, [Text.UTF8Encoding]::new($false))
+      } catch { Write-Log ("Trimmed performance record could not be rewritten: {0}" -f $_.Exception.Message) }
+      Write-Log ("Performance record: dropped {0} entr(y/ies) older than {1} week(s)." -f ($loaded.Count - $script:previousSessionActivity.Count), $script:logRetentionWeeks)
+    }
     Write-Log ("Performance record of the previous session loaded: {0} entr(y/ies)." -f $script:previousSessionActivity.Count)
   } catch {
     $script:previousSessionActivity = @()
@@ -759,6 +924,10 @@ function Add-SessionActivity {
     [string]$FromVersion = '',
     [string]$ToVersion = '',
     [bool]$OldVersionRemoved = $false,
+    # "The predecessor was superseded and kept" is a different outcome from "the predecessor was
+    # deleted". Both used to collapse into OldVersionRemoved, which the record then printed with the
+    # word for the first while counting it as neither.
+    [bool]$SupersedenceCreated = $false,
     [string]$Detail = ''
   )
   try {
@@ -766,19 +935,32 @@ function Add-SessionActivity {
     # fresh session - which would have silently dropped every entry until the list was non-empty,
     # i.e. always.
     if ($null -eq $script:sessionActivity) { return }
+    # NICHT $script:currentUserUpn allein: das Feld wird beim Trennen geleert. Wurde waehrend eines
+    # Laufs getrennt, landeten alle danach erfassten Updates mit LEEREM Tenant im Nachweis - und
+    # waren beim naechsten Start unter "Letzte Sitzung" nicht mehr auffindbar, weil der Nachweis
+    # nach Tenant filtert. Genau so sind drei Updates aus einem echten Lauf verloren gegangen.
+    # $script:activityTenantUpn haelt die zuletzt angemeldete Adresse und ueberlebt das Trennen.
+    $tenantForEntry = [string]$script:currentUserUpn
+    if ([string]::IsNullOrWhiteSpace($tenantForEntry)) { $tenantForEntry = [string]$script:activityTenantUpn }
     $script:sessionActivity.Add([pscustomobject]@{
       Kind              = $Kind
-      Tenant            = $script:currentUserUpn
+      Tenant            = $tenantForEntry
       Name              = $Name
       FromVersion       = $FromVersion
       ToVersion         = $ToVersion
       OldVersionRemoved = $OldVersionRemoved
+      SupersedenceCreated = $SupersedenceCreated
       Detail            = $Detail
       Timestamp         = Get-Date
     })
     # Saved immediately, like the update entries: the ticket is usually written after the tool has
     # been closed, and a crash must not take the record with it.
     Save-SessionActivity
+    # Jeder erfasste Eingriff aendert die Kachelzahlen des Dashboards. Der Merker sitzt HIER, weil
+    # das die eine Stelle ist, die jeder schreibende Weg durchlaeuft - Update-Lauf, Bereitstellung,
+    # Versionsbereinigung, Loeschen einer abgeloesten App, Zuweisungsaenderung. Sonst haette jeder
+    # dieser Wege daran denken muessen, und einer haette es vergessen.
+    $script:dashboardStale = $true
   } catch {
     Write-Log ("Performance record entry could not be added ({0} / {1}): {2}" -f $Kind, $Name, $_.Exception.Message)
   }
@@ -789,7 +971,7 @@ function Add-SessionActivity {
 function Save-SessionActivity {
   try {
     $dir = Split-Path $script:activityHistoryPath -Parent
-    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null }
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { [void][System.IO.Directory]::CreateDirectory($dir) }
     $json = @($script:sessionActivity) | ConvertTo-Json -Depth 6
     # Written through a temp file: a half-written record would be unreadable next time.
     $tmp = $script:activityHistoryPath + '.tmp'
@@ -797,5 +979,21 @@ function Save-SessionActivity {
     Move-Item -LiteralPath $tmp -Destination $script:activityHistoryPath -Force -ErrorAction Stop
   } catch {
     Write-Log ("Performance record could not be saved: {0}" -f $_.Exception.Message)
+  }
+}
+
+# Removes the performance record for good: both in-memory records (current AND the previous session,
+# which is otherwise re-offered as "last session") and the on-disk file. Without deleting the file
+# the customer data returned on the next start, so "cannot be undone" was not true.
+function Clear-SessionActivityRecord {
+  if ($null -ne $script:sessionActivity) { $script:sessionActivity.Clear() }
+  $script:previousSessionActivity = @()
+  try {
+    if (Test-Path -LiteralPath $script:activityHistoryPath) {
+      Remove-Item -LiteralPath $script:activityHistoryPath -Force -ErrorAction Stop
+    }
+    Write-Log "Performance record cleared: in-memory records emptied and activity-history.json deleted."
+  } catch {
+    Write-Log ("Performance record file could not be deleted: {0}" -f $_.Exception.Message)
   }
 }

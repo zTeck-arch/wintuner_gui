@@ -1,4 +1,4 @@
-# Reads only enough assignment data to answer whether an app is in scope. Every Intune assignment
+﻿# Reads only enough assignment data to answer whether an app is in scope. Every Intune assignment
 # counts here, including groups, All Users, All Devices and filtered assignments. A failed probe is
 # NEVER interpreted as "unassigned" because that could otherwise delete an app which is in use.
 function Get-GraphCollectionItems {
@@ -63,10 +63,15 @@ function Get-AppAssignmentProbe {
   param([Parameter(Mandatory)][string]$AppId, [string]$AppName = '')
 
   $out = [pscustomobject]@{
-    Succeeded      = $false
-    HasAssignments = $true
-    Count          = $null
-    ErrorMessage   = $null
+    Succeeded               = $false
+    HasAssignments          = $true
+    # Distinct question from HasAssignments: does at least one assignment actually INSTALL the app
+    # somewhere? A standalone exclusion or an uninstall intent counts as "has an assignment" but
+    # installs nobody. Hand-over confirmation before deleting a predecessor must use this stricter
+    # flag; the protective delete-block keeps using HasAssignments (any assignment protects).
+    HasInstallingAssignment = $true
+    Count                   = $null
+    ErrorMessage            = $null
   }
   if (-not (Test-GuidString $AppId)) {
     $out.ErrorMessage = 'invalid app id'
@@ -78,12 +83,19 @@ function Get-AppAssignmentProbe {
     $token = Get-WtToken -ErrorAction Stop
     if ([string]::IsNullOrWhiteSpace($token)) { throw 'WinTuner returned an empty access token.' }
     $headers = @{ Authorization = "Bearer $token"; 'Content-Type' = 'application/json' }
-    $uri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments?`$top=1"
-    $assignments = @((Invoke-RestMethod -Method GET -Uri $uri -Headers $headers -ErrorAction Stop).value)
+    # Read the FULL list (no $top=1): the installing-assignment test must see every assignment, and
+    # the count must be real rather than capped at 1.
+    $uri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments"
+    $assignments = @(Get-GraphCollectionItems -Uri $uri -Headers $headers)
     $out.Succeeded = $true
     $out.HasAssignments = ($assignments.Count -gt 0)
     $out.Count = $assignments.Count
-    Write-Log ("Assignment probe: '{0}' ({1}) has assignments={2}." -f $AppName, $AppId, $out.HasAssignments)
+    $out.HasInstallingAssignment = @($assignments | Where-Object {
+      $intent = ([string]$_.intent).ToLowerInvariant()
+      $targetType = if ($_.target) { [string]$_.target.'@odata.type' } else { '' }
+      ($intent -eq 'available' -or $intent -eq 'required') -and ($targetType -notmatch 'exclusionGroupAssignmentTarget')
+    }).Count -gt 0
+    Write-Log ("Assignment probe: '{0}' ({1}) has assignments={2}, installing={3}, count={4}." -f $AppName, $AppId, $out.HasAssignments, $out.HasInstallingAssignment, $out.Count)
   } catch {
     $out.ErrorMessage = $_.Exception.Message
     Write-Log ("Assignment probe failed for '{0}' ({1}); assignment state stays unknown: {2}" -f $AppName, $AppId, $out.ErrorMessage)
@@ -170,6 +182,10 @@ function Group-UpdateCandidates {
     $members = @($orderedMembers)
     $primary = $members[0]
     $scopeWarning = $false
+    # Kept apart from $scopeWarning on purpose. "I could not read the scope" and "the scopes really
+    # differ" call for different words and different reactions, and reporting the first as the second
+    # made the row claim a conflict that nobody could find in the portal.
+    $scopeUnknown = $false
     # Stays false for single-app rows: the scope probe below only runs for grouped predecessors,
     # and "unknown" must not be shown as "no assignment".
     $noAssignment = $false
@@ -189,14 +205,27 @@ function Group-UpdateCandidates {
       $probeSummaries = [System.Collections.Generic.List[string]]::new()
       foreach ($candidate in $members) {
         $probe = Get-AppAssignmentScopeProbe -AppId ([string]$candidate.GraphId) -AppName ([string]$candidate.Name)
-        if ($probe.Succeeded) { $signatures.Add([string]$probe.Signature); $probeSummaries.Add([string]$probe.Summary) } else { $scopeWarning = $true }
+        if ($probe.Succeeded) { $signatures.Add([string]$probe.Signature); $probeSummaries.Add([string]$probe.Summary) } else { $scopeUnknown = $true }
         $scopeLines.Add(("{0} {1} ({2}): {3}" -f $candidate.Name, $candidate.CurrentVersion, $candidate.GraphId, $probe.Summary))
       }
       # Only when EVERY probe succeeded and reported no target: an unverified probe must never be
       # presented as "no assignment", because that is exactly the state a cleanup would act on.
-      $noAssignment = ($probeSummaries.Count -eq $members.Count -and
-                       @($probeSummaries | Where-Object { $_ -ne '<none>' }).Count -eq 0)
-      if (@($signatures | Sort-Object -Unique).Count -gt 1) { $scopeWarning = $true }
+      # Test the SIGNATURE, which carries the '<none>' sentinel - Summary holds the localized UI text
+      # ("no assignment"/"keine Zuweisung"), so comparing it against '<none>' was never true.
+      $noAssignment = ($signatures.Count -eq $members.Count -and
+                       @($signatures | Where-Object { $_ -ne '<none>' }).Count -eq 0)
+      # '<none>' is NOT a scope, so it must not count as a differing one.
+      #
+      # The everyday case is one old version still assigned to a group and an even older one already
+      # unassigned. Comparing '<none>' against a real signature made that read "scopes differ", which
+      # sent the admin looking for a conflict that does not exist - and worse, taught them to ignore
+      # the warning. A predecessor without any assignment has nothing to hand over and nothing to
+      # reconcile: the consolidation simply takes the assignments of the one that has them.
+      #
+      # A real conflict is TWO OR MORE predecessors carrying DIFFERENT actual assignments, because
+      # then the single target ends up with their union and the admin should decide knowingly.
+      $realSignatures = @($signatures | Where-Object { $_ -ne '<none>' } | Sort-Object -Unique)
+      if ($realSignatures.Count -gt 1) { $scopeWarning = $true }
     }
     $versions = @($members | ForEach-Object { [string]$_.CurrentVersion } | Sort-Object -Unique)
     $existingTarget = @($members | Where-Object { $_.ExistingTargetGraphId } | Select-Object -First 1)
@@ -215,6 +244,7 @@ function Group-UpdateCandidates {
       Predecessors          = $members
       ConcreteCount         = $members.Count
       ScopeWarning          = $scopeWarning
+      ScopeUnknown          = $scopeUnknown
       NoAssignment          = $noAssignment
       ScopeDetails          = ($scopeLines -join "`r`n")
       # Carried over deliberately: if ANY member of the group cannot be updated safely (currently
@@ -244,22 +274,49 @@ function Expand-UpdateCandidateGroups {
 
 function Confirm-UpdateScopeConsolidation {
   param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Groups)
-  $warnings = @($Groups | Where-Object { $_.ScopeWarning })
+  # An unreadable scope is asked about too: not knowing is its own reason to stop and look, even
+  # though it is not a conflict.
+  $warnings = @($Groups | Where-Object {
+    $_.ScopeWarning -or ($_.PSObject.Properties['ScopeUnknown'] -and $_.ScopeUnknown)
+  })
   if ($warnings.Count -eq 0) { return $true }
   $lines = @($warnings | ForEach-Object { "{0} -> {1}`r`n{2}" -f $_.Name, $_.LatestVersion, $_.ScopeDetails })
   if (-not $script:settings.MoveAssignmentsOnUpdate) { $lines += "`r`n" + (Get-UiString 'UpdateScopeHandoverOff') }
-  $answer = [System.Windows.Forms.MessageBox]::Show(
-    ((Get-UiString 'UpdateScopeWarningDialog') -f ($lines -join "`r`n`r`n")),
-    (Get-UiString 'UpdateScopeWarningTitle'),
-    [System.Windows.Forms.MessageBoxButtons]::YesNo,
-    [System.Windows.Forms.MessageBoxIcon]::Warning)
-  return ($answer -eq [System.Windows.Forms.DialogResult]::Yes)
+  return (Confirm-ChangeAction `
+    -Text ((Get-UiString 'UpdateScopeWarningDialog') -f ($lines -join "`r`n`r`n")) `
+    -Title (Get-UiString 'UpdateScopeWarningTitle') `
+    -LogContext ("consolidation of {0} product(s) with differing or unreadable predecessor scopes" -f $warnings.Count))
 }
 
-# Determines whether Intune still reports successful installations for an app. The deprecated
-# installSummary path is intentionally not used. The documented device-status collection is paged
-# without a server-side filter (some tenants reject that filter) and evaluated locally. Any error
-# remains "unknown" and therefore blocks automatic deletion.
+# Aggregate install count from installSummary (installed devices + users), or $null if the call
+# failed. A missing counter reads as 0 - "none reported" is a real zero, only a failed CALL is
+# unknown. Used both as the cross-check for a zero deviceStatuses answer and as a fallback source.
+function Get-AppInstallSummaryCount {
+  param([Parameter(Mandatory)][string]$Base, [Parameter(Mandatory)][hashtable]$Headers)
+  try {
+    $summary = Invoke-RestMethod -Method GET -Uri "$Base/installSummary" -Headers $Headers -ErrorAction Stop
+    return ([int]$summary.installedDeviceCount + [int]$summary.installedUserCount)
+  } catch {
+    return $null
+  }
+}
+
+# Determines whether Intune still reports successful installations for an app. The documented
+# device-status collection is paged without a server-side filter (some tenants reject that filter)
+# and evaluated locally; installSummary and the app-status report are consulted as independent
+# cross-checks / fallbacks. Any unresolved error remains "unknown" and blocks automatic deletion.
+# Welche der drei Quellen in DIESEM Tenant antwortet. Gemessen im gemeldeten Protokoll: jede Sonde
+# brauchte 5-8 s, weil sie zuerst /deviceStatuses fragte (HTTP 400), dann installSummary (HTTP 400)
+# und erst dann den Statusbericht - der antwortet. Drei Anfragen fuer eine Auskunft, zweimal je Sonde
+# und mehrfach je Lauf. Die Reihenfolge wird deshalb gemerkt: die Quelle, die zuletzt geantwortet hat,
+# wird zuerst gefragt. Dieselben Quellen, dieselben Regeln - nur nicht mehr in der Reihenfolge, die
+# in diesem Tenant nachweislich nicht funktioniert. Beim Tenant-Wechsel wieder offen.
+$script:installProbeSource = $null
+
+function Clear-InstallProbeSource {
+  $script:installProbeSource = $null
+}
+
 function Get-AppInstallationProbe {
   param([Parameter(Mandatory)][string]$AppId, [string]$AppName = '')
 
@@ -280,6 +337,14 @@ function Get-AppInstallationProbe {
     if ([string]::IsNullOrWhiteSpace($token)) { throw 'WinTuner returned an empty access token.' }
     $headers = @{ Authorization = "Bearer $token"; 'Content-Type' = 'application/json' }
     $base = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId"
+
+    # Hat dieser Tenant auf /deviceStatuses schon einmal NICHT geantwortet, wird der Versuch
+    # uebersprungen - die Ausnahme laeuft in denselben catch-Block wie ein echter Fehlschlag, also
+    # gilt weiter dieselbe Kette (installSummary, dann Statusbericht) und dieselbe Regel: eine Null
+    # muss von einer zweiten Quelle bestaetigt sein.
+    if ($script:installProbeSource -eq 'installSummary' -or $script:installProbeSource -eq 'report') {
+      throw ("skipping deviceStatuses: this tenant answered through the {0} last time" -f $script:installProbeSource)
+    }
 
     # Some Intune tenants reject $filter on this beta navigation property with HTTP 400 even
     # though the unfiltered endpoint is supported. Page through the plain documented collection
@@ -304,9 +369,40 @@ function Get-AppInstallationProbe {
       $uri = [string]$response.'@odata.nextLink'
     } while (-not [string]::IsNullOrWhiteSpace($uri))
     $out.Succeeded = $true
-    $out.HasInstallations = $hasInstalledStatus
-    $out.Count = if ($hasInstalledStatus) { 1 } else { 0 }
-    Write-Log ("Installation probe: '{0}' ({1}) has successful installations={2} (device statuses)." -f $AppName, $AppId, $out.HasInstallations)
+    $script:installProbeSource = 'deviceStatuses'
+    if ($hasInstalledStatus) {
+      $out.HasInstallations = $true
+      # The loop stops at the FIRST installed status, so it does not know the real device count.
+      # Leaving Count $null makes the UI show a no-number message instead of the misleading "1".
+      $out.Count = $null
+      Write-Log ("Installation probe: '{0}' ({1}) has successful installations=True (device statuses; count not enumerated)." -f $AppName, $AppId)
+    } else {
+      # A 200-with-empty deviceStatuses is indistinguishable from "this deprecated navigation
+      # property is no longer populated", and a false zero authorizes deletion. Confirming zero
+      # therefore needs a SECOND independent source: installSummary, or the app-status report if that
+      # is unavailable. On disagreement take the higher and do NOT authorize deletion; if no second
+      # source answers at all, leave the state unknown (which blocks deletion) rather than trust the
+      # ambiguous zero.
+      $crossCount = Get-AppInstallSummaryCount -Base $base -Headers $headers
+      $crossSource = 'install summary'
+      if ($null -eq $crossCount) {
+        try { $crossCount = (Get-AppInstallCountsFromReport -AppId $AppId -Headers $headers).InstalledCount; $crossSource = 'app status report' } catch { $crossCount = $null }
+      }
+      if ($null -eq $crossCount) {
+        $out.Succeeded = $false
+        $out.HasInstallations = $true
+        $out.ErrorMessage = 'device statuses reported none but no second source could confirm zero'
+        Write-Log ("Installation probe: '{0}' ({1}) device statuses reported none and no second source could confirm it - state stays unknown (deletion blocked)." -f $AppName, $AppId)
+      } elseif ($crossCount -gt 0) {
+        $out.HasInstallations = $true
+        $out.Count = $crossCount
+        Write-Log ("Installation probe: '{0}' ({1}) DISCREPANCY - device statuses reported none but {2} reports {3}; keeping the higher and NOT authorizing deletion." -f $AppName, $AppId, $crossSource, $crossCount)
+      } else {
+        $out.HasInstallations = $false
+        $out.Count = 0
+        Write-Log ("Installation probe: '{0}' ({1}) has successful installations=False (device statuses and {2} agree: 0)." -f $AppName, $AppId, $crossSource)
+      }
+    }
   } catch {
     $statusError = $_.Exception.Message
     # Some tenants answer /deviceStatuses with a flat HTTP 400 for every app. That left the
@@ -315,18 +411,17 @@ function Get-AppInstallationProbe {
     # all of them, run after run. installSummary is the aggregate counterpart of the same data and
     # answers where the per-device collection does not.
     Write-LogDebug ("Installation probe: device statuses unavailable for '{0}' ({1}), falling back to install summary: {2}" -f $AppName, $AppId, $statusError)
-    try {
-      $summary = Invoke-RestMethod -Method GET -Uri "$base/installSummary" -Headers $headers -ErrorAction Stop
+    $summaryCount = Get-AppInstallSummaryCount -Base $base -Headers $headers
+    if ($null -ne $summaryCount) {
       # Absent counters read as 0. A missing property means "none reported", which is exactly the
-      # zero-installation case; only a failed CALL counts as unknown.
-      $installedDevices = [int]$summary.installedDeviceCount
-      $installedUsers = [int]$summary.installedUserCount
+      # zero-installation case; only a failed CALL (returns $null) counts as unknown.
       $out.Succeeded = $true
-      $out.Count = $installedDevices + $installedUsers
-      $out.HasInstallations = ($out.Count -gt 0)
-      Write-Log ("Installation probe: '{0}' ({1}) has successful installations={2} (install summary: {3} device(s), {4} user(s))." -f $AppName, $AppId, $out.HasInstallations, $installedDevices, $installedUsers)
-    } catch {
-      $summaryError = $_.Exception.Message
+      $script:installProbeSource = 'installSummary'
+      $out.Count = $summaryCount
+      $out.HasInstallations = ($summaryCount -gt 0)
+      Write-Log ("Installation probe: '{0}' ({1}) has successful installations={2} (install summary: {3})." -f $AppName, $AppId, $out.HasInstallations, $summaryCount)
+    } else {
+      $summaryError = 'installSummary call failed'
       # Third and last source: the reporting endpoint the Intune portal itself uses for app install
       # status. Measured in a tenant that answers HTTP 400 to EVERY per-app navigation property -
       # deviceStatuses, userStatuses and installSummary alike, on both beta and v1.0, with and
@@ -336,6 +431,7 @@ function Get-AppInstallationProbe {
       try {
         $report = Get-AppInstallCountsFromReport -AppId $AppId -Headers $headers
         $out.Succeeded = $true
+        $script:installProbeSource = 'report'
         $out.Count = $report.InstalledCount
         $out.HasInstallations = ($report.InstalledCount -gt 0)
         Write-Log ("Installation probe: '{0}' ({1}) has successful installations={2} (app status report: {3} installed device(s) across {4} row(s))." -f $AppName, $AppId, $out.HasInstallations, $report.InstalledCount, $report.RowCount)

@@ -1,4 +1,4 @@
-# WinTuner GUI
+﻿# WinTuner GUI
 
 **English** · [Deutsch](README.de.md)
 
@@ -55,7 +55,7 @@ The second asset, `WinTuner_GUI_ntg.ps1.sha256`, is optional and only lets you v
 
 **Missing prerequisites are handled for you.** If PowerShell 7 is absent, the script offers to install or update it through WinGet. The required `WinTuner` module can be installed from the PowerShell Gallery for the current user after you confirm. The `Microsoft.Graph` module has to be available; if it is missing, the application tells you how to install it.
 
-**Updating.** The application checks for new releases itself and can replace its own file. Before replacing, it writes a backup next to the script (`WinTuner_GUI_ntg.ps1.<timestamp>.backup`) and keeps the two most recent ones.
+**Updating.** The application can look for new releases at start-up and replace its own file; the start-up check can be switched off under "Settings > Updates of this tool", leaving the button there as the only route. Before replacing, it writes a backup next to the script (`WinTuner_GUI_ntg.ps1.<timestamp>.backup`) and keeps the two most recent ones.
 
 ---
 
@@ -106,15 +106,15 @@ English and German interface, several display modes, plus locally stored setting
 
 | Section | Data source | Effect |
 |---|---|---|
-| Dashboard | Microsoft Intune | Read-only overview of apps, updates and superseded versions |
-| WinGet apps | WinGet and the local package folder | Searches packages, builds them locally and uploads to Intune after confirmation |
+| Dashboard | Microsoft Intune | Read-only overview of apps, updates and superseded versions. The fourth tile measures the local package folder |
+| WinGet apps | WinGet and the local package folder | Searches packages, builds them locally and uploads to Intune after confirmation. Also holds the local package favourites: optionally checked at startup, and all valid local packages can be updated on request |
 | Microsoft Store | Microsoft Store and Intune | Searches the Store catalogue, shows matches to pick from, deploys after confirmation, plus an overview of Store apps already deployed |
-| Updates | Intune, WinGet and the WinTuner index | Compares versions, creates or reuses a target app, and hands assignments across on request |
-| Local package maintenance | WinGet and the local package folder | Optionally checks favourites at startup and updates all valid local packages on request |
+| Updates | Intune, WinGet and the WinTuner index | Compares versions, creates or reuses a target app, and hands assignments across on request. Also holds the version cleanup, which deletes old app objects only when the configured safety conditions are met |
 | Discovered apps | Intune inventory and WinGet | Maps installed software to possible WinGet packages. The scan itself is read-only |
 | All tenant apps | Intune | Lists every app object of every type. Assignments are read and can be changed, which writes to Intune |
 | Own installers | Local files and Intune | Packages any EXE or MSI locally into `.intunewin`. Replacing the content of an existing app writes to Intune |
-| Cleanup | Intune | Checks old app objects and deletes them only when the configured safety conditions are met |
+| Local packages | WinGet and the local package folder | Maintains package copies on this computer: check the saved list and download newer ones. Creates nothing in Intune |
+| Settings | Local settings file and Intune | Package and log folder, language, theme, cleanup options and saved group favourites. Nothing here changes the tenant by itself; the options decide what the other sections are allowed to do |
 
 The interface does not install software on endpoints. It creates and manages app objects and assignments in Intune; the actual distribution and reporting is then done by Microsoft Intune.
 

@@ -1,4 +1,4 @@
-# WinTuner GUI
+﻿# WinTuner GUI
 
 [English](README.md) · **Deutsch**
 
@@ -55,7 +55,7 @@ Das zweite Asset, `WinTuner_GUI_ntg.ps1.sha256`, ist optional und dient nur dazu
 
 **Fehlende Voraussetzungen werden abgefangen.** Fehlt PowerShell 7, bietet das Skript Installation oder Aktualisierung über WinGet an. Das benötigte Modul `WinTuner` lässt sich nach Bestätigung für den aktuellen Benutzer aus der PowerShell Gallery installieren. Das Modul `Microsoft.Graph` muss vorhanden sein; fehlt es, zeigt die Anwendung den passenden Hinweis.
 
-**Aktualisieren.** Die Anwendung prüft selbst auf neue Releases und kann ihre eigene Datei ersetzen. Vorher legt sie eine Sicherung neben dem Skript ab (`WinTuner_GUI_ntg.ps1.<Zeitstempel>.backup`) und behält die beiden jüngsten.
+**Aktualisieren.** Die Anwendung kann beim Start nach neuen Releases sehen und ihre eigene Datei ersetzen; die Suche beim Start lässt sich unter „Einstellungen › Updates dieses Programms" abschalten, dann bleibt der Knopf dort der einzige Weg. Vorher legt sie eine Sicherung neben dem Skript ab (`WinTuner_GUI_ntg.ps1.<Zeitstempel>.backup`) und behält die beiden jüngsten.
 
 ---
 
@@ -106,15 +106,15 @@ Deutsche und englische Oberfläche, mehrere Darstellungsmodi sowie lokal gespeic
 
 | Bereich | Datenquelle | Wirkung |
 |---|---|---|
-| Dashboard | Microsoft Intune | Nur lesende Übersicht über Apps, Updates und abgelöste Versionen |
-| WinGet-Apps | WinGet und lokaler Paketordner | Sucht Pakete, erstellt sie lokal und lädt sie nach Bestätigung zu Intune hoch |
+| Dashboard | Microsoft Intune | Nur lesende Übersicht über Apps, Updates und abgelöste Versionen. Die vierte Kachel misst den lokalen Paketordner |
+| WinGet-Apps | WinGet und lokaler Paketordner | Sucht Pakete, erstellt sie lokal und lädt sie nach Bestätigung zu Intune hoch. Enthält auch die Favoriten für lokale Pakete: optional beim Start geprüft, und auf Wunsch werden alle gültigen lokalen Pakete aktualisiert |
 | Microsoft Store | Microsoft Store und Intune | Durchsucht den Store-Katalog, zeigt Treffer zur Auswahl, stellt nach Bestätigung bereit, dazu eine Übersicht bereits bereitgestellter Store-Apps |
-| Updates | Intune, WinGet und WinTuner-Index | Vergleicht Versionen, erstellt oder verwendet eine Ziel-App und übergibt auf Wunsch die Zuweisungen |
-| Lokale Paketpflege | WinGet und lokaler Paketordner | Prüft Favoriten optional beim Start und aktualisiert auf Wunsch alle gültigen lokalen Pakete |
+| Updates | Intune, WinGet und WinTuner-Index | Vergleicht Versionen, erstellt oder verwendet eine Ziel-App und übergibt auf Wunsch die Zuweisungen. Enthält auch die Versionsbereinigung, die alte App-Objekte nur löscht, wenn die konfigurierten Sicherheitsbedingungen erfüllt sind |
 | Erkannte Apps | Intune-Inventar und WinGet | Ordnet installierte Software möglichen WinGet-Paketen zu. Der Scan selbst ist nur lesend |
 | Alle Tenant-Apps | Intune | Listet jedes App-Objekt jeden Typs. Zuweisungen werden gelesen und können geändert werden, was nach Intune schreibt |
 | Eigene Installer | Lokale Dateien und Intune | Paketiert beliebige EXE oder MSI lokal zu `.intunewin`. Das Ersetzen des Inhalts einer vorhandenen App schreibt nach Intune |
-| Bereinigung | Intune | Prüft alte App-Objekte und löscht sie nur, wenn die konfigurierten Sicherheitsbedingungen erfüllt sind |
+| Lokale Pakete | WinGet und lokaler Paketordner | Pflegt Paketkopien auf diesem Rechner: gemerkte Pakete prüfen und neuere herunterladen. Legt nichts in Intune an |
+| Einstellungen | Lokale Einstellungsdatei und Intune | Paket- und Protokollordner, Sprache, Darstellung, Aufräum-Optionen und gespeicherte Gruppen-Favoriten. Hier wird der Tenant nicht selbst verändert; die Optionen entscheiden, was die anderen Bereiche dürfen |
 
 Die Oberfläche installiert keine Software auf Endgeräten. Sie erstellt und verwaltet App-Objekte und Zuweisungen in Intune; die eigentliche Verteilung und Auswertung übernimmt anschließend Microsoft Intune.
 

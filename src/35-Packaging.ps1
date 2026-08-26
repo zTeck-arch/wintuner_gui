@@ -1,3 +1,7 @@
+﻿
+# Der Runspace fuehrt genau eine Pipeline. Dieser Merker sagt, dass sie besetzt ist - Paketbau
+# UND Inventar-Abfrage teilen ihn sich, und wer ihn besetzt findet, arbeitet inline weiter.
+$script:pkgRunspaceInUse = $false
 
 function Get-PackageRunspace {
   if ($script:pkgRunspace -and $script:pkgRunspace.RunspaceStateInfo.State -eq 'Opened') {
@@ -56,6 +60,7 @@ function Invoke-WtPackageBuild {
 
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
   $script:packagingBusy = $true
+  $script:pkgRunspaceInUse = $true
   try {
     $handle = $ps.BeginInvoke()
     $timedOut = $false
@@ -101,6 +106,7 @@ function Invoke-WtPackageBuild {
     return @{ Succeeded = $false; Result = $null; ErrorMessage = $em; TimedOut = $false }
   } finally {
     $script:packagingBusy = $false
+    $script:pkgRunspaceInUse = $false
     try { $ps.Dispose() } catch { }   # class 3: teardown
   }
 }
@@ -174,7 +180,12 @@ function New-WingetPackageWithFallback {
     [string]$PreferredInstaller,
     [string]$InstallerArguments,
     [switch]$PackageScript,
-    [switch]$AllowUserRetry
+    [switch]$AllowUserRetry,
+    # Wie oft eine HTTP-429-Sperre abgewartet wird. Der automatische Favoritenlauf beim Start setzt
+    # das auf 1: 5 s statt 5+15+30 s. Er laeuft unbeaufsichtigt, blockiert aber die Busy-Sperre und
+    # damit die Anmeldung samt Update-Suche - im gemeldeten Protokoll 35 s Wartezeit fuer ein Paket,
+    # das danach ohnehin an einer Hash-Abweichung scheiterte.
+    [int]$ThrottleRetries = 3
   )
   # Base arguments splatted into every New-WtWingetPackage attempt. Optional advanced options
   # are only included when set, so the module keeps its own defaults otherwise.
@@ -191,8 +202,8 @@ function New-WingetPackageWithFallback {
   $attemptVersion = $DesiredVersion
   if (-not $attemptVersion) { $attemptVersion = $LatestVersion }
   try {
-    if ($attemptVersion) { [void](Invoke-PackageBuildWithThrottleRetry -Arguments ($base + @{ Version = $attemptVersion }) -Label $PackageId) }
-    else { [void](Invoke-PackageBuildWithThrottleRetry -Arguments $base -Label $PackageId) }
+    if ($attemptVersion) { [void](Invoke-PackageBuildWithThrottleRetry -Arguments ($base + @{ Version = $attemptVersion }) -Label $PackageId -MaxRetries $ThrottleRetries) }
+    else { [void](Invoke-PackageBuildWithThrottleRetry -Arguments $base -Label $PackageId -MaxRetries $ThrottleRetries) }
     return [pscustomobject]@{ Succeeded=$true; EffectiveVersion=$attemptVersion }
   } catch {
     $m = $_.Exception.Message
@@ -200,19 +211,19 @@ function New-WingetPackageWithFallback {
       $prev = Get-PreviousWingetVersion -PackageId $PackageId -LatestVersion $attemptVersion
       # Only allow previous if it's newer than current tenant version (if known)
       if ($prev -and ( -not $InstalledVersion -or (Test-IsNewerVersion $prev $InstalledVersion) )) {
-        try { [void](Invoke-PackageBuildWithThrottleRetry -Arguments ($base + @{ Version = $prev }) -Label $PackageId); return [pscustomobject]@{ Succeeded=$true; EffectiveVersion=$prev } } catch { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; ErrorMessage=$_.Exception.Message } }
+        try { [void](Invoke-PackageBuildWithThrottleRetry -Arguments ($base + @{ Version = $prev }) -Label $PackageId -MaxRetries $ThrottleRetries); return [pscustomobject]@{ Succeeded=$true; EffectiveVersion=$prev } } catch { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; ErrorMessage=$_.Exception.Message } }
       } else { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; ErrorMessage=$m } }
     } elseif ($m -match 'Hash mismatch') {
       if ($AllowUserRetry) {
         $res = [System.Windows.Forms.MessageBox]::Show((Get-UiString 'HashMismatchDialog'), (Get-UiString 'HashMismatchTitle'), [System.Windows.Forms.MessageBoxButtons]::YesNoCancel, [System.Windows.Forms.MessageBoxIcon]::Warning, [System.Windows.Forms.MessageBoxDefaultButton]::Button1)
         if ($res -eq [System.Windows.Forms.DialogResult]::Yes) {
-          try { if ($attemptVersion) { [void](Invoke-PackageBuildWithThrottleRetry -Arguments ($base + @{ Version = $attemptVersion }) -Label $PackageId) } else { [void](Invoke-PackageBuildWithThrottleRetry -Arguments $base -Label $PackageId) }; return [pscustomobject]@{ Succeeded=$true; EffectiveVersion=$attemptVersion } } catch { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; ErrorMessage=$_.Exception.Message } }
+          try { if ($attemptVersion) { [void](Invoke-PackageBuildWithThrottleRetry -Arguments ($base + @{ Version = $attemptVersion }) -Label $PackageId -MaxRetries $ThrottleRetries) } else { [void](Invoke-PackageBuildWithThrottleRetry -Arguments $base -Label $PackageId -MaxRetries $ThrottleRetries) }; return [pscustomobject]@{ Succeeded=$true; EffectiveVersion=$attemptVersion } } catch { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; ErrorMessage=$_.Exception.Message } }
         } elseif ($res -eq [System.Windows.Forms.DialogResult]::No) {
           $latest = $attemptVersion; if (-not $latest) { $latest = $LatestVersion }
           $prev = Get-PreviousWingetVersion -PackageId $PackageId -LatestVersion $latest
           # Only allow previous if it's newer than current tenant version (if known)
           if ($prev -and ( -not $InstalledVersion -or (Test-IsNewerVersion $prev $InstalledVersion) )) {
-            try { [void](Invoke-PackageBuildWithThrottleRetry -Arguments ($base + @{ Version = $prev }) -Label $PackageId); return [pscustomobject]@{ Succeeded=$true; EffectiveVersion=$prev } } catch { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; ErrorMessage=$_.Exception.Message } }
+            try { [void](Invoke-PackageBuildWithThrottleRetry -Arguments ($base + @{ Version = $prev }) -Label $PackageId -MaxRetries $ThrottleRetries); return [pscustomobject]@{ Succeeded=$true; EffectiveVersion=$prev } } catch { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; ErrorMessage=$_.Exception.Message } }
           } else { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; ErrorMessage=$m } }
         } else { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; ErrorMessage="Cancelled by user" } }
       } else { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; ErrorMessage=$m } }
@@ -266,12 +277,15 @@ function Test-PackageFolderUsable {
       return $false
     }
 
-    if (-not (Test-Path $Folder)) { New-Item -ItemType Directory -Path $Folder -Force -ErrorAction Stop | Out-Null }
+    # -LiteralPath / [IO.*] throughout: a package folder like 'Intune Pakete [Kunde]' otherwise made
+    # the write probe fail (the '[' is a wildcard for -Path), and a perfectly writable folder was
+    # reported to the user as "not writable". New-Item has no -LiteralPath, so use [IO.Directory].
+    if (-not (Test-Path -LiteralPath $Folder)) { [void][System.IO.Directory]::CreateDirectory($Folder) }
 
     # Prove write access rather than assuming it.
     $probe = Join-Path $Folder (".wtgui_write_test_{0}.tmp" -f ([guid]::NewGuid().ToString('N')))
-    Set-Content -Path $probe -Value 'x' -ErrorAction Stop
-    Remove-Item -Path $probe -Force -ErrorAction SilentlyContinue
+    [System.IO.File]::WriteAllText($probe, 'x')
+    try { [System.IO.File]::Delete($probe) } catch { }
 
     # Low-space warning (non-blocking – the user decides whether to continue).
     try {

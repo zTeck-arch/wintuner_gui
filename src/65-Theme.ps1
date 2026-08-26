@@ -8,6 +8,60 @@ function Get-DimmedColor {
   return [System.Drawing.Color]::FromArgb($r, $g, $b)
 }
 
+# --- "Deaktivierte" Beschriftungen ---------------------------------------------------------------
+#
+# WinForms zeichnet eine Label mit Enabled=$false IMMER in SystemColors.GrayText (#6D6D6D) und
+# ignoriert ForeColor dabei. Auf dem dunklen Grund der Karte (#1E1E1E) sind das 3,6:1 - gemessen,
+# und im Bild kaum lesbar; genau darueber kam die Rueckmeldung zu "Kulanzzeitraum (Minuten)".
+#
+# Eine Beschriftung muss ohnehin nicht deaktiviert sein: sie nimmt keine Eingaben entgegen und liegt
+# nicht im Tabulator-Weg. Sie bleibt deshalb aktiviert und bekommt eine GEDAEMPFTE Farbe aus dem
+# Design - 60 % Vordergrund auf dem Grund ihrer Karte. Gemessen ergibt das 4,0:1 bis 6,2:1 ueber
+# alle sieben Designs, also durchweg besser als das GrayText von Windows (3,0:1 bis 4,7:1).
+#
+# Der Zustand wird gemerkt, damit ein Designwechsel ihn wieder herstellen kann (Set-GuiTheme faerbt
+# jede Label neu und wuesste sonst nichts davon).
+# Schluessel ist das Steuerelement SELBST, nicht sein Hashcode: ein Hashcode wird nach dem
+# Verwerfen eines Steuerelements wiederverwendet, und dann waere ploetzlich eine fremde Beschriftung
+# gedaempft. Der modale Dialog raeumt seine Eintraege beim Schliessen wieder weg.
+$script:dimmedLabels = @{}
+
+function Get-LabelDimForeColor {
+  param([System.Windows.Forms.Control]$Label)
+  $theme = $script:currentTheme
+  $back = if ($Label -and $Label.Parent) { $Label.Parent.BackColor } else { $theme.BackColor }
+  # Eine transparente Elternfarbe traegt keine Information - dann die Kartenfarbe nehmen.
+  if ($back.A -eq 0) { $back = Get-CardBackColor $theme }
+  return Get-DimmedColor -Fore $theme.ForeColor -Back $back -Ratio 0.6
+}
+
+# $Dimmed = $true stellt eine Beschriftung als "gerade wirkungslos" dar, ohne sie zu deaktivieren.
+function Set-LabelDimmed {
+  param([System.Windows.Forms.Control]$Label, [bool]$Dimmed)
+  if (-not $Label) { return }
+  if ($Dimmed) {
+    $script:dimmedLabels[$Label] = $true
+    $Label.ForeColor = Get-LabelDimForeColor $Label
+  } else {
+    [void]$script:dimmedLabels.Remove($Label)
+    # Zurueck auf die Farbe, die diese Beschriftung von sich aus haette - eine Hinweiszeile ist
+    # gedaempfter als normaler Text, und das darf das Zuruecknehmen nicht ueberschreiben.
+    $Label.ForeColor = if ($Label.Tag -eq 'hint') { $script:currentTheme.SecondaryForeColor } else { $script:currentTheme.ForeColor }
+  }
+}
+
+function Test-LabelDimmed {
+  param([System.Windows.Forms.Control]$Label)
+  if (-not $Label) { return $false }
+  return [bool]$script:dimmedLabels.ContainsKey($Label)
+}
+
+# Vergisst die Merker verworfener Steuerelemente (der modale Editor baut bei jedem Oeffnen neue).
+function Clear-LabelDimmedState {
+  param([System.Windows.Forms.Control[]]$Labels)
+  foreach ($l in $Labels) { if ($l) { [void]$script:dimmedLabels.Remove($l) } }
+}
+
 # Card surface + border colors derived from the active theme (works for all 6 themes):
 # a subtle raised panel that sits slightly above the section background.
 function Get-CardBackColor {
@@ -290,7 +344,15 @@ function Add-SectionInfoBadge {
       $e.Graphics.DrawEllipse($pen, 0.7, 0.7, ($lbl.Width - 2.4), ($lbl.Height - 2.4))
       $pen.Dispose()
       # GDI text (TextRenderer) instead of DrawString: at 16px the GDI+ glyph blurs noticeably.
-      $f = New-Object System.Drawing.Font("Segoe UI", 8.25, [System.Drawing.FontStyle]::Bold)
+      #
+      # Schriftgroesse AUS DER BADGE-GROESSE, nicht fest verdrahtet. Mit einer Konstante von 8,25 pt
+      # schob der themenweite Schriftwechsel (Tahoma in den Retro-Designs) Kreis und Buchstabe
+      # auseinander - statt eines "i" im Kreis stand dort eine einzelne Klammer. Und die Schrift des
+      # Badges selbst nehmen, damit sie zum Rest des Designs passt.
+      $glyphSize = [Math]::Max(6.5, [Math]::Round($lbl.Height * 0.52, 2))
+      $glyphFamily = if ($lbl.Font -and $lbl.Font.Name) { $lbl.Font.Name } else { "Segoe UI" }
+      $f = try { New-Object System.Drawing.Font($glyphFamily, $glyphSize, [System.Drawing.FontStyle]::Bold) }
+           catch { New-Object System.Drawing.Font("Segoe UI", 8.25, [System.Drawing.FontStyle]::Bold) }
       $rect = New-Object System.Drawing.Rectangle(0, 0, $lbl.Width, $lbl.Height)
       $flags = [System.Windows.Forms.TextFormatFlags]::HorizontalCenter -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter
       [System.Windows.Forms.TextRenderer]::DrawText($e.Graphics, "i", $f, $rect, $c, $flags)
@@ -299,8 +361,175 @@ function Add-SectionInfoBadge {
   })
   $Parent.Controls.Add($badge)
   $badge.BringToFront()
-  $script:infoBadges.Add([pscustomobject]@{ Badge = $badge; Key = $TextKey })
+  $script:infoBadges.Add([pscustomobject]@{ Badge = $badge; Key = $TextKey; Anchor = $AfterLabel })
   return $badge
+}
+
+# Setzt jede Karte auf die Hoehe ihres Inhalts und stapelt sie untereinander.
+#
+# Gedacht fuer Sektionen, deren Karten schlicht untereinander stehen. Was NICHT passiert: die
+# Steuerelemente INNERHALB einer Karte werden nicht angefasst - eine Karte, die ein Formular ist,
+# bleibt ein Formular. Es geht um die Hoehe der Karte und die Position der naechsten.
+#
+# Warum das noetig ist: die Hoehen standen als Pixelkonstanten im Quelltext und stimmten nur fuer
+# eine Schriftart und eine Textlaenge. Ein laengerer deutscher Hinweis lief unten heraus, ein
+# gekuerzter liess ein Loch - und ein Retro-Design mit breiterer Schrift konnte beides gleichzeitig.
+# In einem AutoScroll-Panel sind die Koordinaten der Kinder RELATIV zum gescrollten Ursprung.
+# Wer dort "Karte.Top = 48" setzt, waehrend das Panel 400 px weit unten steht, schiebt die Karte in
+# Wahrheit auf 448 - und beim Zurueckscrollen klafft oben ein 400 px hoher leerer Block, unter dem
+# alle Karten zu tief haengen. Genau das passierte auf der Einstellungsseite, sobald irgendetwas
+# eine Neuanordnung ausloeste, waehrend die Seite gescrollt war: ein Fenster-Resize, ein
+# Designwechsel oder das erneute Oeffnen des Bereichs, der seine Scrollposition behaelt.
+#
+# Diese Funktion liefert den Betrag, der auf eine ABSOLUTE Y-Koordinate addiert werden muss, damit
+# sie dort landet, wo sie gemeint ist. Relative Angaben ("unter die Karte darueber") sind nicht
+# betroffen, die rechnen ohnehin im selben System.
+function Get-ScrollOffsetY {
+  param([System.Windows.Forms.Control]$Container)
+  try {
+    if (-not $Container -or -not $Container.AutoScroll) { return 0 }
+    return [int]$Container.AutoScrollPosition.Y
+  } catch { return 0 }
+}
+
+function Update-StackedCards {
+  param(
+    [Parameter(Mandatory)][System.Windows.Forms.Control]$Panel,
+    [Parameter(Mandatory)][object[]]$Cards,
+    [int]$Top = 48,
+    [int]$Gap = 12,
+    [int]$Padding = 16
+  )
+  try {
+    $y = $Top + (Get-ScrollOffsetY $Panel)
+    foreach ($card in $Cards) {
+      if (-not $card) { continue }
+      # Unterkante des tiefsten Kindes. Unsichtbare zaehlen mit: eine Karte, die ein Feld nur
+      # zeitweise ausblendet, darf beim Wiedereinblenden nicht zu klein sein.
+      $bottom = 0
+      foreach ($child in $card.Controls) {
+        $b = $child.Top + $child.Height
+        if ($b -gt $bottom) { $bottom = $b }
+      }
+      if ($bottom -le 0) { continue }
+      $card.Top = $y
+      $card.Height = $bottom + $Padding
+      $y += $card.Height + $Gap
+    }
+  } catch { Write-LogDebug 'stacked cards layout' }
+}
+
+# --- Stacked option rows for the Settings page ----------------------------------------------------
+#
+# Every control on the settings page used to sit at a hand-computed pixel offset, so an option could
+# not be given an explanation without re-doing the Y coordinate of everything below it - which is
+# why most options had no explanation at all and the page read as a pile of unrelated checkboxes.
+#
+# Rows are registered here instead and stacked by Update-SettingsLayout. That also fixes a real
+# defect: the theme picker swaps the typeface (Tahoma for the retro themes), the hint labels grow a
+# line, and with fixed positions the extra line simply painted over the next option.
+$script:settingRows = New-Object 'System.Collections.Generic.List[object]'
+# Per-card Y of the first row, keyed by card hash. Defaults to 34, which clears the bold card
+# title; the save bar has no title and overrides it.
+$script:settingRowStart = @{}
+
+# Registers one row: a control (checkbox, label, button row host, ...) plus an optional explanatory
+# line underneath it. Position and card height are assigned by Update-SettingsLayout, not here, so
+# the declaration order in the source is the order on screen.
+function Add-SettingRow {
+  param(
+    [Parameter(Mandatory)][System.Windows.Forms.Control]$Card,
+    [Parameter(Mandatory)][System.Windows.Forms.Control]$Control,
+    [string]$Hint,
+    # Indented rows mark the two mutually exclusive cleanup options as belonging to the group label
+    # above them; without the indent they read as three unrelated switches.
+    [int]$Indent = 14,
+    # Extra breathing space ABOVE this row, used to separate groups inside one card.
+    [int]$SpaceBefore = 0
+  )
+  $Card.Controls.Add($Control)
+  $hintLabel = $null
+  if (-not [string]::IsNullOrWhiteSpace($Hint)) {
+    $hintLabel = New-Object System.Windows.Forms.Label
+    $hintLabel.Tag = 'hint'
+    $hintLabel.Text = $Hint
+    # AutoSize + MaximumSize is what makes this survive a font change: the label re-measures itself
+    # and Update-SettingsLayout then reads the real height instead of a guessed one.
+    $hintLabel.AutoSize = $true
+    $hintLabel.MaximumSize = New-Object System.Drawing.Size(($Card.Width - $Indent - 30), 0)
+    $Card.Controls.Add($hintLabel)
+  }
+  $script:settingRows.Add([pscustomobject]@{
+    Card = $Card; Control = $Control; Hint = $hintLabel; Indent = $Indent; SpaceBefore = $SpaceBefore
+  })
+  return $Control
+}
+
+# Stacks all registered rows and resizes their cards to fit. Called once after the page is built and
+# again after every theme switch (the font, and therefore the height of every wrapped hint, changes
+# with it). Cheap enough to just re-run wholesale: it is a few dozen controls.
+function Update-SettingsLayout {
+  if (-not $script:settingRows) { return }
+  try {
+    $nextY = @{}
+    foreach ($row in $script:settingRows) {
+      $card = $row.Card
+      $key = $card.GetHashCode()
+      if (-not $nextY.ContainsKey($key)) {
+        $nextY[$key] = if ($script:settingRowStart -and $script:settingRowStart.ContainsKey($key)) { [int]$script:settingRowStart[$key] } else { 34 }
+      }
+      $y = $nextY[$key] + [int]$row.SpaceBefore
+      $row.Control.Location = New-Object System.Drawing.Point([int]$row.Indent, $y)
+      $y += [Math]::Max($row.Control.Height, 20) + 2
+      if ($row.Hint) {
+        $row.Hint.MaximumSize = New-Object System.Drawing.Size(($card.Width - [int]$row.Indent - 30), 0)
+        $row.Hint.Location = New-Object System.Drawing.Point(([int]$row.Indent + 20), $y)
+        $y += $row.Hint.Height + 6
+      }
+      $nextY[$key] = $y
+    }
+    foreach ($key in $nextY.Keys) {
+      $card = @($script:settingRows | Where-Object { $_.Card.GetHashCode() -eq $key } | Select-Object -First 1).Card
+      if ($card) { $card.Height = $nextY[$key] + 12 }
+    }
+    # Cards are stacked in the order they were added to the settings panel, so a card that grew
+    # pushes the ones below it down instead of overlapping them.
+    if ($script:settingsCards) {
+      # Elternobjekt aus der Schleife holen, nicht ueber @(...)[0]: die Liste ist eine
+      # List[object], und das Indizieren der umgewandelten Sammlung wirft "Argument types do not
+      # match" - abgefangen vom catch unten, wodurch die Karten alle auf ihrer Entwurfshoehe 48
+      # uebereinander lagen. Genau so faellt eine stille Ausnahme auf: erst im Bild.
+      $scrollY = 0
+      foreach ($card in $script:settingsCards) {
+        if ($card -and $card.Parent) { $scrollY = Get-ScrollOffsetY $card.Parent; break }
+      }
+      $top = 48 + $scrollY
+      foreach ($card in $script:settingsCards) {
+        $card.Top = $top
+        $top += $card.Height + 16
+      }
+    }
+  } catch { Write-LogDebug 'settings layout' }
+}
+
+# Setzt jedes Info-Symbol neu neben seine Beschriftung.
+#
+# Noetig nach jedem Schriftwechsel: die Position wird aus PreferredWidth der Beschriftung berechnet,
+# und die aendert sich mit der Schriftart. Ohne diesen Durchlauf ueberlappte das Symbol den letzten
+# Buchstaben des Titels - je nach Design mal mehr, mal gar nicht.
+function Update-InfoBadgePositions {
+  if (-not $script:infoBadges) { return }
+  foreach ($entry in $script:infoBadges) {
+    try {
+      $badge = $entry.Badge
+      $anchor = $entry.Anchor
+      if (-not $badge -or -not $anchor) { continue }
+      $badge.Location = New-Object System.Drawing.Point(
+        ($anchor.Left + $anchor.PreferredWidth + 8),
+        ($anchor.Top + [int](($anchor.PreferredHeight - $badge.Height) / 2))
+      )
+    } catch { }   # class 3: ein verrutschtes Symbol darf keine Sektion aufhalten
+  }
 }
 
 # Native Windows 11 window chrome via DWM: a dark (or light) title bar that matches the
@@ -465,6 +694,8 @@ function Set-GuiTheme {
       $control.BackColor = [System.Drawing.Color]::Transparent
       $control.ForeColor = $theme.ForeColor
     }
+    # Nach dem Faerben: eine gedaempfte Beschriftung bleibt gedaempft, auch im neuen Design.
+    if (Test-LabelDimmed $control) { $control.ForeColor = Get-LabelDimForeColor $control }
   }
   elseif ($control -is [System.Windows.Forms.TabControl]) {
     $control.BackColor = $theme.TabBackColor
@@ -499,6 +730,21 @@ function Set-GuiTheme {
     $control.BackColor = $theme.TextBoxBackColor
     $control.ForeColor = $theme.SecondaryForeColor
   }
+  elseif ($control.Tag -eq 'row-host') {
+    # Invisible container that keeps a label+field or a group of buttons together as one stacked
+    # settings row: it has to take the CARD colour, not the section background, or the panel shows
+    # up as a rectangle of the wrong shade around its contents.
+    $control.BackColor = Get-CardBackColor $theme
+    $control.ForeColor = $theme.ForeColor
+  }
+  elseif ($control -is [System.Windows.Forms.CheckBox] -and $control.Parent -and
+          (@('card', 'row-host') -contains [string]$control.Parent.Tag)) {
+    # A checkbox on a card has to take the CARD background, not the section's. With the section
+    # colour it painted a visibly lighter/darker block around its own label - most obvious on the
+    # settings page, which is almost nothing but checkboxes on cards.
+    $control.BackColor = if ([string]$control.Parent.Tag -eq 'card') { Get-CardBackColor $theme } else { $control.Parent.BackColor }
+    $control.ForeColor = $theme.ForeColor
+  }
   else {
     $control.BackColor = $theme.BackColor
     $control.ForeColor = $theme.ForeColor
@@ -526,6 +772,22 @@ function Set-ActiveTheme {
   if (Get-Command Update-SidebarTheme -ErrorAction SilentlyContinue) { Update-SidebarTheme }
   if (Get-Command Update-MenuTheme -ErrorAction SilentlyContinue) { Update-MenuTheme }
   if (Get-Command Update-StatusStripTheme -ErrorAction SilentlyContinue) { Update-StatusStripTheme }
+  # The retro themes swap the typeface, which changes how many lines every wrapped explanation on
+  # the settings page needs. Re-stack the rows so a grown hint pushes the next option down instead
+  # of painting over it.
+  if (Get-Command Update-InfoBadgePositions -ErrorAction SilentlyContinue) { Update-InfoBadgePositions }
+  if (Get-Command Update-HeaderLayout -ErrorAction SilentlyContinue) { Update-HeaderLayout }
+  if (Get-Command Update-SettingsLayout -ErrorAction SilentlyContinue) { Update-SettingsLayout }
+  if (Get-Command Update-OwnPackageLayout -ErrorAction SilentlyContinue) { Update-OwnPackageLayout }
+  # Und alle uebrigen Bereiche, die ihre Anordnung rechnen statt sie zu zaehlen. Ohne das behielten
+  # sie beim Designwechsel die Geometrie der VORHERIGEN Schriftart, bis man sie einmal verlaesst und
+  # neu oeffnet - eine Anordnung, die niemand ausgeloest hat und die niemand erklaeren kann.
+  foreach ($layoutFn in @('Update-TenantAppsLayout', 'Update-StoreLayout', 'Update-LocalPackagesLayout',
+                          'Update-UpdatesLayout', 'Update-AppSettingsLayout', 'Update-WorkRecordSectionLayout')) {
+    if (Get-Command $layoutFn -ErrorAction SilentlyContinue) {
+      try { & $layoutFn } catch { Write-LogDebug ("theme relayout: {0}" -f $layoutFn) }
+    }
+  }
   $form.Refresh()
 }
 

@@ -3,9 +3,10 @@ BeforeAll {
   Initialize-TestAmbient
   . ([scriptblock]::Create((Get-UiStringsText)))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '20-Version.ps1' `
-    -Name 'Remove-OldSelfUpdateBackups', 'Invoke-UpdateCheckFeedback')))
+    -Name 'Remove-OldSelfUpdateBackups', 'Invoke-UpdateCheckFeedback', 'Install-SelfUpdateFile', 'Test-VersionsEquivalent')))
   $script:uiLanguage = 'en'
   $script:appVersion = '0.15.0'
+  $script:selfUpdateBackupsToKeep = 2
 
   # Defined globally: helpers declared in a Describe body are not visible inside It blocks.
   function global:New-Backup {
@@ -88,6 +89,38 @@ Describe 'Remove-OldSelfUpdateBackups' {
       { Remove-OldSelfUpdateBackups -ScriptPath $script:scriptPath -Keep 2 } | Should -Not -Throw
       @($global:TestLog | Where-Object { $_ -like '*Could not remove old update backup*' }).Count | Should -Be 1
     } finally { $locked.Dispose() }
+  }
+}
+
+Describe 'Install-SelfUpdateFile' {
+  # Audit finding #3: in a folder whose name contains '[' or ']', the old Copy-Item/Move-Item -Path
+  # replacement was silently skipped and the update reported success on the OLD version.
+  BeforeEach {
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('wt-selfupd-' + [guid]::NewGuid().ToString('N'))
+    # The bracket in the directory name is the whole point of the regression.
+    $global:UpdDir = Join-Path $root 'WinTuner [test]'
+    New-Item -ItemType Directory -Path $global:UpdDir -Force | Out-Null
+    $global:CurrentPath = Join-Path $global:UpdDir 'WinTuner_GUI_ntg.ps1'
+    $global:StagedPath  = "$global:CurrentPath.update"
+    $global:BackupPath  = "$global:CurrentPath.20260820-120000.backup"
+    Set-Content -LiteralPath $global:CurrentPath -Value "# WinTuner GUI`r`n`$script:appVersion = '0.15.0'`r`n" -Encoding utf8
+  }
+  AfterEach {
+    Remove-Item -LiteralPath (Split-Path $global:UpdDir -Parent) -Recurse -Force -ErrorAction SilentlyContinue
+  }
+
+  It 'replaces the running script even when the folder name has brackets' {
+    Set-Content -LiteralPath $global:StagedPath -Value "# WinTuner GUI`r`n`$script:appVersion = '0.16.0'`r`n" -Encoding utf8
+    { Install-SelfUpdateFile -StagedPath $global:StagedPath -CurrentPath $global:CurrentPath -BackupPath $global:BackupPath -ExpectedVersion '0.16.0' } | Should -Not -Throw
+    (Get-Content -LiteralPath $global:CurrentPath -Raw) | Should -Match "appVersion = '0.16.0'"
+    Test-Path -LiteralPath $global:StagedPath | Should -BeFalse    # moved, not copied
+    Test-Path -LiteralPath $global:BackupPath | Should -BeTrue     # old version kept
+  }
+
+  It 'throws when the on-disk file does not carry the expected version (no silent success)' {
+    # Staged file claims 0.15.0 but the release expects 0.16.0 - a stale asset must NOT pass as done.
+    Set-Content -LiteralPath $global:StagedPath -Value "# WinTuner GUI`r`n`$script:appVersion = '0.15.0'`r`n" -Encoding utf8
+    { Install-SelfUpdateFile -StagedPath $global:StagedPath -CurrentPath $global:CurrentPath -BackupPath $global:BackupPath -ExpectedVersion '0.16.0' } | Should -Throw
   }
 }
 

@@ -35,8 +35,32 @@ function Set-ConnectedUIState {
       if ($toolTip) { try { $toolTip.SetToolTip($loginInfoLabel, $script:currentUserUpn) } catch { Write-LogDebug ("Login tooltip: {0}" -f $_.Exception.Message) } }
     }
   }
+  # Die Stand-Zeile des Dashboards folgt dem Verbindungszustand: getrennt steht dort wieder der
+  # Hinweis, dass es einen Tenant braucht, statt eines Standes, der nicht mehr gilt.
+  if (Get-Command Update-DashboardFreshness -ErrorAction SilentlyContinue) {
+    try { Update-DashboardFreshness } catch { }
+  }
   # The connected indicator is folded into $loginInfoLabel's text, so the standalone dot stays hidden.
   if ($connStatusDot) { $connStatusDot.Visible = $false }
+  # Titelleiste und Taskleiste sagen, WELCHER Kunde in diesem Fenster haengt - der teuerste Fehler
+  # dieses Werkzeugs ist, im Fenster des falschen Tenants zu arbeiten.
+  try {
+    if ($Connected -and $script:currentUserUpn) {
+      $form.Text = ('{0} - {1}' -f $script:appName, (Get-TenantDisplayName $script:currentUserUpn))
+    } else {
+      $form.Text = $script:appName
+    }
+  } catch { Write-LogDebug 'window title' }
+  # Die Leerzustaende der Listen tragen den Verbindungszustand; hier laeuft jede Aenderung daran
+  # durch. Vor Clear-TenantViews, damit das Leeren der Listen den frischen Text schon vorfindet.
+  foreach ($gate in @(
+      @{ Label = $updatesEmptyLabel;    Key = 'UpdatesEmptyHint' },
+      @{ Label = $supersededEmptyLabel; Key = 'SupersededEmptyHint' },
+      @{ Label = $discoveredEmptyLabel; Key = 'DiscoveredEmptyHint' })) {
+    if ($gate.Label -and (Get-Command Set-ListEmptyText -ErrorAction SilentlyContinue)) {
+      try { Set-ListEmptyText -Label $gate.Label -NormalKey $gate.Key } catch { }
+    }
+  }
   # Every way OUT of a session runs through here - disconnect, sign-out and a failed sign-in alike -
   # so the tenant views are dropped in one place instead of at each call site.
   if (-not $Connected -and (Get-Command Clear-TenantViews -ErrorAction SilentlyContinue)) {
@@ -58,19 +82,28 @@ $script:lastTenantDomain = ""
 # { Tenant; Name; FromVersion; ToVersion; OldVersionRemoved; Timestamp }. Feeds the
 # on-demand Leistungstext, grouped per tenant.
 $script:sessionActivity = [System.Collections.Generic.List[object]]::new()
+# Die Adresse, unter der der Nachweis erfasst wird. Getrennt von $script:currentUserUpn, weil das
+# beim Trennen geleert wird: ein Lauf, der nach dem Trennen noch Eintraege schreibt, haette sonst
+# Eintraege ohne Tenant erzeugt (genau so gingen drei Updates im Nachweis verloren). Gesetzt bei
+# der Anmeldung, geleert nur beim Abmelden.
+$script:activityTenantUpn = ""
 
 # Track effective built versions per PackageId
 $script:builtVersions = @{}
 # Cache for winget version lookups (speeds up repeated searches)
 $script:wingetVersionCache = @{}
-$script:versionCachePath = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'WinTuner_VersionCache.json'
+$script:versionCachePath = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'WinTunerGUI\version-cache.json'
 # Disk cache loaded once at first use (Fix 1)
 $script:diskCache = @{}
 $script:diskCacheLoaded = $false
 
 # Create form
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "WinTuner GUI"
+# Der Anwendungsname steht an genau einer Stelle: Titelleiste, Kopfzeile und About lesen ihn hier.
+# Set-ConnectedUIState haengt den verbundenen Kunden an - bei einem MSP-Werkzeug sind regelmaessig
+# zwei Fenster fuer zwei Tenants offen, und in der Taskleiste waren die bisher nicht zu unterscheiden.
+$script:appName = "WinTuner GUI"
+$form.Text = $script:appName
 $form.ShowIcon = $false   # hide the default (generic pwsh) title-bar icon for a cleaner look
 # Wider than before to make room for the left sidebar next to the content region.
 # Resizable: MinimumSize keeps content from clipping while allowing the window to grow.
@@ -99,10 +132,63 @@ try {
 $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
 $form.Padding = '5,5,5,5'
 
+# --- Ein Einzug fuer alles Linke ---------------------------------------------------------------
+# Kopfzeile und Seitenleiste sind zwei getrennte Baustellen mit je eigenen Pixelwerten gewesen; der
+# Titel sass dadurch 9 px weiter links als die Navigationseintraege darunter. Diese vier Werte sind
+# jetzt die EINZIGE Quelle fuer den linken Einzug - wer einen davon aendert, verschiebt Titel und
+# Leiste gemeinsam.
+$script:formPadding      = 5    # $form.Padding: verschiebt alles ANGEDOCKTE (Kopfzeile) nach innen
+$script:mainPanelIndent  = 10   # linke Kante von $mainPanel (und damit der Seitenleiste)
+$script:navButtonIndent  = 8    # linke Kante eines Navigationsknopfs innerhalb der Leiste
+$script:navButtonTextPad = 12   # Innenabstand des Knopfs bis zum Symbol
+# Absoluter X-Wert der Symbolspalte der Seitenleiste: 10 + 8 + 12 = 30. Daran richtet sich der
+# Titel in der Kopfzeile aus (dort minus $formPadding, weil die Kopfzeile angedockt ist).
+$script:navContentIndent = $script:mainPanelIndent + $script:navButtonIndent + $script:navButtonTextPad
+
+# --- Hoehe der Kopfzeile ------------------------------------------------------------------------
+# 78 px waren fuer eine 36 px hohe Knopfreihe reichlich: 22 oben, 20 unten. Gemeldet als "oben ist
+# Platz zu holen" - der fehlt naemlich unten in den Listen. 64 px lassen der Reihe 14 px Luft oben
+# und 12 px bis zur Akzentlinie. $mainPanelTop haengt daran, sonst klebt der Inhalt an der Linie
+# oder es bleibt ein leerer Streifen - beides schon passiert, als die Hoehe hier einzeln geaendert
+# wurde.
+$script:headerHeight  = 64
+$script:headerRowTop  = 14
+$script:menuBarHeight = 24
+$script:mainPanelTop  = $script:menuBarHeight + $script:headerHeight + 10
+
+# Erste Fenstergroesse: aus dem BILDSCHIRM, nicht aus einer Entwurfszahl.
+#
+# Als reine Rechnung herausgeloest, weil an ihr drei Grenzen gleichzeitig haengen und jede einzelne
+# schon einmal falsch war: zu gross (Fenster unter der Taskleiste), zu klein (vierte Dashboard-Kachel
+# abgeschnitten), und eine gespeicherte Groesse, die kleiner als das Minimum ist, darf nicht gewinnen.
+# Reihenfolge: gespeicherte Groesse > 80 % der Arbeitsflaeche > Entwurfsgroesse, danach begrenzt auf
+# [Minimum .. Arbeitsflaeche - 8].
+function Get-InitialWindowSize {
+  param(
+    [Parameter(Mandatory)][int]$WorkWidth,
+    [Parameter(Mandatory)][int]$WorkHeight,
+    [int]$SavedWidth = 0,
+    [int]$SavedHeight = 0,
+    [int]$MinWidth = 1010,
+    [int]$MinHeight = 680,
+    [int]$DesignWidth = 1060,
+    [int]$DesignHeight = 850,
+    [double]$Fraction = 0.80
+  )
+  $hasSaved = ($SavedWidth -ge $MinWidth -and $SavedHeight -ge $MinHeight)
+  $wantW = if ($hasSaved) { $SavedWidth } else { [Math]::Max($DesignWidth, [int]($WorkWidth * $Fraction)) }
+  $wantH = if ($hasSaved) { $SavedHeight } else { [Math]::Max($DesignHeight, [int]($WorkHeight * $Fraction)) }
+  return [pscustomobject]@{
+    Width  = [Math]::Max($MinWidth,  [Math]::Min($wantW, $WorkWidth - 8))
+    Height = [Math]::Max($MinHeight, [Math]::Min($wantH, $WorkHeight - 8))
+    Source = if ($hasSaved) { 'settings' } else { 'screen' }
+  }
+}
+
 # Header panel – contains all login/top controls so they stay in one row
 $headerPanel = New-Object System.Windows.Forms.Panel
 $headerPanel.Dock = [System.Windows.Forms.DockStyle]::Top
-$headerPanel.Height = 78
+$headerPanel.Height = $script:headerHeight
 $headerPanel.BackColor = [System.Drawing.Color]::FromArgb(38, 38, 40)
 $form.Controls.Add($headerPanel)
 
@@ -118,7 +204,6 @@ $menuTools.Text = Get-UiString 'MenuTools'
 $miClearCache = New-Object System.Windows.Forms.ToolStripMenuItem
 $miClearCache.Text = Get-UiString 'MenuClearCache'
 $miClearCache.Add_Click({ if ($clearCacheButton) { $clearCacheButton.PerformClick() } })
-[void]$menuTools.DropDownItems.Add($miClearCache)
 $miClearRecent = New-Object System.Windows.Forms.ToolStripMenuItem
 $miClearRecent.Text = Get-UiString 'MenuClearRecentLogins'
 $miClearRecent.Add_Click({
@@ -136,7 +221,6 @@ $miClearRecent.Add_Click({
     Update-Status (Get-UiString 'RecentLoginsClearedStatus')
   }
 })
-[void]$menuTools.DropDownItems.Add($miClearRecent)
 
 # Open the persistent activity log file – the fastest way to hand a full history to support
 # (the in-window log only shows the current session and is capped by the textbox).
@@ -145,7 +229,7 @@ $miOpenLog.Text = Get-UiString 'MenuOpenLogFile'
 $miOpenLog.Add_Click({
   try {
     $logPath = $script:logFilePath
-    if (Test-Path $logPath) {
+    if (Test-Path -LiteralPath $logPath) {
       Start-Process -FilePath $logPath -ErrorAction Stop
     } else {
       [void][System.Windows.Forms.MessageBox]::Show(
@@ -156,19 +240,55 @@ $miOpenLog.Add_Click({
     }
   } catch { Write-Log "Open log failed: $($_.Exception.Message)" }
 })
-[void]$menuTools.DropDownItems.Add($miOpenLog)
 
-# Bulk editor for assignment settings of apps already in Intune (notifications, availability,
-# deadline, auto-update of superseded versions).
-$miAppSettings = New-Object System.Windows.Forms.ToolStripMenuItem
-$miAppSettings.Text = Get-UiString 'MenuAppSettings'
-$miAppSettings.Add_Click({
-  if (-not (Test-Connected)) { return }
-  if (Test-UiBusy) { return }
-  try { Show-AppSettingsDialog } catch { Write-Log ("App settings dialog failed: {0}" -f $_.Exception.Message) }
+# Der Sammel-Editor fuer Bereitstellungseinstellungen stand hier als Menueeintrag. Er ist ENTFALLEN:
+# derselbe Editor ist ein eigener Bereich in der Seitenleiste ("App-Zuweisungseinstellungen") und
+# zusaetzlich als Knopf in "Alle Tenant-Apps" erreichbar. Ein Menueeintrag, der eine Sektion aus der
+# Leiste dupliziert, macht die Leiste unglaubwuerdig - man sucht dann an drei Stellen dasselbe.
+
+# Friendly names for the tenants this technician signs in to.
+$miTenantNames = New-Object System.Windows.Forms.ToolStripMenuItem
+$miTenantNames.Text = Get-UiString 'MenuTenantNames'
+$miTenantNames.Add_Click({ try { Show-TenantNamesDialog } catch { Write-Log ("Tenant names dialog failed: {0}" -f $_.Exception.Message) } })
+
+# The assignments kept before an app was deleted in this session - the safety net for "what scope
+# did that app have again?" after a deletion turns out to have been wrong.
+$miScopeSnapshots = New-Object System.Windows.Forms.ToolStripMenuItem
+$miScopeSnapshots.Text = Get-UiString 'MenuScopeSnapshots'
+$miScopeSnapshots.Add_Click({ try { Show-ScopeSnapshotDialog } catch { Write-Log ("Scope snapshot dialog failed: {0}" -f $_.Exception.Message) } })
+# Reachable without starting a test: a leftover sandbox blocks every further test and has no window
+# to close, so the only other way out was hunting a process name in Task Manager.
+$miCloseSandbox = New-Object System.Windows.Forms.ToolStripMenuItem
+$miCloseSandbox.Text = Get-UiString 'MenuCloseSandbox'
+$miCloseSandbox.Add_Click({
+  if (-not (Test-WindowsSandboxRunning)) {
+    Update-Status (Get-UiString 'SandboxNoneRunning')
+    return
+  }
+  Update-Status (Get-UiString 'DetectSandboxClosingStatus')
+  [System.Windows.Forms.Application]::DoEvents()
+  $stopResult = Stop-WindowsSandbox
+  if ($stopResult.Stopped) {
+    # Same settle wait as before a test run: someone who closes a sandbox here often starts one
+    # straight afterwards, and Windows would refuse it.
+    [void](Wait-WindowsSandboxSettled -AfterKill:([bool]$stopResult.Killed))
+    Update-Status (Get-UiString 'SandboxClosedStatus')
+  } else {
+    Update-Status (Get-UiString 'DetectSandboxCloseFailed')
+  }
 })
-[void]$menuTools.DropDownItems.Add($miAppSettings)
+
+# The three persisted switches that used to sit here - keep assignments before deleting, dashboard
+# full scan, skip confirmations - now live on the Settings page with the rest of the settings. In a
+# menu they saved themselves on click while every option on that page waited for "Save settings",
+# so the same kind of setting behaved differently depending on where the user found it.
+
 [void]$menuStrip.Items.Add($menuTools)
+
+# Ansicht: Anzeigevorlieben, beide als Untermenue statt als eigener Platz in der Leiste.
+$menuView = New-Object System.Windows.Forms.ToolStripMenuItem
+$menuView.Text = Get-UiString 'MenuView'
+[void]$menuStrip.Items.Add($menuView)
 
 $menuHelp = New-Object System.Windows.Forms.ToolStripMenuItem
 $menuHelp.Text = Get-UiString 'MenuHelp'
@@ -217,10 +337,36 @@ $miPermissions.Add_Click({
 [void]$menuStrip.Items.Add($menuHelp)
 
 # Performance record as its own top-level entry next to Tools/Help (moved off the sidebar).
-$menuLeistung = New-Object System.Windows.Forms.ToolStripMenuItem
-$menuLeistung.Text = Get-UiString 'MenuShowLeistung'
-$menuLeistung.Add_Click({ Show-LeistungstextDialog })
-[void]$menuStrip.Items.Add($menuLeistung)
+# Fruehere oberste Menueebene: "Extras | Hilfe | Leistungsnachweis anzeigen... | Design | Sprache" -
+# ein Menue, ein Menue, eine AKTION, und zwei einzelne Radiolisten. Drei verschiedene Arten von Ding
+# auf derselben Ebene. Jetzt: Extras (mit dem Leistungsnachweis), Ansicht (Design + Sprache), Hilfe.
+# Der Leistungsnachweis war ein Menueeintrag unter Extras. Er ist jetzt ein eigener Bereich in der
+# Seitenleiste (siehe 85-Rows, Sektion 'workrecord'): eine Auswertung, die man liest und kopiert,
+# gehoert an einen Ort, den man sieht - nicht hinter ein Menue.
+# --- Reihenfolge des Extras-Menues, an einer Stelle statt verteilt ------------------------------
+#
+# Gruppiert nach dem, WORAUF eine Aktion wirkt - dieselbe Frage, nach der die Seitenleiste, die
+# Uebersicht und die Einstellungsseite inzwischen ordnen.
+#
+# Zwei Eintraege gibt es auch als Knopf auf der Einstellungsseite: "Protokolldatei oeffnen" und
+# "Versions-Cache leeren". Das bleibt so - im Stoerungsfall sucht man das Protokoll im Menue und
+# nicht auf einer Seite, die man dafuer erst aufschlagen muesste.
+$script:menuToolsGroups = @(
+  # Wirkt auf den verbundenen Tenant
+  @($miScopeSnapshots, $miTenantNames),
+  # Wirkt nur auf diesen Rechner
+  @($miOpenLog, $miClearCache, $miClearRecent, $miCloseSandbox)
+)
+$firstToolsGroup = $true
+foreach ($group in $script:menuToolsGroups) {
+  if (-not $firstToolsGroup) {
+    [void]$menuTools.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+  }
+  $firstToolsGroup = $false
+  foreach ($entry in $group) {
+    if ($entry) { [void]$menuTools.DropDownItems.Add($entry) }
+  }
+}
 
 # Theme picker (moved here from Settings): one radio-checked entry per available theme.
 $menuTheme = New-Object System.Windows.Forms.ToolStripMenuItem
@@ -247,7 +393,7 @@ foreach ($tKey in $script:availableThemes.Keys) {
   $script:themeMenuItems[$tKey] = $mi
   [void]$menuTheme.DropDownItems.Add($mi)
 }
-[void]$menuStrip.Items.Add($menuTheme)
+[void]$menuView.DropDownItems.Add($menuTheme)
 Update-ThemeMenuChecks
 
 # Language picker, next to the Theme picker (moved out of Settings for the same reason: it is a
@@ -288,9 +434,15 @@ foreach ($lKey in @('en','de')) {
   $script:languageMenuItems[$lKey] = $mi
   [void]$menuLanguage.DropDownItems.Add($mi)
 }
-[void]$menuStrip.Items.Add($menuLanguage)
+[void]$menuView.DropDownItems.Add($menuLanguage)
 Update-LanguageMenuChecks
 
+# Die Menueleiste stand auf 20 px, Titel und Nav-Symbole auf 30 - drei Kanten, die dasselbe meinen.
+# Der Wert ist GEMESSEN, nicht gerechnet: mit Innenabstand 10 begann "Extras" auf 24 px (Bildschirm-
+# kopie des laufenden Fensters), der ToolStrip legt also 14 px aus sich heraus dazu (Fensterrand
+# plus Eintragsabstand). Fuer die 30 des Titels bleiben 16.
+$script:menuBarOwnIndent = 14
+$menuStrip.Padding = New-Object System.Windows.Forms.Padding(($script:navContentIndent - $script:menuBarOwnIndent), 0, 0, 0)
 $form.MainMenuStrip = $menuStrip
 $form.Controls.Add($menuStrip)
 
@@ -304,9 +456,14 @@ $headerPanel.Controls.Add($headerAccentBar)
 
 
 # App title (left) – replaces the former logo; follows the theme foreground colour.
+#
+# Der Einzug ist NICHT frei gewaehlt: er muss auf der Symbolspalte der Seitenleiste sitzen, sonst
+# stehen Titel und Navigation sichtbar unterschiedlich weit vom Fensterrand weg (16 + 5 px Rand =
+# 21 gegen 30 - genau der Versatz, der aufgefallen ist). $script:navContentIndent ist der absolute
+# X-Wert dieser Spalte; die Kopfzeile ist im Fenster-Innenabstand angedockt, also 5 px davon ab.
 $appTitleLabel = New-Object System.Windows.Forms.Label
-$appTitleLabel.Text = "WinTuner"
-$appTitleLabel.Location = New-Object System.Drawing.Point(16, 22)
+$appTitleLabel.Text = $script:appName
+$appTitleLabel.Location = New-Object System.Drawing.Point(($script:navContentIndent - $script:formPadding), ($script:headerRowTop + 4))
 $appTitleLabel.AutoSize = $true
 $appTitleLabel.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 15, [System.Drawing.FontStyle]::Bold)
 $headerPanel.Controls.Add($appTitleLabel)
@@ -383,9 +540,15 @@ function Update-RecentLoginsUI {
   $recentMenu.Items.Clear()
   foreach ($u in @($script:settings.RecentLogins)) {
     if ($u) {
+      # Type-ahead keeps working on the ADDRESS - that is what actually gets signed in.
       [void]$src.Add($u)
-      $mi = $recentMenu.Items.Add($u)
-      $mi.Add_Click({ param($s, $ev) $usernameBox.Text = $s.Text })
+      # The entry reads as the customer name when one is set, with the address next to it and in the
+      # tooltip. Never name-only: picking the wrong customer is the one mistake that must not be easy.
+      $mi = $recentMenu.Items.Add((Get-TenantDisplayLabel -Upn $u))
+      # Tag carries the address, so the click cannot depend on the label text.
+      $mi.Tag = $u
+      $mi.ToolTipText = $u
+      $mi.Add_Click({ param($s, $ev) $usernameBox.Text = [string]$s.Tag })
     }
   }
   # Empty-state: a single disabled hint so the dropdown always shows something meaningful.
@@ -444,56 +607,127 @@ $script:outputBox.ScrollBars = "Vertical"
 $script:outputBox.ReadOnly = $true
 $bottomPanel.Controls.Add($script:outputBox)
 
-# Progress bar (appears between tabs and log when active)
-$script:progressBar = New-Object System.Windows.Forms.ProgressBar
-$script:progressBar.Location = New-Object System.Drawing.Point(10, 2)
-$script:progressBar.Width = 964
-$script:progressBar.Height = 20
-$script:progressBar.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
-$script:progressBar.Visible = $false
-$bottomPanel.Controls.Add($script:progressBar)
+# Fortschritt als TEXT, nicht als Balken (erscheint zwischen Bereich und Protokoll).
+#
+# Ein Balken behauptet Bewegung, wo keine ist: Paketieren und Hochladen laufen auf dem UI-Thread,
+# waehrend eines Uploads pumpt niemand die Nachrichtenschleife - der Marquee stand still und der
+# fortlaufende Balken blieb minutenlang auf demselben Wert. Beides las sich wie ein Absturz.
+# Eine Prozentangabe sagt genau das, was bekannt ist: welcher Schritt von wie vielen erledigt ist.
+# Ist die Gesamtzahl nicht bekannt (Marquee-Faelle), steht dort nur, dass etwas laeuft.
+$script:progressLabel = New-Object System.Windows.Forms.Label
+$script:progressLabel.Location = New-Object System.Drawing.Point(10, 2)
+$script:progressLabel.Width = 964
+$script:progressLabel.Height = 20
+$script:progressLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$script:progressLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$script:progressLabel.Visible = $false
+$bottomPanel.Controls.Add($script:progressLabel)
+
+# Abbruch-Knopf, rechts in derselben Zeile wie die Fortschrittsanzeige.
+#
+# Einen solchen Knopf gab es schon einmal; er wurde entfernt, weil er neben einem Balken sass, der
+# waehrend der langen Schritte einfror - der Klick wurde erst nach dem Upload sichtbar. Was sich
+# seither geaendert hat: der Paketbau laeuft in einem eigenen Runspace und die Warteschleifen
+# pumpen die Nachrichtenschleife (35-Packaging), waehrend Upload und Zuweisungen weiter auf dem
+# UI-Thread liegen. Damit ist der Knopf waehrend Paketbau und Wiederholungspausen wirklich
+# klickbar, und waehrend eines Uploads greift er am naechsten App-Wechsel. Er wird deshalb nur
+# gezeigt, wo der Merker auch abgefragt wird (Show-Progress -Cancellable).
+$script:cancelRunButton = New-Object System.Windows.Forms.Button
+$script:cancelRunButton.Tag = 'btn-secondary'
+$script:cancelRunButton.Text = Get-UiString 'CancelRunButton'
+$script:cancelRunButton.Size = New-Object System.Drawing.Size(140, 26)
+$script:cancelRunButton.Location = New-Object System.Drawing.Point(834, 0)
+$script:cancelRunButton.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+$script:cancelRunButton.Cursor = [System.Windows.Forms.Cursors]::Hand
+$script:cancelRunButton.Visible = $false
+$bottomPanel.Controls.Add($script:cancelRunButton)
+
+# 0 = Gesamtzahl unbekannt (frueher: Marquee). Sonst die Anzahl der Schritte des Laufs.
+$script:progressTotal = 0
+$script:progressCurrent = 0
+
+# Schreibt den Text neu. Prozent wird aus ERLEDIGTEN Schritten gerechnet, nie aufgerundet - 100 %
+# steht erst da, wenn wirklich alles durch ist.
+function Update-ProgressDisplay {
+  if (-not $script:progressLabel) { return }
+  if ($script:progressTotal -gt 0) {
+    $done = [Math]::Min([Math]::Max(0, $script:progressCurrent), $script:progressTotal)
+    $percent = [int][Math]::Floor(($done * 100.0) / $script:progressTotal)
+    $script:progressLabel.Text = (Get-UiString 'ProgressPercentText') -f $percent, $done, $script:progressTotal
+  } else {
+    $script:progressLabel.Text = Get-UiString 'ProgressRunningText'
+  }
+}
+
+# Beginnt eine Anzeige. -Total 0 (Standard) heisst: Anzahl der Schritte unbekannt.
+#
+# -Cancellable darf NUR setzen, wer $script:cancelBatch in seiner Schleife auch abfragt. Ein
+# Abbruch-Knopf, der nichts tut, ist schlimmer als keiner: der Benutzer klickt, nichts passiert,
+# und er glaubt dem Programm beim naechsten Mal nichts mehr.
+function Show-Progress {
+  param([int]$Total = 0, [switch]$Cancellable)
+  $script:progressTotal = [Math]::Max(0, $Total)
+  $script:progressCurrent = 0
+  Update-ProgressDisplay
+  if ($script:progressLabel) { $script:progressLabel.Visible = $true }
+  if ($script:cancelRunButton) {
+    $script:cancelRunButton.Text = Get-UiString 'CancelRunButton'
+    $script:cancelRunButton.Enabled = $true
+    $script:cancelRunButton.Visible = [bool]$Cancellable
+  }
+}
+
+# Ein einziger Weg, einen Lauf zu stoppen - Knopf, Trennen und Fensterschluss benutzen denselben.
+# Der Merker wird gesetzt, nicht der Vorgang abgeschossen: abgefragt wird er an Punkten, an denen
+# nichts halb erledigt zurueckbleibt (zwischen zwei Apps, im Paketbau, in einer Wartepause).
+function Request-RunCancel {
+  param([string]$Reason = 'user')
+  $script:cancelBatch = $true
+  if ($script:cancelRunButton -and $script:cancelRunButton.Visible) {
+    # Bleibt sichtbar (der Lauf laeuft ja noch), aber ein zweiter Klick aendert nichts mehr.
+    $script:cancelRunButton.Enabled = $false
+  }
+  Write-Log ("Run cancel requested ({0}); stopping at the next safe point." -f $Reason)
+}
+
+# Zahl der ERLEDIGTEN Schritte.
+function Set-ProgressValue {
+  param([int]$Current)
+  $script:progressCurrent = [Math]::Max(0, $Current)
+  Update-ProgressDisplay
+}
+
+function Hide-Progress {
+  $script:progressTotal = 0
+  $script:progressCurrent = 0
+  if ($script:progressLabel) {
+    $script:progressLabel.Text = ''
+    $script:progressLabel.Visible = $false
+  }
+  if ($script:cancelRunButton) { $script:cancelRunButton.Visible = $false }
+}
+
+function Test-ProgressVisible {
+  return [bool]($script:progressLabel -and $script:progressLabel.Visible)
+}
 
 # Batch step counter shown in the packaging/upload status lines, e.g. "(2/8) ". Empty outside a batch.
 $script:batchProgressPrefix = ''
 
-# "Stop after current app": packaging a single app blocks the UI thread (the module call is
-# synchronous), so the window can show "Not responding" for minutes on big installers. A click here
-# is queued by Windows and picked up at the next DoEvents – i.e. between two apps – which lets a
-# long batch be ended cleanly without killing the app mid-upload.
+# Der eine Merker fuer "diesen Lauf beenden". Gesetzt wird er ueber Request-RunCancel - von drei
+# Stellen: dem Abbruch-Knopf, "Trennen"/"Abmelden" waehrend eines Laufs und dem Fensterschluss.
+# Abgefragt wird er nur dort, wo nichts halb erledigt zurueckbleibt: zwischen zwei Apps
+# (60-Batch), im Paketbau und in den Wiederholungspausen (35-Packaging) sowie in der Update-Suche.
+# Ein laufender Upload nach Intune wird NIE unterbrochen.
 $script:cancelBatch = $false
-$cancelBatchButton = New-Object System.Windows.Forms.Button
-$cancelBatchButton.Tag = 'btn-secondary'
-$cancelBatchButton.Text = Get-UiString 'CancelBatchButton'
-$cancelBatchButton.Location = New-Object System.Drawing.Point(830, 0)
-$cancelBatchButton.Size = New-Object System.Drawing.Size(144, 28)
-$cancelBatchButton.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
-$cancelBatchButton.Visible = $false
-$cancelBatchButton.Add_Click({
-  $script:cancelBatch = $true
-  try { Update-Status (Get-UiString 'CancelBatchRequestedStatus') } catch {}
-  try { Write-Log "Batch cancel requested by user - stopping after the current app." } catch {}
-})
-$bottomPanel.Controls.Add($cancelBatchButton)
-
-function Set-CancelBatchButtonVisible {
-  param([bool]$Visible)
-  if (-not $cancelBatchButton -or -not $script:progressBar) { return }
-  $gap = 10
-  if ($Visible) {
-    # The button occupies its own area; the progress bar ends before it instead of continuing
-    # underneath. Both controls are right-anchored, so the gap survives window resizing.
-    $script:progressBar.Width = [Math]::Max(100, $cancelBatchButton.Left - $script:progressBar.Left - $gap)
-    $cancelBatchButton.Visible = $true
-    $cancelBatchButton.BringToFront()
-  } else {
-    $cancelBatchButton.Visible = $false
-    $script:progressBar.Width = [Math]::Max(100, $bottomPanel.ClientSize.Width - $script:progressBar.Left - 10)
-  }
-}
 
 # Collapsible activity log: a slim toggle above the log box. Collapsing hides the log and
 # lets the main content area grow into the reclaimed space.
-$script:logExpanded = $true
+#
+# Startzustand aus den Einstellungen, standardmaessig EINGEKLAPPT. Aufgeklappt nahm das Protokoll
+# 120 px weg (waehrend eines Laufs bis zu 40 % der Fensterhoehe) und wiederholte in seiner letzten
+# Zeile, was die Statuszeile ohnehin sagt - Update-Status schreibt in beide.
+$script:logExpanded = [bool]$script:settings.LogExpanded
 $logToggle = New-Object System.Windows.Forms.Button
 $logToggle.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
 $logToggle.FlatAppearance.BorderSize = 0
@@ -506,8 +740,16 @@ $logToggle.Tag = 'no-theme'
 $bottomPanel.Controls.Add($logToggle)
 
 function Set-LogExpanded {
-  param([bool]$Expanded)
+  param(
+    [bool]$Expanded,
+    # Beim Aufbau des Fensters wird der gespeicherte Zustand nur angewandt, nicht erneut gespeichert.
+    [switch]$SkipSave
+  )
   $script:logExpanded = $Expanded
+  if (-not $SkipSave -and $script:settings -and [bool]$script:settings.LogExpanded -ne $Expanded) {
+    $script:settings.LogExpanded = $Expanded
+    try { Save-Settings } catch { Write-LogDebug 'save log state' }
+  }
   $chevron = if ($Expanded) { [System.Char]::ConvertFromUtf32(0x25BE) } else { [System.Char]::ConvertFromUtf32(0x25B8) }
   $logToggle.Text = "$chevron " + (Get-UiString 'ActivityLog')
   $script:outputBox.Visible = $Expanded
@@ -525,20 +767,32 @@ function Update-BottomLayout {
   $margin = 10
   $gap = 6
   $statusHeight = [Math]::Max(18, $script:statusLabel.Height)
-  $progressVisible = ($script:progressBar.Visible -or $cancelBatchButton.Visible)
+  $progressVisible = [bool]$script:progressLabel.Visible
 
-  # While an operation runs, the activity log is what the user actually watches - the section above
-  # is mostly an empty list at that moment. So the log grows during a run and shrinks back after.
-  # Capped at 40% of the window so the content area can never be squeezed out.
-  $logHeight = if ($progressVisible) { 210 } else { 120 }
+  # Der Protokollbereich behaelt seine Hoehe - IMMER.
+  #
+  # Vorher wuchs er waehrend eines Laufs von 120 auf 210 px und schrumpfte danach zurueck. Gedacht
+  # war das als Hilfe (waehrend eines Laufs schaut man ins Protokoll), gemeldet wurde es als Fehler:
+  # der Inhalt darueber verliert 90 px mitten in der Arbeit, jede Liste bekommt Bildlaufleisten, und
+  # nach dem Lauf springt alles zurueck. Eine Oberflaeche, die ihre Groessen von selbst aendert,
+  # verliert genau die Verlaesslichkeit, die man beim Arbeiten braucht.
+  $logHeight = 120
   $maxLogHeight = [int]($form.ClientSize.Height * 0.40)
-  if ($logHeight -gt $maxLogHeight) { $logHeight = [Math]::Max(120, $maxLogHeight) }
+  if ($logHeight -gt $maxLogHeight) { $logHeight = [Math]::Max(80, $maxLogHeight) }
+
+  # Fortschrittstext und Abbruch-Knopf teilen die Zeile MIT dem Protokoll-Umschalter, statt eine
+  # eigene zu bekommen.
+  #
+  # Vorher wuchs der untere Bereich beim Start eines Laufs um 32 px und schrumpfte danach zurueck -
+  # derselbe Effekt, der beim Protokollkasten gemeldet wurde, nur kleiner. Der Umschalter ist 220 px
+  # breit und 26 px hoch, der Knopf ebenfalls 26: rechts daneben ist genug Platz fuer beide, und die
+  # Hoehe des Bereichs aendert sich damit NIE - egal ob gerade etwas laeuft.
+  $cancelVisible = [bool]($script:cancelRunButton -and $script:cancelRunButton.Visible)
 
   # Height is derived solely from visible rows. No invisible placeholder remains below the log.
   $requiredHeight = $margin + $statusHeight
   if ($script:logExpanded) { $requiredHeight += $gap + $logHeight }
   $requiredHeight += $gap + $logToggle.Height
-  if ($progressVisible) { $requiredHeight += $gap + [Math]::Max($script:progressBar.Height, $cancelBatchButton.Height) }
   $bottomPanel.Height = $requiredHeight
 
   $contentWidth = [Math]::Max(100, $bottomPanel.ClientSize.Width - (2 * $margin))
@@ -557,24 +811,123 @@ function Update-BottomLayout {
     $logToggle.Top = $script:statusLabel.Top - $gap - $logToggle.Height
   }
 
-  # A running operation gets one extra row above the toggle; otherwise it consumes no height.
-  $progressTop = $logToggle.Top - $gap - $script:progressBar.Height
-  $script:progressBar.Left = $margin
-  $script:progressBar.Top = $progressTop
-  $cancelBatchButton.Top = $progressTop - [Math]::Max(0, [int](($cancelBatchButton.Height - $script:progressBar.Height) / 2))
-  $cancelBatchButton.Left = [Math]::Max($margin, $bottomPanel.ClientSize.Width - $margin - $cancelBatchButton.Width)
-  if ($cancelBatchButton.Visible) {
-    $script:progressBar.Width = [Math]::Max(100, $cancelBatchButton.Left - $script:progressBar.Left - 10)
-  } else {
-    $script:progressBar.Width = $contentWidth
+  # Die Zeile des Umschalters von rechts nach links auffuellen: erst der Abbruch-Knopf (an SEINER
+  # Beschriftung gemessen - die deutsche ist laenger als die englische), dann der Fortschrittstext
+  # mit dem Rest zwischen Umschalter und Knopf.
+  $rowRight = $margin + $contentWidth
+  $btnWidth = 0
+  if ($cancelVisible) {
+    $needed = 120
+    try {
+      $needed = [System.Windows.Forms.TextRenderer]::MeasureText([string]$script:cancelRunButton.Text, $script:cancelRunButton.Font).Width + 24
+    } catch { Write-LogDebug 'measure cancel button' }
+    $btnWidth = [Math]::Min([Math]::Max($needed, 100), [Math]::Max(100, [int]($contentWidth / 2)))
+    $script:cancelRunButton.Size = New-Object System.Drawing.Size($btnWidth, $script:cancelRunButton.Height)
+    $script:cancelRunButton.Left = $rowRight - $btnWidth
+    # Mittig zur Zeile des Umschalters, damit die beiden eine Linie bilden.
+    $script:cancelRunButton.Top = $logToggle.Top + [int](($logToggle.Height - $script:cancelRunButton.Height) / 2)
   }
+  $progressLeft = $logToggle.Left + $logToggle.Width + $gap
+  $progressWidth = $rowRight - $progressLeft - $(if ($cancelVisible) { $btnWidth + $gap } else { 0 })
+  $script:progressLabel.Left = $progressLeft
+  $script:progressLabel.Top = $logToggle.Top + [int](($logToggle.Height - $script:progressLabel.Height) / 2)
+  $script:progressLabel.Width = [Math]::Max(60, $progressWidth)
 
   $mainPanel.Width = [Math]::Max(100, $form.ClientSize.Width - $mainPanel.Left - $margin)
   $mainPanel.Height = [Math]::Max(120, $bottomPanel.Top - $mainPanel.Top - 8)
 }
 $logToggle.Add_Click({ Set-LogExpanded (-not $script:logExpanded) })
-$script:progressBar.Add_VisibleChanged({ try { Update-BottomLayout } catch {} })
-$cancelBatchButton.Add_VisibleChanged({ try { Update-BottomLayout } catch {} })
+$script:progressLabel.Add_VisibleChanged({ try { Update-BottomLayout } catch {} })
+# Show-Progress zeigt erst den Text und dann den Knopf; ohne diesen zweiten Durchgang bliebe die
+# Zeile auf der Hoehe ohne Knopf stehen und der Text laege unter ihm.
+$script:cancelRunButton.Add_VisibleChanged({ try { Update-BottomLayout } catch {} })
+# --- Kopfzeile: Breiten aus den Beschriftungen, nicht aus Pixelkonstanten ------------------------
+#
+# "Bei Tenant anmelden" braucht 118 px, der Knopf war 120 px breit - mit dem Innenabstand eines
+# Buttons heisst das: abgeschnitten, und zwar seit es die deutsche Fassung gibt. Dasselbe droht bei
+# jeder weiteren Sprache und bei jedem Design mit breiterer Schrift.
+#
+# Beide Gruppen der Kopfzeile - die Anmeldegruppe und die Verbunden-Gruppe - werden deshalb von der
+# RECHTEN Kante her ausgerichtet und die Knoepfe an ihrem Text gemessen. Die Reihenfolge im Code ist
+# die Reihenfolge auf dem Schirm, von rechts nach links.
+function Update-HeaderLayout {
+  try {
+    if (-not $headerPanel) { return }
+    # Rechter Rand wie bisher: bei der Entwurfsbreite von 1044 px endete der Anmelde-Knopf bei 968.
+    $rightMargin = 76
+    $top = $script:headerRowTop
+    $height = 36
+    $gap = 6
+
+    # Misst die Textbreite eines Steuerelements mit SEINER Schrift - die wechselt mit dem Design.
+    $measure = {
+      param($ctrl, $minimum)
+      $w = $minimum
+      try {
+        $t = [string]$ctrl.Text
+        if ($t) {
+          # +30: Innenabstand des Buttons plus Rahmen. Ohne Zuschlag beruehrt der Text den Rand.
+          $needed = [System.Windows.Forms.TextRenderer]::MeasureText($t, $ctrl.Font).Width + 30
+          if ($needed -gt $w) { $w = $needed }
+        }
+      } catch { }
+      return [int]$w
+    }
+
+    $right = $headerPanel.ClientSize.Width - $rightMargin
+    if ($right -lt 400) { return }   # Fenster zu schmal zum Ausrichten; Anker halten die Optik
+
+    # --- Anmeldegruppe, von rechts nach links: Knopf, Verlauf-Knopf, Eingabefeld, Beschriftung ---
+    if ($loginButton) {
+      $w = & $measure $loginButton 120
+      $loginButton.Size = New-Object System.Drawing.Size($w, $height)
+      $loginButton.Location = New-Object System.Drawing.Point(($right - $w), $top)
+      $cursor = $right - $w - $gap
+    } else { $cursor = $right }
+    if ($recentButton) {
+      $recentButton.Location = New-Object System.Drawing.Point(($cursor - $recentButton.Width), $top)
+      $cursor = $recentButton.Left - 2
+    }
+    if ($usernameHost) {
+      $usernameHost.Location = New-Object System.Drawing.Point(($cursor - $usernameHost.Width), $top)
+      $cursor = $usernameHost.Left - $gap
+    }
+    if ($usernameLabel) {
+      $usernameLabel.Location = New-Object System.Drawing.Point(($cursor - $usernameLabel.PreferredWidth), ($top + 10))
+    }
+
+    # --- Verbunden-Gruppe: Abmelden, Trennen, dann der Kundenname mit dem Rest der Breite --------
+    $cursor = $right
+    if ($logoutButton) {
+      $w = & $measure $logoutButton 100
+      $logoutButton.Size = New-Object System.Drawing.Size($w, $height)
+      $logoutButton.Location = New-Object System.Drawing.Point(($cursor - $w), $top)
+      $cursor = $logoutButton.Left - $gap
+    }
+    if ($disconnectButton) {
+      $w = & $measure $disconnectButton 100
+      $disconnectButton.Size = New-Object System.Drawing.Size($w, $height)
+      $disconnectButton.Location = New-Object System.Drawing.Point(($cursor - $w), $top)
+      $cursor = $disconnectButton.Left - $gap
+    }
+    if ($loginInfoLabel) {
+      # Der Kundenname bekommt, was zwischen Anwendungsnamen und den Knoepfen uebrig ist - er ist
+      # die wichtigste Angabe der Kopfzeile und darf nicht als erstes gekuerzt werden.
+      $labelLeft = 0
+      if ($appTitleLabel) { $labelLeft = $appTitleLabel.Left + $appTitleLabel.PreferredWidth + 24 }
+      $badgeRoom = if ($authInfoBadge) { $authInfoBadge.Width + $gap } else { 0 }
+      $width = $cursor - $labelLeft - $badgeRoom
+      if ($width -gt 120) {
+        $loginInfoLabel.Location = New-Object System.Drawing.Point($labelLeft, $top)
+        $loginInfoLabel.Size = New-Object System.Drawing.Size($width, $height)
+        if ($authInfoBadge) {
+          $authInfoBadge.Location = New-Object System.Drawing.Point(($labelLeft + $width + $gap), ($top + 10))
+        }
+      }
+    }
+  } catch { Write-LogDebug 'header layout' }
+}
+
 # Recompute child widths/content height on every resize; Bottom placement is guaranteed by docking.
 # Every card is positioned at a fixed design width. Growing them with the window is what makes the
 # extra space usable at all - before this, maximising only added empty area on the right while
@@ -599,6 +952,10 @@ function Update-CardWidths {
         if ($child.Width -ne $available) { $child.Width = $available }
       }
     }
+    # A wider card gives its explanations more room, so they need fewer lines - without re-stacking,
+    # the rows keep the spacing of the narrow layout and the cards end up with a block of empty
+    # space at the bottom.
+    if (Get-Command Update-SettingsLayout -ErrorAction SilentlyContinue) { Update-SettingsLayout }
     # Cards clip themselves to a rounded region that is rebuilt on every resize. Without
     # invalidating the container, the previous outline can stay on screen and the card looks
     # like two overlapping frames.
@@ -608,10 +965,15 @@ function Update-CardWidths {
 
 $form.Add_Resize({
   try { if ($script:logExpanded -ne $null) { Update-BottomLayout } } catch {}
+  try { Update-HeaderLayout } catch {}
   try { Update-CardWidths } catch {}
   # Re-flow the updates section so its list keeps filling the available height.
   try { if (Get-Command Update-UpdatesLayout -ErrorAction SilentlyContinue) { Update-UpdatesLayout } } catch {}
   try { if (Get-Command Update-TenantAppsLayout -ErrorAction SilentlyContinue) { Update-TenantAppsLayout } } catch {}
+  try { if (Get-Command Update-StoreLayout -ErrorAction SilentlyContinue) { Update-StoreLayout } } catch {}
+  try { if (Get-Command Update-LocalPackagesLayout -ErrorAction SilentlyContinue) { Update-LocalPackagesLayout } } catch {}
+  try { if (Get-Command Update-AppSettingsLayout -ErrorAction SilentlyContinue) { Update-AppSettingsLayout } } catch {}
+  try { if (Get-Command Update-WorkRecordSectionLayout -ErrorAction SilentlyContinue) { Update-WorkRecordSectionLayout } } catch {}
 })
 
 # Disconnect button – quick session end, keeps the cached sign-in for a fast reconnect
@@ -674,7 +1036,7 @@ $authInfoBadge.Visible = $false
 # Dock=Fill content panel split the space. Each former "tab" is now a Panel added to the
 # content panel and toggled by the sidebar buttons.
 $mainPanel = New-Object System.Windows.Forms.Panel
-$mainPanel.Location = New-Object System.Drawing.Point(10, 112)
+$mainPanel.Location = New-Object System.Drawing.Point($script:mainPanelIndent, $script:mainPanelTop)
 $mainPanel.Size = New-Object System.Drawing.Size(974, 476)
 $mainPanel.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right -bor [System.Windows.Forms.AnchorStyles]::Bottom
 $form.Controls.Add($mainPanel)
@@ -696,12 +1058,16 @@ $mainPanel.Controls.Add($sidebarPanel)
 $script:sections = [System.Collections.Generic.List[object]]::new()
 $script:activeSection = $null
 
+# $Group teilt die Navigation in die zwei Aufgaben, die die Info-Texte bisher dreimal in Worten
+# erklaeren mussten ("Dieser Bereich ist fuer Apps, die es in Intune noch NICHT gibt", "Das ist
+# NICHT die Liste Ihrer bereitgestellten Apps"). Was die Anordnung sagt, muss kein Text sagen.
+# Leer = kein Gruppentitel darueber (Uebersicht und Einstellungen stehen fuer sich).
 function Add-Section {
-  param([string]$Key, [System.Windows.Forms.Panel]$Panel, [string]$Label)
+  param([string]$Key, [System.Windows.Forms.Panel]$Panel, [string]$Label, [string]$Group = '')
   $Panel.Dock = [System.Windows.Forms.DockStyle]::Fill
   $Panel.Visible = $false
   $contentPanel.Controls.Add($Panel)
-  $script:sections.Add([pscustomobject]@{ Key = $Key; Panel = $Panel; Label = $Label; NavButton = $null })
+  $script:sections.Add([pscustomobject]@{ Key = $Key; Panel = $Panel; Label = $Label; Group = $Group; NavButton = $null })
 }
 
 # Sidebar colors are derived from the active theme so the nav stays readable in every theme.
@@ -717,7 +1083,11 @@ $script:navGlyphs = @{
   updates    = 0xE72C   # refresh
   tenant     = 0xE71D   # all apps
   ownpackage = 0xE7B8   # package / box
+  localpackages = 0xE8B7   # folder - Paketkopien auf der Platte
+  appsettings = 0xE8B3     # select-all - Einstellungen fuer MEHRERE Apps auf einmal;
+                           # bewusst nicht das Listensymbol der Nachbarn darueber
   discovered = 0xE721   # search
+  workrecord = 0xE9D9   # analytics - der Leistungsnachweis dieser/der letzten Sitzung
   settings   = 0xE713   # settings gear
   leistung   = 0xE9D9   # report / chart
 }
@@ -765,6 +1135,15 @@ function Update-SidebarTheme {
   $script:sidebarBackColor = $t.ButtonSecondaryBackColor
   $script:sidebarForeColor = $t.ForeColor
   if ($sidebarPanel) { $sidebarPanel.BackColor = $script:sidebarBackColor }
+  # Die Gruppentitel tragen 'no-theme' (wie die Nav-Knoepfe) und werden deshalb hier gefaerbt, nicht
+  # vom allgemeinen Themer - sonst bekaemen sie die Farben des Inhaltsbereichs statt der Leiste.
+  foreach ($gl in @($script:navGroupLabelList)) {
+    if (-not $gl) { continue }
+    try {
+      $gl.BackColor = $script:sidebarBackColor
+      $gl.ForeColor = Get-DimmedColor -Fore $script:sidebarForeColor -Back $script:sidebarBackColor -Ratio 0.45
+    } catch { }
+  }
   if ($navFlow) { $navFlow.BackColor = $script:sidebarBackColor }
   if ($script:activeSection) { Show-Section $script:activeSection }
 }
@@ -793,6 +1172,35 @@ function Update-StatusStripTheme {
 # The classic menu bar is 'no-theme' (Set-GuiTheme skips ToolStrips). A plain BackColor is
 # not enough: the ProfessionalRenderer draws light dropdown chrome, so menu text became
 # invisible. We give it a proper theme-coloured ColorTable + renderer instead.
+# Färbt einen Menüeintrag und ALLE seine Untereinträge, beliebig tief.
+#
+# Ein Separator hat kein ForeColor, das Setzen wirft aber auch nicht - der Versuch wird trotzdem
+# einzeln abgesichert, damit ein einzelner unpassender Eintragstyp nicht den Rest des Menüs
+# ungefärbt lässt.
+function Set-MenuItemColorsDeep {
+  param(
+    $Item,
+    [System.Drawing.Color]$Back,
+    [System.Drawing.Color]$Fore,
+    [System.Drawing.Color]$Disabled
+  )
+  if (-not $Item) { return }
+  try {
+    $Item.BackColor = $Back
+    $Item.ForeColor = if ($Item.Enabled) { $Fore } else { $Disabled }
+  } catch { }
+  try {
+    if ($Item.HasDropDownItems) {
+      # Auch die Fläche des Klappmenüs selbst, nicht nur die Einträge darauf: sonst bleibt der Rand
+      # um die Einträge herum in der Systemfarbe stehen.
+      try { $Item.DropDown.BackColor = $Back } catch { }
+      foreach ($child in $Item.DropDownItems) {
+        Set-MenuItemColorsDeep -Item $child -Back $Back -Fore $Fore -Disabled $Disabled
+      }
+    }
+  } catch { }
+}
+
 function Update-MenuTheme {
   if (-not $menuStrip) { return }
   $t = $script:currentTheme
@@ -831,15 +1239,19 @@ public class DarkMenuColorTable : ProfessionalColorTable {
   try { $menuStrip.Renderer = New-Object System.Windows.Forms.ToolStripProfessionalRenderer((New-Object DarkMenuColorTable($bg, $sel, $bor))) } catch {}
   $menuStrip.BackColor = $bg
   $menuStrip.ForeColor = $t.ForeColor
+  # REKURSIV, nicht eine Ebene tief.
+  #
+  # Die frühere Fassung färbte die obersten Einträge und deren direkte Kinder. Das reichte genau so
+  # lange, wie das Menü zwei Ebenen hatte. Mit "Ansicht > Design > Heller Modus" liegen die
+  # Themennamen auf Ebene DREI - sie wurden nie erreicht, behielten die Systemfarbe und standen
+  # dunkelgrau auf dunklem Grund. Sichtbar wurde das erst im dunklen Design, weil die Systemfarbe
+  # für einen hellen Hintergrund gedacht ist.
+  #
+  # Deshalb rekursiv statt zwei geschachtelter Schleifen: eine dritte Ebene, die morgen dazukommt,
+  # darf nicht wieder unlesbar sein. Deaktivierte Einträge bekommen die gedämpfte Farbe - mit der
+  # normalen Vordergrundfarbe sähen sie aus wie anklickbar.
   foreach ($it in $menuStrip.Items) {
-    $it.ForeColor = $t.ForeColor
-    if ($it.HasDropDownItems) {
-      try { $it.DropDown.BackColor = $bg } catch {}
-      foreach ($d in $it.DropDownItems) {
-        $d.BackColor = $bg
-        $d.ForeColor = $t.ForeColor
-      }
-    }
+    Set-MenuItemColorsDeep -Item $it -Back $bg -Fore $t.ForeColor -Disabled $t.SecondaryForeColor
   }
   # Recent-logins context menu shares the same dark renderer/colors as the main menu bar so its
   # dropdown is readable in the dark theme (it is 'no-theme', i.e. skipped by the generic themer).
@@ -848,8 +1260,7 @@ public class DarkMenuColorTable : ProfessionalColorTable {
     $recentMenu.BackColor = $bg
     $recentMenu.ForeColor = $t.ForeColor
     foreach ($it in $recentMenu.Items) {
-      $it.BackColor = $bg
-      if ($it.Enabled) { $it.ForeColor = $t.ForeColor } else { $it.ForeColor = $t.SecondaryForeColor }
+      Set-MenuItemColorsDeep -Item $it -Back $bg -Fore $t.ForeColor -Disabled $t.SecondaryForeColor
     }
   }
 }
@@ -872,10 +1283,18 @@ function Show-Section {
   # wider than their section - which is what produced the horizontal scrollbar and the mismatched
   # card widths. Re-measure now that this section is actually shown.
   try { Update-CardWidths } catch {}
-  # Refresh the dashboard tiles whenever the dashboard becomes visible while connected, so the
-  # counts reflect the latest tenant state (e.g. after an update scan) instead of a stale value.
+  # Das Dashboard fragt NICHT mehr bei jedem Besuch drei Mal den Tenant ab. Gemeldet als "es hängt
+  # kurz, wenn ich auf Dashboard klicke": jeder Besuch kostete Inventar + Update-Kennzeichen +
+  # abgeloeste Apps, und weil das auf dem UI-Thread laeuft, fror das Fenster dabei ein. Aktualisiert
+  # wird jetzt bei der Anmeldung, nach einem Lauf, der die Zahlen aendert (dashboardStale), und auf
+  # Knopfdruck. Der Stand steht unter den Kacheln, damit die Zahlen nie stumm veralten.
   if ($Key -eq 'dashboard' -and $script:isConnected -and (Get-Command Refresh-Dashboard -ErrorAction SilentlyContinue)) {
-    try { Refresh-Dashboard } catch { try { Write-Log ("Dashboard refresh (nav) error: {0}" -f $_.Exception.Message) } catch {} }
+    $neverLoaded = ($script:dashboardLastRefresh -eq [datetime]::MinValue)
+    if ($neverLoaded -or $script:dashboardStale) {
+      try { Refresh-Dashboard -Force } catch { try { Write-Log ("Dashboard refresh (nav) error: {0}" -f $_.Exception.Message) } catch {} }
+    } else {
+      try { Update-DashboardFreshness } catch {}
+    }
   }
   # Size the updates list to the panel the moment the section becomes visible (its ClientSize is
   # only meaningful once shown).
@@ -884,6 +1303,27 @@ function Show-Section {
   }
   if ($Key -eq 'tenant' -and (Get-Command Update-TenantAppsLayout -ErrorAction SilentlyContinue)) {
     try { Update-TenantAppsLayout } catch {}
+  }
+  if ($Key -eq 'ownpackage' -and (Get-Command Update-OwnPackageLayout -ErrorAction SilentlyContinue)) {
+    try { Update-OwnPackageLayout } catch {}
+  }
+  if ($Key -eq 'localpackages' -and (Get-Command Update-LocalPackagesLayout -ErrorAction SilentlyContinue)) {
+    try { Update-LocalPackagesLayout } catch {}
+  }
+  if ($Key -eq 'store' -and (Get-Command Update-StoreLayout -ErrorAction SilentlyContinue)) {
+    try { Update-StoreLayout } catch {}
+  }
+  # Der Editor laedt die App-Liste beim OEFFNEN, nicht beim Aufbau des Fensters - vorher ist niemand
+  # angemeldet. Nur einmal je Sitzung; der Knopf "Neu laden" im Bereich holt den Rest.
+  if ($Key -eq 'workrecord' -and (Get-Command Update-WorkRecordSectionLayout -ErrorAction SilentlyContinue)) {
+    try { Update-WorkRecordSectionLayout } catch {}
+  }
+  if ($Key -eq 'appsettings' -and (Get-Command Update-AppSettingsLayout -ErrorAction SilentlyContinue)) {
+    try { Update-AppSettingsLayout } catch {}
+  }
+  if ($Key -eq 'appsettings' -and $script:isConnected -and $script:appSettingsLoad -and -not $script:appSettingsLoaded) {
+    $script:appSettingsLoaded = $true
+    try { & $script:appSettingsLoad } catch { Write-Log ("App settings load failed: {0}" -f $_.Exception.Message) }
   }
   # 2) Restyle the nav buttons (purely cosmetic). Guarded per button so a single failure
   #    (e.g. an icon-render hiccup) can neither abort the loop nor break navigation.
@@ -1063,7 +1503,7 @@ function Show-GroupFavoriteDialog {
 # Section: Dashboard (registered first so it is the top nav item + default view). Its
 # content (stat tiles, quick actions) is built in the dashboard stage; title placeholder here.
 $tabDashboard = New-Object System.Windows.Forms.Panel
-Add-Section -Key 'dashboard' -Panel $tabDashboard -Label (Get-UiString 'NavDashboard')
+Add-Section -Key 'dashboard' -Panel $tabDashboard -Label (Get-UiString 'NavDashboard') -Group 'start'
 $dashTitle = New-Object System.Windows.Forms.Label
 $dashTitle.Text = Get-UiString 'NavDashboard'
 $dashTitle.Location = New-Object System.Drawing.Point(16, 12)

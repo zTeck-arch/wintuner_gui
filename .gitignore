@@ -12,3 +12,8 @@ packages/
 *.intunewin
 *.wtpackage
 
+# Arbeitszettel dieser Sitzungen - kein Teil der Anwendung, halten sich nicht aktuell und
+# beschreiben Zwischenstaende. Bewusst NICHT im Repository (mit -f liesse sich das erzwingen).
+AUDIT-PLAN.md
+AUDIT-PROGRESS.md
+HANDOVER.md

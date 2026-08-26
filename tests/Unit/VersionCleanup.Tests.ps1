@@ -8,17 +8,48 @@ BeforeAll {
   # "Collection was modified" race. Load the real wrapper so it exercises the same path the app does;
   # it still bottoms out in the mocked Get-WtWin32Apps below.
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '25-WinGetData.ps1' -Name @(
-    'Test-IsTransientModuleRace', 'Invoke-WithTransientRetry', 'Get-Win32AppsResilient'))))
+    'Test-IsTransientModuleRace', 'Invoke-WithTransientRetry', 'Get-Win32AppsResilient',
+    'Test-Win32InventoryTruncated'))))
 
   function global:Resolve-WtWingetId { param($AppOrResult) [string]$AppOrResult.PackageId }
+  # Models the real cmdlet's FILTER semantics instead of just accepting its parameters.
+  #
+  # The previous stand-in took $Update as an untyped parameter and never looked at it. That is why
+  # all nine tests in this file stayed green through 0.15.8, in which the version cleanup read an
+  # inventory containing ONLY apps that were already up to date - the mock could not tell
+  # "-Update not bound" from "-Update:$false", which was the entire bug.
+  #
+  # Typed like the module (Nullable[bool], verified against WinTuner 1.4.1) so binding a raw switch
+  # fails here the same way it fails in production, and $Update is applied as what it is: a filter on
+  # each app's UpdateAvailable, where "not bound" means "no filter".
   function global:Get-WtWin32Apps {
-    param($Superseded, $Update, $ErrorAction)
-    if ($Superseded) { return $global:SupersededApps }
-    return $global:ActiveApps
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param(
+      [Nullable[bool]]$Superseded,
+      [Nullable[bool]]$Update,
+      [Nullable[bool]]$Superseding,
+      [string]$NameContains,
+      [Nullable[bool]]$IsAssigned
+    )
+    $global:lastInventoryQuery = $PSBoundParameters
+    $apps = if ($Superseded) { @($global:SupersededApps) } else { @($global:ActiveApps) }
+    if ($PSBoundParameters.ContainsKey('Update') -and $null -ne $Update) {
+      $apps = @($apps | Where-Object { [bool]$_.UpdateAvailable -eq [bool]$Update })
+    }
+    return @($apps)
   }
   function global:New-TestApp {
-    param($Version, $Id, $Name = 'Adobe Acrobat Reader (64-bit)', $PackageId = 'Adobe.Acrobat.Reader.64-bit')
-    [pscustomobject]@{ Name = $Name; CurrentVersion = $Version; GraphId = $Id; PackageId = $PackageId }
+    param(
+      $Version, $Id, $Name = 'Adobe Acrobat Reader (64-bit)', $PackageId = 'Adobe.Acrobat.Reader.64-bit',
+      # Mirrors the property the real -Update filter works on. Defaults to "an update is available",
+      # because those are exactly the apps 0.15.8 dropped out of the inventory.
+      [bool]$UpdateAvailable = $true
+    )
+    [pscustomobject]@{
+      Name = $Name; CurrentVersion = $Version; GraphId = $Id; PackageId = $PackageId
+      UpdateAvailable = $UpdateAvailable
+    }
   }
 }
 
@@ -109,6 +140,44 @@ Describe 'Get-AppVersionGroups' {
       $groups = @(Get-AppVersionGroups -KeepCount 2)
       $groups.Count | Should -Be 2
       foreach ($g in $groups) { $g.Obsolete.Count | Should -Be 1 }
+    }
+  }
+
+  Context 'the inventory it reads' {
+    # This is the test that was missing when 0.15.8 shipped. The cleanup reads the same inventory as
+    # the update scan; binding -Update:$false there left it with only up-to-date apps, so superseded
+    # versions were never even considered for deletion - and every test in this file still passed.
+    BeforeEach { $global:lastInventoryQuery = $null }
+
+    It 'does not filter the inventory by update state' {
+      $global:ActiveApps = @($global:A89, $global:A91)
+      $global:SupersededApps = @($global:A71)
+      $null = @(Get-AppVersionGroups -KeepCount 2)
+      $global:lastInventoryQuery | Should -Not -BeNullOrEmpty
+      $global:lastInventoryQuery.ContainsKey('Update') |
+        Should -BeFalse -Because 'the cleanup must see every version, not only the current ones'
+    }
+
+    It 'still finds obsolete versions when every app reports an available update' {
+      # With the 0.15.8 bug in place this returned nothing at all: -Update:$false removed exactly
+      # these apps from the list.
+      $global:ActiveApps = @(
+        (New-TestApp -Version '26.001.21789' -Id 'dddd-1' -UpdateAvailable $true),
+        (New-TestApp -Version '26.001.21691' -Id 'dddd-2' -UpdateAvailable $true),
+        (New-TestApp -Version '26.001.21529' -Id 'dddd-3' -UpdateAvailable $true)
+      )
+      $global:SupersededApps = @()
+      $groups = @(Get-AppVersionGroups -KeepCount 2)
+      $groups.Count | Should -Be 1
+      $groups[0].Obsolete.Count | Should -Be 1
+    }
+
+    It 'asks for the superseded side of the inventory as well' {
+      $global:ActiveApps = @($global:A89)
+      $global:SupersededApps = @($global:A71)
+      $null = @(Get-AppVersionGroups -KeepCount 1)
+      # The last call of the two is the superseded one.
+      $global:lastInventoryQuery['Superseded'] | Should -BeTrue
     }
   }
 }

@@ -1,4 +1,4 @@
-name: Publish release
+﻿name: Publish release
 
 on:
   push:
@@ -9,8 +9,91 @@ permissions:
   contents: write
 
 jobs:
+  # Gate in front of the release. Until this existed, "Publish release" ran only the build and the
+  # static checks: a tag push could publish an artefact for which the 277 unit tests and
+  # PSScriptAnalyzer had never run, because their workflow did not trigger on tags at all. That is
+  # the cheapest possible way to ship a known-broken release, so it is now impossible - `release`
+  # needs this job, and a failure here means no GitHub release is created.
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Pester and PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck -ErrorAction Stop
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -ErrorAction Stop
+
+      - name: Install WinTuner module (for the contract test)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module WinTuner -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+
+      - name: Build single file
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & (Join-Path $env:GITHUB_WORKSPACE 'build\Build-SingleFile.ps1')
+
+      - name: Static checks
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & (Join-Path $env:GITHUB_WORKSPACE 'tests\StaticChecks.ps1')
+
+      - name: Smoke-test the assembled script
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & (Join-Path $env:GITHUB_WORKSPACE 'tests\SmokeTest.ps1')
+
+      # Misst die Anordnung im laufenden Fenster: eine Beschriftung, die ueber ihrem Eingabefeld
+      # liegt, ist unsichtbar - und weder Parser noch Unit-Test sehen das.
+      - name: Layout probe (overlapping controls)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & (Join-Path $env:GITHUB_WORKSPACE 'tests\LayoutProbe.ps1')
+
+      - name: Unit tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module Pester -MinimumVersion 5.5.0
+          $config = New-PesterConfiguration
+          $config.Run.Path = (Join-Path $env:GITHUB_WORKSPACE 'tests\Unit')
+          $config.Run.Throw = $true
+          $config.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $config
+
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $settings = Join-Path $env:GITHUB_WORKSPACE 'PSScriptAnalyzerSettings.psd1'
+          $testSettings = Join-Path $env:GITHUB_WORKSPACE 'PSScriptAnalyzerSettings.Tests.psd1'
+          $targets = @(
+            Join-Path $env:GITHUB_WORKSPACE 'src'
+            Join-Path $env:GITHUB_WORKSPACE 'build'
+            Join-Path $env:GITHUB_WORKSPACE 'dev.ps1'
+          )
+          $findings = @($targets | ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Recurse -Settings $settings })
+          $findings += @(Invoke-ScriptAnalyzer -Path (Join-Path $env:GITHUB_WORKSPACE 'tests') -Recurse -Settings $testSettings)
+          $blocking = @($findings | Where-Object { $_.Severity -in 'Error', 'Warning' })
+          foreach ($f in $findings) {
+            Write-Host ("[{0}] {1}:{2} {3}" -f $f.Severity, (Split-Path $f.ScriptName -Leaf), $f.Line, $f.RuleName)
+          }
+          Write-Host ("PSScriptAnalyzer: {0} blocking." -f $blocking.Count)
+          if ($blocking.Count -gt 0) { throw "PSScriptAnalyzer reported $($blocking.Count) Error/Warning finding(s); refusing to release." }
+
   release:
     runs-on: windows-latest
+    needs: verify
     steps:
       - uses: actions/checkout@v4
 

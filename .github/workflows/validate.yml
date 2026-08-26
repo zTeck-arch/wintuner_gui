@@ -1,8 +1,13 @@
-name: Validate PowerShell
+﻿name: Validate PowerShell
 
 on:
   push:
     branches: [main]
+    # Tags too. Pushing a tag is what publishes a release, and until this was here the trigger
+    # excluded tags: a tag push ran only "Publish release", which did not run the unit tests or the
+    # analyzer. A release could therefore be built and published from a commit for which none of
+    # them had ever run.
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -27,6 +32,22 @@ jobs:
         run: |
           & (Join-Path $env:GITHUB_WORKSPACE 'tests\StaticChecks.ps1')
 
+      # Actually RUNS the assembled script. Everything above this step reads the bundle; nothing
+      # executed it, so a part in the wrong order or a $script: variable read before its assignment
+      # passed the whole chain and failed on the user's machine instead. The script stops at its own
+      # smoke gate before the message loop, so there is no window and nothing to click.
+      - name: Smoke-test the assembled script
+        shell: pwsh
+        run: |
+          & (Join-Path $env:GITHUB_WORKSPACE 'tests\SmokeTest.ps1')
+
+      # Misst die Anordnung im laufenden Fenster: eine Beschriftung, die ueber ihrem Eingabefeld
+      # liegt, ist unsichtbar - und weder Parser noch Unit-Test sehen das.
+      - name: Layout probe (overlapping controls)
+        shell: pwsh
+        run: |
+          & (Join-Path $env:GITHUB_WORKSPACE 'tests\LayoutProbe.ps1')
+
   unit:
     runs-on: windows-latest
     steps:
@@ -37,6 +58,20 @@ jobs:
         run: |
           Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
           Install-Module Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck -ErrorAction Stop
+
+      # The WinTuner module itself, so ModuleContract.Tests.ps1 actually verifies the contract
+      # instead of skipping it. Those assertions are the only thing in the repository that checks the
+      # application's assumptions about the module's parameter semantics against the real module -
+      # the assumption 0.15.8 got wrong. A skipped contract test is a green tick that proves nothing.
+      # Non-fatal on purpose: a PSGallery outage must not turn every build red, and the contract
+      # suite reports loudly when it had to skip.
+      - name: Install WinTuner module (for the contract test)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module WinTuner -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+          (Get-Module -ListAvailable WinTuner | Sort-Object Version -Descending | Select-Object -First 1).Version.ToString()
 
       # Behaviour tests for the pure logic - version comparison, version grouping, the installation
       # probe, the performance record, the self-update. They run against src/ directly, so a failure

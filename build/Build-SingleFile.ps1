@@ -28,8 +28,37 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$parts = @(Get-ChildItem -LiteralPath $SourceDirectory -Filter '*.ps1' -File | Sort-Object Name)
-if ($parts.Count -eq 0) { throw "No source parts found in $SourceDirectory." }
+$found = @(Get-ChildItem -LiteralPath $SourceDirectory -Filter '*.ps1' -File)
+if ($found.Count -eq 0) { throw "No source parts found in $SourceDirectory." }
+
+# The load order IS the numeric prefix, so the prefix is checked rather than assumed.
+#
+# This used to be Sort-Object Name over whatever *.ps1 happened to be in src/. Two things could go
+# wrong silently. A file without a numeric prefix (a scratch copy, a "90-Main.backup.ps1", an
+# experiment) was concatenated at whatever position its name sorted to - possibly BEFORE
+# 00-Bootstrap, where the top-level statements it contains run against a half-built world. And
+# Sort-Object Name is culture-aware string sorting, so ordering by a two-digit prefix was luck
+# rather than design. Sorting numerically on the prefix makes the order explicit and total.
+$pattern = '^(?<prefix>\d{2})-'
+$unprefixed = @($found | Where-Object { $_.Name -notmatch $pattern })
+if ($unprefixed.Count -gt 0) {
+  throw ("Refusing to build: {0} in {1} lack the two-digit load-order prefix (NN-Name.ps1): {2}. Move or rename them - a part without a prefix would be concatenated at an unpredictable position." -f
+    $unprefixed.Count, $SourceDirectory, (($unprefixed | ForEach-Object { $_.Name }) -join ', '))
+}
+
+$parts = @($found | Sort-Object -Property @{ Expression = { [int]([regex]::Match($_.Name, $pattern).Groups['prefix'].Value) } }, Name)
+
+# Two parts sharing a prefix have no defined order between them - it would come down to the
+# secondary sort, i.e. to their file names. Say so instead of picking one.
+$duplicatePrefixes = @($parts |
+  Group-Object -Property { [int]([regex]::Match($_.Name, $pattern).Groups['prefix'].Value) } |
+  Where-Object { $_.Count -gt 1 })
+if ($duplicatePrefixes.Count -gt 0) {
+  $detail = ($duplicatePrefixes | ForEach-Object {
+    '{0:D2} -> {1}' -f [int]$_.Name, (($_.Group | ForEach-Object { $_.Name }) -join ' + ')
+  }) -join '; '
+  throw "Refusing to build: these load-order prefixes are used more than once, so the order between them is undefined: $detail"
+}
 
 $builder = [Text.StringBuilder]::new()
 $map = [Collections.Generic.List[string]]::new()
@@ -38,6 +67,11 @@ $line = 1
 foreach ($part in $parts) {
   # ReadAllText strips a BOM if a part happens to have one, so no BOM can end up mid-file.
   $content = [IO.File]::ReadAllText($part.FullName)
+  # Checked before the CRLF test, which would otherwise report an empty file as a line-ending
+  # problem and send the reader looking for the wrong thing.
+  if ($content.Length -eq 0) {
+    throw "Part '$($part.Name)' is empty. Delete it or give it content - an empty part is almost always a failed write or a leftover."
+  }
   if (-not $content.EndsWith("`r`n")) {
     throw "Part '$($part.Name)' does not end with CRLF; concatenating it would join two statements."
   }
