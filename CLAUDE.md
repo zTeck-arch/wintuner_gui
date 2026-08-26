@@ -42,8 +42,8 @@ Invoke-ScriptAnalyzer -Path .\src   -Settings .\PSScriptAnalyzerSettings.psd1 -R
 Invoke-ScriptAnalyzer -Path .\tests -Settings .\PSScriptAnalyzerSettings.Tests.psd1 -Recurse
 ```
 
-Erwartet (gemessen am 26.08.2026, Stand 0.16.0): StaticChecks grün (**310 Funktionen, 966 UI-Keys
-je Sprache**), SmokeTest grün, LayoutProbe grün, **541 Pester** grün (1 übersprungen), Analyzer
+Erwartet (gemessen am 26.08.2026, Stand 0.16.0): StaticChecks grün (**311 Funktionen, 966 UI-Keys
+je Sprache**), SmokeTest grün, LayoutProbe grün, **545 Pester** grün (1 übersprungen), Analyzer
 **0 blockierend** (5 informational in `65-Theme.ps1` sind Altbestand).
 
 Die eine übersprungene Prüfung wechselt die Seite, je nachdem was auf dem Rechner installiert ist:
@@ -100,6 +100,8 @@ Vollständig mit Begründung in [docs/PATTERNS.md](docs/PATTERNS.md) — hier nu
 - Eine **deaktivierte Label** zeichnet WinForms immer grau → `Set-LabelDimmed` statt `Enabled=$false`.
 - Die Sichtbarkeit der Fortschrittsanzeige **ist** die Busy-Sperre → jedes `Show-Progress` braucht
   ein `Hide-Progress` im selben Handler.
+- Ein modaler Dialog im Startpfad hängt jeden unbeaufsichtigten Lauf (SmokeTest, LayoutProbe) →
+  Startmeldungen über `Show-StartupDialog`.
 - `[Environment]::GetFolderPath('ApplicationData')` ignoriert `$env:APPDATA` → ein Testlauf des
   gebauten Skripts schreibt ins **echte** Profil.
 - Layout aus Pixelkonstanten ist Altbestand; neu geschriebenes Layout misst (`Get-ControlTextWidth`,

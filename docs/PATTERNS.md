@@ -231,6 +231,11 @@ Profil.
   Läufer **immer** genommen wird, weil dort kein WinTuner-Modul installiert ist — auf dem
   Entwicklungsrechner ist es da, also sah es dort nie jemand. Startmeldungen deshalb über
   `Show-StartupDialog` (70-Runtime); eine StaticCheck-Regel hält die Stelle frei.
+- **Es gibt zwei unbeaufsichtigte Läufer, nicht einen.** `SmokeTest` setzt `WINTUNER_SMOKE`,
+  `LayoutProbe` setzt `WINTUNER_LAYOUT` und schiebt sich vor das Smoke-Tor. Wer nur die erste
+  Kennung abfragt, hat den Dialog nur zur Hälfte stillgestellt — die Layout-Probe lief danach
+  weiter in ihren Zeitablauf (240 s). Beide Kennungen stehen in `Test-UnattendedRun` (70-Runtime);
+  ein neuer Prüfkopf braucht dort eine Zeile und sonst nichts.
 - **Der Entwicklungsrechner hat mehr installiert als der Läufer.** Was nur da ist, weil man selbst
   es einmal installiert hat (WinTuner-Modul, Pester-Fassung), ist im Zweifel eine unbewiesene
   Annahme. Nachstellen lässt sich der Modulfall, indem der Modulordner kurz umbenannt wird.
