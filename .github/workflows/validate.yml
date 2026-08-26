@@ -81,6 +81,10 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           Import-Module Pester -MinimumVersion 5.5.0
+          # Die benutzte Pester-Fassung ins Protokoll: der Laeufer installiert immer die neueste aus
+          # der Gallery, der Entwicklungsrechner behaelt seine. Eine Discovery, die nur in der CI
+          # abbricht ("Container failed"), ist ohne diese Zeile nicht zuzuordnen.
+          Write-Host ("Pester {0} on PowerShell {1}" -f (Get-Module Pester).Version, $PSVersionTable.PSVersion)
           $config = New-PesterConfiguration
           $config.Run.Path = (Join-Path $env:GITHUB_WORKSPACE 'tests\Unit')
           $config.Run.Throw = $true

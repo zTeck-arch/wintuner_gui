@@ -42,9 +42,14 @@ Invoke-ScriptAnalyzer -Path .\src   -Settings .\PSScriptAnalyzerSettings.psd1 -R
 Invoke-ScriptAnalyzer -Path .\tests -Settings .\PSScriptAnalyzerSettings.Tests.psd1 -Recurse
 ```
 
-Erwartet (gemessen am 26.08.2026, Stand 0.16.0): StaticChecks grün (**309 Funktionen, 965 UI-Keys
-je Sprache**), SmokeTest grün, LayoutProbe grün, **523 Pester** grün (1 übersprungen ohne
-WinTuner-Modul), Analyzer **0 blockierend** (5 informational in `65-Theme.ps1` sind Altbestand).
+Erwartet (gemessen am 26.08.2026, Stand 0.16.0): StaticChecks grün (**310 Funktionen, 966 UI-Keys
+je Sprache**), SmokeTest grün, LayoutProbe grün, **541 Pester** grün (1 übersprungen), Analyzer
+**0 blockierend** (5 informational in `65-Theme.ps1` sind Altbestand).
+
+Die eine übersprungene Prüfung wechselt die Seite, je nachdem was auf dem Rechner installiert ist:
+mit WinTuner-Modul läuft der Modulvertrag (`ModuleContract.Tests.ps1`) und der Platzhalter
+„Modul fehlt" wird übersprungen, ohne Modul umgekehrt — dann sind es 15 übersprungene und der
+Vertrag ist **nicht** geprüft.
 
 Die drei Läufer, die kein Parser ersetzt:
 
@@ -52,7 +57,7 @@ Die drei Läufer, die kein Parser ersetzt:
 |---|---|
 | `SmokeTest.ps1` | Ladefehler des gebauten Skripts (falsche Teil-Reihenfolge, Control vor seiner Erzeugung benutzt) |
 | `LayoutProbe.ps1` | überlappende Steuerelemente, abgeschnittener Text, zu geringer Kontrast, Karten die beim Scrollen verrutschen — in **allen 7 Designs**, 2 Fenstergrößen |
-| `StaticChecks.ps1` | Version/Kopf, UI-Key-Parität EN/DE, `-LiteralPath`-Regeln, `Show-Progress` ohne `Hide-Progress` |
+| `StaticChecks.ps1` | Version/Kopf, UI-Key-Parität EN/DE, `-LiteralPath`-Regeln, `Show-Progress` ohne `Hide-Progress`, MessageBox auf oberster Ebene vor dem Smoke-Tor |
 
 `Invoke-CheckChain.ps1` prüft selbst nichts — es startet diese Läufer, jeden in einem eigenen
 pwsh-Kindprozess (SmokeTest und LayoutProbe rufen `exit` auf und laden WinForms; nacheinander im

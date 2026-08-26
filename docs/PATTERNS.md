@@ -222,6 +222,33 @@ if ($env:MEINE_PROBE -eq '1') {
 `APPDATA`/`LOCALAPPDATA` vorher auf einen Sandbox-Ordner setzen — sonst schreibt der Lauf ins echte
 Profil.
 
+## Prüfläufe ohne Benutzer (CI)
+
+- **Kein modaler Dialog im Startpfad.** Alles, was auf der obersten Ebene vor dem Smoke-Tor
+  (`90-Main.ps1`) steht, läuft bei jedem Start — auch bei einem unbeaufsichtigten. Eine MessageBox
+  dort wartet auf einen Klick, den auf dem CI-Läufer niemand macht: der Smoke-Test lief nach 180 s
+  in seinen Zeitablauf. Ausgelöst hat es der Zweig „Modul-Import fehlgeschlagen", der auf dem
+  Läufer **immer** genommen wird, weil dort kein WinTuner-Modul installiert ist — auf dem
+  Entwicklungsrechner ist es da, also sah es dort nie jemand. Startmeldungen deshalb über
+  `Show-StartupDialog` (70-Runtime); eine StaticCheck-Regel hält die Stelle frei.
+- **Der Entwicklungsrechner hat mehr installiert als der Läufer.** Was nur da ist, weil man selbst
+  es einmal installiert hat (WinTuner-Modul, Pester-Fassung), ist im Zweifel eine unbewiesene
+  Annahme. Nachstellen lässt sich der Modulfall, indem der Modulordner kurz umbenannt wird.
+
+## Pester 5: Discovery und Run sind zwei Phasen
+
+- **`-ForEach` und `-Skip` werden in der DISCOVERY ausgewertet, `BeforeAll` läuft erst danach.**
+  Eine Tabelle, die `BeforeAll` füllt, ist für `-ForEach` also leer — die Prüfungen werden zu
+  **null** Tests und die Datei meldet grün, ohne etwas geprüft zu haben (so lief der Modulvertrag
+  bis 0.16.0). Daten für `-ForEach`/`-Skip` gehören in `BeforeDiscovery`.
+- **Nichts in Discovery oder `BeforeAll` darf fliegen.** Ein Fehler dort nimmt die ganze Datei mit
+  und meldet nur „Container failed" — ohne die Zeile, an der es lag.
+- **Im Gesamtlauf überschatten die Attrappen der anderen Testdateien echte Cmdlets.** Mehrere
+  Dateien definieren globale `Get-Wt*`-Attrappen; wer das echte Modul prüfen will, muss
+  `Get-Command -Module WinTuner` schreiben. Sonst ist die Datei allein grün und im Verbund rot.
+- Eine Typprüfung über `.FullName` schlägt bei generischen Typen immer fehl (voll qualifizierter
+  Name samt Assembly und .NET-Fassung) — `.ToString()` liefert die stabile Kurzform.
+
 ## Form
 
 - **CRLF** überall, **BOM** in allen `src/*.ps1` außer `65-Theme.ps1`.

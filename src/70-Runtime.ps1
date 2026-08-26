@@ -651,3 +651,29 @@ function Confirm-ChangeAction {
     [System.Windows.Forms.MessageBoxIcon]::Warning)
   return ($answer -eq [System.Windows.Forms.DialogResult]::Yes)
 }
+
+# Modaler Hinweis WAEHREND des Starts - im Pruefmodus nur protokolliert statt angezeigt.
+#
+# Genau daran hing der CI-Lauf von 0.16.0: auf einem Rechner ohne installiertes WinTuner-Modul
+# schlaegt Import-Module fehl, und der Fehlerzweig zeigte direkt eine MessageBox. Ein Lauf ohne
+# Benutzer klickt sie nie weg - der Smoke-Test lief in seinen Zeitablauf (180 s), und zwar nur auf
+# dem Laeufer, weil auf dem Entwicklungsrechner das Modul da ist. Fuer echte Starts bleibt der
+# Dialog unveraendert: er ist die einzige Stelle, an der ein Benutzer von dem Problem erfaehrt.
+#
+# Die Regel dahinter steht in tests/StaticChecks.ps1: vor dem Smoke-Tor darf auf der obersten Ebene
+# keine MessageBox mehr direkt aufgerufen werden.
+function Show-StartupDialog {
+  param(
+    [Parameter(Mandatory)][string]$Text,
+    [Parameter(Mandatory)][string]$Title,
+    [System.Windows.Forms.MessageBoxIcon]$Icon = [System.Windows.Forms.MessageBoxIcon]::Information
+  )
+  if ($env:WINTUNER_SMOKE -eq '1') {
+    # Auf die Standardausgabe, nicht auf den Fehlerkanal: der Smoke-Test wertet eine nicht leere
+    # Fehlerausgabe als misslungenen Start.
+    Write-Host ("STARTUP DIALOG [{0}] {1}" -f $Title, (($Text -replace '\s+', ' ').Trim()))
+    return
+  }
+  [void][System.Windows.Forms.MessageBox]::Show(
+    $Text, $Title, [System.Windows.Forms.MessageBoxButtons]::OK, $Icon)
+}

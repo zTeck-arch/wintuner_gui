@@ -105,23 +105,20 @@ try {
   }
   if ($winTunerModule -and $winTunerModule.Version.Major -gt 1) {
     Write-Log ("WinTuner module version {0} is newer than the 1.x line this GUI was written and tested against." -f $winTunerModule.Version)
-    [void][System.Windows.Forms.MessageBox]::Show(
-      ((Get-UiString 'ModVersionUntestedDialog') -f $winTunerModule.Version),
-      (Get-UiString 'ModVersionUntestedTitle'),
-      [System.Windows.Forms.MessageBoxButtons]::OK,
-      [System.Windows.Forms.MessageBoxIcon]::Warning)
+    Show-StartupDialog -Text ((Get-UiString 'ModVersionUntestedDialog') -f $winTunerModule.Version) `
+      -Title (Get-UiString 'ModVersionUntestedTitle') `
+      -Icon ([System.Windows.Forms.MessageBoxIcon]::Warning)
   }
 
   $script:winTunerModuleImported = $true
 } catch {
   $errMsg = $_.Exception.Message
   Write-Log "Failed to import WinTuner module: $errMsg"
-  [System.Windows.Forms.MessageBox]::Show(
-    ((Get-UiString 'ModImportFailedDialog') -f $errMsg),
-    (Get-UiString 'ModImportFailedTitle'),
-    [System.Windows.Forms.MessageBoxButtons]::OK,
-    [System.Windows.Forms.MessageBoxIcon]::Error
-  )
+  # Ueber Show-StartupDialog, nicht direkt: ohne installiertes Modul landet der Start immer hier, und
+  # eine MessageBox an dieser Stelle laesst jeden unbeaufsichtigten Lauf haengen (CI von 0.16.0).
+  Show-StartupDialog -Text ((Get-UiString 'ModImportFailedDialog') -f $errMsg) `
+    -Title (Get-UiString 'ModImportFailedTitle') `
+    -Icon ([System.Windows.Forms.MessageBoxIcon]::Error)
   # Disable all functional sections except Settings so the user can still fix the module path.
   foreach ($s in $script:sections) {
     if ($s.Key -ne 'settings') { $s.Panel.Enabled = $false }

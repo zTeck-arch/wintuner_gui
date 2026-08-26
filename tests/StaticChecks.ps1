@@ -228,4 +228,37 @@ Assert-True ($unbalanced.Count -eq 0) (
   "Show-Progress without a Hide-Progress in the same scope ({0} site(s)); the progress display is the busy lock, so it would stay switched on and refuse every later action:`r`n  {1}" -f
     $unbalanced.Count, ($unbalanced -join "`r`n  "))
 
+# Ein modaler Dialog auf der obersten Ebene VOR dem Smoke-Tor haelt jeden unbeaufsichtigten Lauf an.
+#
+# So ist 0.16.0 in der CI stehengeblieben: auf dem Laeufer ist das WinTuner-Modul nicht installiert,
+# Import-Module schlug fehl, und der Fehlerzweig zeigte eine MessageBox. Niemand klickt sie weg -
+# der Smoke-Test lief in seinen Zeitablauf. Auf dem Entwicklungsrechner ist das Modul da, deshalb
+# hat es dort nie jemand gesehen.
+#
+# Geprueft wird ueber den Parser: gefragt ist, ob der Aufruf im Skript-Rumpf steht (also beim Start
+# ohnehin ausgefuehrt wird) oder in einer Funktion bzw. einem Ereignis (dann klickt ein Benutzer).
+# Nach dem Tor ist eine MessageBox erlaubt - dort laeuft nur noch, was der Smoke-Lauf nie erreicht.
+$gateMatch = [regex]::Match($content, '(?m)^if \(\$env:WINTUNER_SMOKE -eq ''1''\) \{')
+Assert-True $gateMatch.Success 'Smoke gate not found in the assembled script.'
+$gateLine = ($content.Substring(0, $gateMatch.Index) -split "`r`n").Count
+$startupDialogs = [Collections.Generic.List[string]]::new()
+foreach ($call in $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+    ([string]$node.Expression) -match 'MessageBox' -and ([string]$node.Member.Value) -eq 'Show'
+  }, $true)) {
+  if ($call.Extent.StartLineNumber -ge $gateLine) { continue }
+  $node = $call.Parent
+  $nested = $false
+  while ($node) {
+    if ($node -is [System.Management.Automation.Language.FunctionDefinitionAst] -or
+        $node -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) { $nested = $true; break }
+    $node = $node.Parent
+  }
+  if (-not $nested) { $startupDialogs.Add(('line {0}: {1}' -f $call.Extent.StartLineNumber, ($call.Extent.Text -split "`r`n")[0].Trim())) }
+}
+Assert-True ($startupDialogs.Count -eq 0) (
+  "MessageBox on the top level before the smoke gate ({0} site(s)); an unattended run waits forever for the click. Use Show-StartupDialog instead:`r`n  {1}" -f
+    $startupDialogs.Count, ($startupDialogs -join "`r`n  "))
+
 Write-Host "Static checks passed for WinTuner GUI $($version.Groups['v'].Value): $($functionNames.Count) functions, $($enKeys.Count) UI keys per language."
