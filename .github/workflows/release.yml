@@ -17,7 +17,7 @@ jobs:
   verify:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Pester and PSScriptAnalyzer
         shell: pwsh
@@ -95,7 +95,7 @@ jobs:
     runs-on: windows-latest
     needs: verify
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Validate tag and build release assets
         shell: pwsh
