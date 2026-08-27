@@ -261,4 +261,56 @@ Assert-True ($startupDialogs.Count -eq 0) (
   "MessageBox on the top level before the smoke gate ({0} site(s)); an unattended run waits forever for the click. Use Show-StartupDialog instead:`r`n  {1}" -f
     $startupDialogs.Count, ($startupDialogs -join "`r`n  "))
 
+# Ein Add_Shown-Handler, der einen modalen Dialog oeffnen kann, muss unbeaufsichtigte Laeufe
+# ausschliessen.
+#
+# Diese Handler laufen, sobald das Fenster gezeigt wird - und die Layout-Probe zeigt es. Fuenf von
+# ihnen oeffnen ueber BeginInvoke eine MessageBox; dass davon bisher keine zugeschlagen hat, lag an
+# Einstellungen, die auf dem Rechner des Entwicklers gesetzt sind und auf einem frischen Profil
+# (jeder CI-Laeufer) nicht. Vorher entschaerfte die Layout-Probe drei davon namentlich - ein
+# vierter Dialog waere daran vorbeigelaufen.
+$shownWithDialog = [Collections.Generic.List[string]]::new()
+foreach ($h in $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+    ([string]$node.Member.Value) -eq 'Add_Shown'
+  }, $true)) {
+  $text = $h.Extent.Text
+  if ($text -notmatch 'MessageBox\]::Show') { continue }
+  if ($text -match 'Test-UnattendedRun') { continue }
+  $shownWithDialog.Add(('line {0}' -f $h.Extent.StartLineNumber))
+}
+Assert-True ($shownWithDialog.Count -eq 0) (
+  "Add_Shown handler opens a MessageBox without a Test-UnattendedRun guard ({0} site(s)); the layout probe shows the window, so an unattended run would wait for the click:`r`n  {1}" -f
+    $shownWithDialog.Count, ($shownWithDialog -join "`r`n  "))
+
+# Die eigenen Datenpfade duerfen nur ueber die zwei Wurzelfunktionen laufen.
+#
+# [Environment]::GetFolderPath('ApplicationData') ignoriert $env:APPDATA. Die Prueflaeufer setzten
+# genau diese Variable und hielten sich fuer gekapselt, waehrend sie das echte Profil las und
+# schrieb. Umgelenkt wird jetzt ueber $env:WINTUNER_DATA_DIR in Get-AppDataRoot /
+# Get-LocalAppDataRoot; eine neue Stelle, die den bekannten Ordner direkt fragt, faellt aus der
+# Kapselung heraus, ohne dass es auffaellt.
+$folderCalls = @($ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+    ([string]$node.Member.Value) -eq 'GetFolderPath' -and
+    $node.Arguments.Count -eq 1 -and
+    ([string]$node.Arguments[0].Extent.Text) -match "^'(ApplicationData|LocalApplicationData)'$"
+  }, $true))
+$strayFolderCalls = [Collections.Generic.List[string]]::new()
+foreach ($call in $folderCalls) {
+  $scope = $null
+  $node = $call.Parent
+  while ($node) {
+    if ($node -is [System.Management.Automation.Language.FunctionDefinitionAst]) { $scope = $node.Name; break }
+    $node = $node.Parent
+  }
+  if ($scope -in 'Get-AppDataRoot', 'Get-LocalAppDataRoot') { continue }
+  $strayFolderCalls.Add(('line {0}: {1}' -f $call.Extent.StartLineNumber, $call.Extent.Text))
+}
+Assert-True ($strayFolderCalls.Count -eq 0) (
+  "GetFolderPath for a per-user data folder outside Get-AppDataRoot/Get-LocalAppDataRoot ({0} site(s)); such a path ignores WINTUNER_DATA_DIR, so a verification run would read and write the real profile:`r`n  {1}" -f
+    $strayFolderCalls.Count, ($strayFolderCalls -join "`r`n  "))
+
 Write-Host "Static checks passed for WinTuner GUI $($version.Groups['v'].Value): $($functionNames.Count) functions, $($enKeys.Count) UI keys per language."

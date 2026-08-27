@@ -28,6 +28,26 @@ $script:skipLowValueWingetCandidates = $false  # keep all apps by default; set $
 
 $script:forceFreshLogin = $false
 
+# --- Wohin die eigenen Daten gehen ---------------------------------------------------------------
+#
+# [Environment]::GetFolderPath('ApplicationData') fragt Windows nach dem bekannten Ordner und
+# ignoriert $env:APPDATA. SmokeTest und LayoutProbe setzten genau diese Umgebungsvariable und hielten
+# sich damit fuer gekapselt - in Wahrheit lasen und schrieben sie das ECHTE Profil. Zwei Folgen:
+# ein Prueflauf konnte die Einstellungen des Benutzers anfassen, und der Zustand "frisches Profil"
+# (also jeder CI-Laeufer) wurde nie geprueft. Genau dort wartet ein Erstlauf-Dialog.
+#
+# $env:WINTUNER_DATA_DIR ist die eine Naht dafuer: gesetzt landen Einstellungen, Protokolle,
+# Zwischenspeicher und Verlauf darunter, sonst unveraendert im Profil. Nur die Prueflaeufer setzen
+# sie; im Auslieferungsfall ist sie leer.
+function Get-AppDataRoot {
+  if ($env:WINTUNER_DATA_DIR) { return $env:WINTUNER_DATA_DIR }
+  return [Environment]::GetFolderPath('ApplicationData')
+}
+function Get-LocalAppDataRoot {
+  if ($env:WINTUNER_DATA_DIR) { return $env:WINTUNER_DATA_DIR }
+  return [Environment]::GetFolderPath('LocalApplicationData')
+}
+
 # --- Persisted settings – loaded here, before any UI is built, so every control can
 # read its saved value directly at creation time instead of needing a resync pass later. ---
-$script:settingsPath = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'WinTunerGUI\settings.json'
+$script:settingsPath = Join-Path (Get-AppDataRoot) 'WinTunerGUI\settings.json'

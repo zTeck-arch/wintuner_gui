@@ -14,14 +14,14 @@ function Get-WeeklyLogFileName {
 # Downloads folder. That is the wrong home for this content: measured over three weeks it held 137
 # distinct Intune app and Entra group ids from several customer tenants, in clear text. Under
 # LocalAppData it is inside the user profile and ACL-protected like the package folder already is.
-$script:logDirectory = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'WinTunerGUI\Logs'
+$script:logDirectory = Join-Path (Get-LocalAppDataRoot) 'WinTunerGUI\Logs'
 try {
   if (-not (Test-Path -LiteralPath $script:logDirectory -PathType Container)) {
     [void][System.IO.Directory]::CreateDirectory($script:logDirectory)
   }
 } catch {
   # Never let logging be the reason the application cannot start: fall back to the profile root.
-  $script:logDirectory = [Environment]::GetFolderPath('LocalApplicationData')
+  $script:logDirectory = Get-LocalAppDataRoot
 }
 $script:logFileBase = $script:logDirectory
 $script:logFilePath = Join-Path $script:logFileBase (Get-WeeklyLogFileName)
@@ -66,7 +66,7 @@ function Remove-ExpiredLogs {
 # goes to Intune and onto endpoints. LocalAppData is per-user and ACL-protected.
 $script:legacyPackagePath = 'C:\Temp'
 function Get-DefaultPackagePath {
-  return (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'WinTunerGUI\Packages')
+  return (Join-Path (Get-LocalAppDataRoot) 'WinTunerGUI\Packages')
 }
 
 # Maps a stored DefaultPackagePath to the value the app should actually use. Empty/whitespace OR the

@@ -240,6 +240,31 @@ Profil.
   es einmal installiert hat (WinTuner-Modul, Pester-Fassung), ist im Zweifel eine unbewiesene
   Annahme. Nachstellen lässt sich der Modulfall, indem der Modulordner kurz umbenannt wird.
 
+## Was ein Prüflauf sieht — und was er bisher nicht sah
+
+- **Die Kapselung des Profils wirkte nicht.** `[Environment]::GetFolderPath('ApplicationData')`
+  liest den bekannten Ordner von Windows und **ignoriert `$env:APPDATA`**. SmokeTest und LayoutProbe
+  setzten genau diese Variable und hielten sich für gekapselt — gemessen am 26.08.2026 lasen und
+  schrieben sie das **echte** Profil des Entwicklers. Zwei Folgen: ein Prüflauf konnte die
+  Einstellungen des Benutzers anfassen, und der **Erstlauf-Zustand** (frisches Profil = jeder
+  CI-Läufer, und jeder neue Benutzer) wurde nie geprüft. Umgelenkt wird jetzt über
+  `$env:WINTUNER_DATA_DIR`, gebündelt in `Get-AppDataRoot`/`Get-LocalAppDataRoot`.
+- **Was nur der eigene Rechner hat, ist eine unbewiesene Annahme** — nicht nur installierte Module,
+  auch der eigene Profilstand. Die Layout-Probe hat dadurch jahrelang **nur Deutsch** gemessen,
+  obwohl `Language = "en"` die Vorgabe für jeden neuen Benutzer ist. Sie läuft jetzt über beide
+  Sprachen, mit ausdrücklich vorgelegter Einstellung statt „was hier gerade eingestellt ist".
+- **`Add_Shown` ist Startpfad.** Diese Handler laufen, sobald das Fenster gezeigt wird, und die
+  Layout-Probe zeigt es. Fünf von ihnen öffnen über `BeginInvoke` eine modale MessageBox (Erstlauf-
+  Hinweis, beschädigte Einstellungen, übernommene Altdaten, Optionskonflikt, Update-Suche). Dass
+  keiner zuschlug, lag an Einstellungen, die auf einem eingerichteten Profil gesetzt sind — auf
+  einem frischen nicht. Jeder braucht `if (Test-UnattendedRun) { return }`.
+- **Eine Toleranz muss gegengeprüft werden.** Die Überlappungsprüfung meldet erst ab 8 px in
+  **beiden** Richtungen: eine AutoSize-Beschriftung ist rundherum ~3 px größer als ihre Glyphen, und
+  auf frischem Profil kamen so 7–17 optisch einwandfreie Meldungen zusammen (nachgesehen in einer
+  Bildschirmkopie). Damit die Toleranz nicht unbemerkt zu groß wird, prüft die Probe bei **jedem
+  Lauf** sechs Fälle gegen: die drei echten Befunde aus ihrer Geschichte müssen anschlagen, die
+  Rand-Bleeds nicht.
+
 ## Pester 5: Discovery und Run sind zwei Phasen
 
 - **`-ForEach` und `-Skip` werden in der DISCOVERY ausgewertet, `BeforeAll` läuft erst danach.**

@@ -73,6 +73,13 @@ function Initialize-TestAmbient {
   # environment the code actually runs in.
   Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
 
+  # Die zwei Wurzeln der eigenen Datenpfade (05-Config). Jede Funktion, die einen Pfad im
+  # Benutzerprofil bildet, ruft sie - ohne sie schlaegt schon BeforeAll fehl. Geladen wird der
+  # ECHTE Rumpf aus der Quelle statt einer Kopie, sonst laufen Test und Anwendung auseinander;
+  # global, weil dot-sourcing in einer Funktion sonst nur hier drin gilt.
+  $rootFns = Get-SourceFunctionText -Part '05-Config.ps1' -Name 'Get-AppDataRoot', 'Get-LocalAppDataRoot'
+  . ([scriptblock]::Create(($rootFns -replace 'function Get-', 'function global:Get-')))
+
   $global:TestLog = [System.Collections.Generic.List[string]]::new()
   $global:TestStatus = $null
   Set-Item -Path function:global:Write-Log      -Value { param([string]$message) $global:TestLog.Add($message) }

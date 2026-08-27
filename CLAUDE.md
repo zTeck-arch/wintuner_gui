@@ -42,7 +42,7 @@ Invoke-ScriptAnalyzer -Path .\src   -Settings .\PSScriptAnalyzerSettings.psd1 -R
 Invoke-ScriptAnalyzer -Path .\tests -Settings .\PSScriptAnalyzerSettings.Tests.psd1 -Recurse
 ```
 
-Erwartet (gemessen am 26.08.2026, Stand 0.16.0): StaticChecks grün (**311 Funktionen, 966 UI-Keys
+Erwartet (gemessen am 26.08.2026, Stand 0.16.0): StaticChecks grün (**313 Funktionen, 966 UI-Keys
 je Sprache**), SmokeTest grün, LayoutProbe grün, **545 Pester** grün (1 übersprungen), Analyzer
 **0 blockierend** (5 informational in `65-Theme.ps1` sind Altbestand).
 
@@ -56,8 +56,8 @@ Die drei Läufer, die kein Parser ersetzt:
 | Läufer | fängt |
 |---|---|
 | `SmokeTest.ps1` | Ladefehler des gebauten Skripts (falsche Teil-Reihenfolge, Control vor seiner Erzeugung benutzt) |
-| `LayoutProbe.ps1` | überlappende Steuerelemente, abgeschnittener Text, zu geringer Kontrast, Karten die beim Scrollen verrutschen — in **allen 7 Designs**, 2 Fenstergrößen |
-| `StaticChecks.ps1` | Version/Kopf, UI-Key-Parität EN/DE, `-LiteralPath`-Regeln, `Show-Progress` ohne `Hide-Progress`, MessageBox auf oberster Ebene vor dem Smoke-Tor |
+| `LayoutProbe.ps1` | überlappende Steuerelemente, abgeschnittener Text, zu geringer Kontrast, Karten die beim Scrollen verrutschen — in **allen 7 Designs**, 2 Fenstergrößen × **2 Sprachen**, jeweils auf frischem Profil |
+| `StaticChecks.ps1` | Version/Kopf, UI-Key-Parität EN/DE, `-LiteralPath`-Regeln, `Show-Progress` ohne `Hide-Progress`, MessageBox auf oberster Ebene vor dem Smoke-Tor, `Add_Shown` mit Dialog ohne `Test-UnattendedRun`, Datenpfad außerhalb der zwei Wurzelfunktionen |
 
 `Invoke-CheckChain.ps1` prüft selbst nichts — es startet diese Läufer, jeden in einem eigenen
 pwsh-Kindprozess (SmokeTest und LayoutProbe rufen `exit` auf und laden WinForms; nacheinander im
@@ -102,8 +102,12 @@ Vollständig mit Begründung in [docs/PATTERNS.md](docs/PATTERNS.md) — hier nu
   ein `Hide-Progress` im selben Handler.
 - Ein modaler Dialog im Startpfad hängt jeden unbeaufsichtigten Lauf (SmokeTest, LayoutProbe) →
   Startmeldungen über `Show-StartupDialog`.
-- `[Environment]::GetFolderPath('ApplicationData')` ignoriert `$env:APPDATA` → ein Testlauf des
-  gebauten Skripts schreibt ins **echte** Profil.
+- `[Environment]::GetFolderPath('ApplicationData')` ignoriert `$env:APPDATA`. Umgelenkt wird über
+  `$env:WINTUNER_DATA_DIR` (`Get-AppDataRoot`/`Get-LocalAppDataRoot` in `05-Config.ps1`) — jede neue
+  Stelle, die den bekannten Ordner direkt fragt, schreibt ins **echte** Profil; eine
+  StaticCheck-Regel fängt das.
+- Ein `Add_Shown`-Handler läuft, sobald das Fenster gezeigt wird — die Layout-Probe zeigt es. Wer
+  dort einen Dialog öffnet, braucht `if (Test-UnattendedRun) { return }`.
 - Layout aus Pixelkonstanten ist Altbestand; neu geschriebenes Layout misst (`Get-ControlTextWidth`,
   `Set-AppSettingsRowBlock`).
 

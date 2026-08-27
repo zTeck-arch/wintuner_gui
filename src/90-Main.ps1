@@ -2317,6 +2317,11 @@ try {
 # First-use safety notice. Persist the flag before showing the dialog so a crash/forced close does
 # not trap the user in a repeated prompt loop. The deletion option itself ships disabled.
 $form.Add_Shown({
+  # Unbeaufsichtigt: nichts von hier. Jeder dieser Handler oeffnet ueber BeginInvoke einen MODALEN
+  # Dialog, und ein Lauf ohne Benutzer wartet darauf bis zu seinem Zeitablauf. Bisher hielt das nur
+  # durch Zufall: der Erstlauf-Hinweis haengt an einer Einstellung, die auf dem Rechner des
+  # Entwicklers laengst gesetzt ist - auf einem frischen Profil (jeder CI-Laeufer) ist sie es nicht.
+  if (Test-UnattendedRun) { return }
   if (-not $script:settings.CleanupNoticeShown) {
     $script:settings.CleanupNoticeShown = $true
     Save-Settings
@@ -2342,6 +2347,8 @@ $form.Add_Shown({
 # replaces it. Say so once, and name the copy that was put aside - silently starting over with
 # defaults is how a user loses their package path and their group favourites without ever knowing.
 $form.Add_Shown({
+  # Unbeaufsichtigt: nichts von hier - siehe der erste Add_Shown-Handler oben.
+  if (Test-UnattendedRun) { return }
   if (-not $script:settingsCorruptBackupPath) { return }
   $backupPath = [string]$script:settingsCorruptBackupPath
   $script:settingsCorruptBackupPath = $null
@@ -2363,6 +2370,8 @@ $form.Add_Shown({
 # genau einmal gesagt - mit beiden Pfaden. Wer nach dem Wechsel seinen Paketordner sucht, muss
 # wissen, wo er jetzt steht und dass der alte Stand noch liegt.
 $form.Add_Shown({
+  # Unbeaufsichtigt: nichts von hier - siehe der erste Add_Shown-Handler oben.
+  if (Test-UnattendedRun) { return }
   if (-not $script:legacySettingsCopied) { return }
   $legacyPath = [string]$script:legacySettingsCopied
   $script:legacySettingsCopied = $null
@@ -2377,6 +2386,8 @@ $form.Add_Shown({
 })
 
 $form.Add_Shown({
+  # Unbeaufsichtigt: nichts von hier - siehe der erste Add_Shown-Handler oben.
+  if (Test-UnattendedRun) { return }
   if (-not $script:cleanupConflictResolved) { return }
   $script:cleanupConflictResolved = $false
   Save-Settings
@@ -2396,6 +2407,9 @@ $form.Add_Shown({
 $form.Add_Shown({
   # Apply the native dark/rounded window chrome now that the handle exists (Win11).
   Set-WindowChrome -Form $form -Dark ([bool]$script:currentTheme.Dark)
+  # Die Suche selbst geht ins Netz und ihr Ergebnis endet je nach Fall in einer MessageBox - beides
+  # hat in einem Prueflauf nichts zu suchen. Das Fensterchrom oben bleibt, das ist reine Optik.
+  if (Test-UnattendedRun) { return }
   if ([string]::IsNullOrWhiteSpace($script:githubRepo)) { return }
   if (-not $script:settings.CheckAppUpdateOnStartup) {
     Write-Log 'Start-up check for a newer version of this tool is switched off in the settings.'
@@ -2550,6 +2564,9 @@ try {
 # Favorites are local package work and do not require a tenant login. When explicitly enabled,
 # start the batch only after the form is visible so progress and status remain understandable.
 $form.Add_Shown({
+  # Kein Paketbau in einem Prueflauf: der laedt herunter, schreibt Pakete und kann in einer
+  # Rueckfrage enden.
+  if (Test-UnattendedRun) { return }
   if ($script:winTunerModuleImported -and $script:settings.AutoUpdateFavoritesOnStartup -and @($script:settings.WingetFavorites).Count -gt 0) {
     [void]$form.BeginInvoke([System.Action]{ Invoke-FavoritePackagesUpdate -Automatic })
   }

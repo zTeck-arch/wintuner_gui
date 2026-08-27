@@ -16,7 +16,7 @@ function Get-LogMutex {
 # documented way of running it - and quietly ignored the configured directory.
 function Get-CurrentLogPath {
   param([datetime]$Now = (Get-Date))
-  $base = if ($script:logDirectory) { $script:logDirectory } else { [Environment]::GetFolderPath('LocalApplicationData') }
+  $base = if ($script:logDirectory) { $script:logDirectory } else { Get-LocalAppDataRoot }
   if (-not (Test-Path -LiteralPath $base)) {
     try { [void][System.IO.Directory]::CreateDirectory($base) } catch { return $null }
   }
@@ -122,7 +122,7 @@ function Write-LogSafe {
     $now = Get-Date
     $timestamp = $now.ToString("yyyy-MM-dd HH:mm:ss")
     $logLine = "$timestamp - $Message"
-    $base = if ($script:logDirectory) { $script:logDirectory } else { [Environment]::GetFolderPath('LocalApplicationData') }
+    $base = if ($script:logDirectory) { $script:logDirectory } else { Get-LocalAppDataRoot }
     if (-not (Test-Path -LiteralPath $base)) { [void][System.IO.Directory]::CreateDirectory($base) }
     $isoYear = [System.Globalization.ISOWeek]::GetYear($now)
     $isoWeek = [System.Globalization.ISOWeek]::GetWeekOfYear($now)

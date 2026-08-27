@@ -20,7 +20,14 @@ param(
   [string]$ScriptPath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'dist/WinTuner_GUI_ntg.ps1'),
   [int]$TimeoutSeconds = 240,
   # Klein genug fuer ein 720p-Notebook, gross genug fuer einen normalen Arbeitsplatz.
-  [string[]]$Sizes = @('1146x854', '1920x1080')
+  [string[]]$Sizes = @('1146x854', '1920x1080'),
+  # BEIDE Sprachen, ausdruecklich gesetzt.
+  #
+  # Vorher richtete sich der Lauf nach dem Profil des Rechners, auf dem er gestartet wurde - und
+  # weil die Umlenkung des Profils nicht wirkte (GetFolderPath ignoriert APPDATA), war das das
+  # ECHTE Profil des Entwicklers: gemessen wurde immer nur Deutsch. Englisch ist die Vorgabe fuer
+  # jeden neuen Benutzer (Language = "en" in 10-Settings) und wurde damit nie angesehen.
+  [string[]]$Languages = @('en', 'de')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,17 +35,58 @@ $path = (Resolve-Path -LiteralPath $ScriptPath).Path
 
 $probeBody = @'
 if ($env:WINTUNER_LAYOUT -eq '1') {
-  # Startdialoge stillstellen - sie waeren modal und der Lauf haenge.
-  $script:legacySettingsCopied = $null
-  $script:settingsCorruptBackupPath = $null
-  $script:cleanupConflictResolved = $false
+  # Startdialoge stillstellen erledigt die Anwendung selbst: jeder Add_Shown-Handler, der eine
+  # MessageBox oeffnen kann, kehrt bei Test-UnattendedRun sofort zurueck (WINTUNER_LAYOUT ist
+  # gesetzt). Vorher standen hier drei Zuweisungen, die je EINEN bekannten Dialog entschaerften -
+  # ein vierter Dialog waere daran vorbeigelaufen, und genau so ist der Lauf einmal gehangen.
   $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
   $form.Size = New-Object System.Drawing.Size([int]$env:WINTUNER_LAYOUT_W, [int]$env:WINTUNER_LAYOUT_H)
   $form.Show()
 
+  # Ueberlappung MIT Toleranz - und die Toleranz ist gemessen, nicht geraten.
+  #
+  # Eine AutoSize-Beschriftung ist breiter und hoeher als ihre Glyphen: WinForms legt rundherum
+  # etwa 3 px Innenabstand. Zwei solche Kaesten beruehren sich daher schon, wenn optisch nichts
+  # kollidiert. Beim ersten Lauf auf einem FRISCHEN Profil (siehe unten, das wurde vorher nie
+  # gemessen) kamen so 7 bis 17 Meldungen zusammen: Ueberschrift/Unterzeile im Dashboard 6 px,
+  # Kachelzahl/Beschriftung 5 px, "Zu behaltende Versionen je Paket:" gegen sein Zahlenfeld 1 px.
+  # Nachgesehen in einer Bildschirmkopie: alles einwandfrei lesbar, kein Element verdeckt.
+  #
+  # Gemeldet wird deshalb erst, wenn sich die Kaesten in BEIDEN Richtungen um mehr als die Toleranz
+  # schneiden. Das ist genau die Form der Befunde, um derer willen diese Probe existiert - eine
+  # Beschriftung, die auf ihrem Eingabefeld liegt, deckt es auf ganzer Hoehe UND ueber viele Pixel
+  # Breite ab (die drei Faelle im Kopf dieser Datei: 128 px, 168 px, 210 px). Ein Rand-Bleed von
+  # 1-8 px hat immer in genau EINER Richtung fast nichts.
+  $script:overlapTolerance = 8
+  function Get-LayoutIntersection {
+    param($A, $B)
+    $w = [Math]::Min($A.Right, $B.Right) - [Math]::Max($A.Left, $B.Left)
+    $h = [Math]::Min($A.Bottom, $B.Bottom) - [Math]::Max($A.Top, $B.Top)
+    return @{ Width = $w; Height = $h }
+  }
   function Test-LayoutRects {
     param($A, $B)
-    return -not ($A.Right -le $B.Left -or $B.Right -le $A.Left -or $A.Bottom -le $B.Top -or $B.Bottom -le $A.Top)
+    $i = Get-LayoutIntersection -A $A -B $B
+    return (($i.Width -gt $script:overlapTolerance) -and ($i.Height -gt $script:overlapTolerance))
+  }
+
+  # Gegenprobe der Toleranz, bei JEDEM Lauf. Eine Regel, die nie angeschlagen hat, ist keine Regel -
+  # und eine Toleranz, die zu gross gerutscht ist, macht die ganze Probe wertlos, ohne rot zu werden.
+  # Die drei "muss anschlagen"-Faelle sind die echten Befunde aus dem Kopf dieser Datei.
+  $toleranceCases = @(
+    @{ Name = 'Beschriftung 376 px auf ihrer Auswahlliste';  A = @{Left=0;   Top=100; Right=376; Bottom=125}; B = @{Left=240; Top=98;  Right=490; Bottom=128}; Expect = $true }
+    @{ Name = 'Beschriftung auf ihrem Eingabefeld';          A = @{Left=14;  Top=40;  Right=310; Bottom=65};  B = @{Left=142; Top=38;  Right=392; Bottom=68};  Expect = $true }
+    @{ Name = 'Hinweistext mitten in der Knopfreihe';        A = @{Left=14;  Top=8;   Right=566; Bottom=73};  B = @{Left=14;  Top=32;  Right=224; Bottom=55};  Expect = $true }
+    @{ Name = 'Ueberschrift/Unterzeile, 6 px Rand-Bleed';    A = @{Left=16;  Top=12;  Right=156; Bottom=52};  B = @{Left=18;  Top=46;  Right=145; Bottom=71};  Expect = $false }
+    @{ Name = 'Beschriftung/Zahlenfeld, 1 px Rand-Bleed';    A = @{Left=0;   Top=5;   Right=237; Bottom=30};  B = @{Left=236; Top=1;   Right=296; Bottom=28};  Expect = $false }
+    @{ Name = 'nebeneinander, kein Kontakt';                 A = @{Left=0;   Top=0;   Right=100; Bottom=25};  B = @{Left=120; Top=0;   Right=220; Bottom=25};  Expect = $false }
+  )
+  foreach ($case in $toleranceCases) {
+    $got = Test-LayoutRects $case.A $case.B
+    if ($got -ne $case.Expect) {
+      Write-Host ("LAYOUT-SELFTEST FAILED: '{0}' erwartet {1}, gemessen {2}" -f $case.Name, $case.Expect, $got)
+      exit 3
+    }
   }
   function Test-LayoutContainer {
     param($C)
@@ -249,8 +297,16 @@ try {
   if (-not $pwsh) { $pwsh = 'pwsh' }
 
   foreach ($size in $Sizes) {
+   foreach ($lang in $Languages) {
     $parts = $size -split 'x'
     if ($parts.Count -ne 2) { throw "Size must look like 1280x800; received: $size" }
+
+    # Eigener Datenordner je Lauf, mit vorgelegter Sprache. Ein frischer Ordner ist zugleich der
+    # Erstlauf-Zustand - der, in dem jeder CI-Laeufer startet und den vorher niemand gemessen hat.
+    $dataDir = Join-Path $sandbox ("data-{0}-{1}" -f ($size -replace 'x', '_'), $lang)
+    [void][IO.Directory]::CreateDirectory((Join-Path $dataDir 'WinTunerGUI'))
+    [IO.File]::WriteAllText((Join-Path $dataDir 'WinTunerGUI\settings.json'),
+      ('{{ "Language": "{0}" }}' -f $lang), [Text.UTF8Encoding]::new($false))
 
     $psi = [Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $pwsh
@@ -264,9 +320,11 @@ try {
     $psi.EnvironmentVariables['WINTUNER_LAYOUT'] = '1'
     $psi.EnvironmentVariables['WINTUNER_LAYOUT_W'] = $parts[0]
     $psi.EnvironmentVariables['WINTUNER_LAYOUT_H'] = $parts[1]
-    # Kein echtes Profil anfassen: die Anwendung speichert beim Schliessen.
-    $psi.EnvironmentVariables['APPDATA'] = $sandbox
-    $psi.EnvironmentVariables['LOCALAPPDATA'] = $sandbox
+    # Kein echtes Profil anfassen: die Anwendung speichert beim Schliessen. WINTUNER_DATA_DIR ist
+    # das, was wirkt - GetFolderPath ignoriert APPDATA (Begruendung in tests/SmokeTest.ps1).
+    $psi.EnvironmentVariables['WINTUNER_DATA_DIR'] = $dataDir
+    $psi.EnvironmentVariables['APPDATA'] = $dataDir
+    $psi.EnvironmentVariables['LOCALAPPDATA'] = $dataDir
 
     $proc = [Diagnostics.Process]::Start($psi)
     $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
@@ -274,7 +332,7 @@ try {
     $proc.StandardInput.Close()
     if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
       try { $proc.Kill($true) } catch { }
-      throw "Layout probe at $size did not finish within $TimeoutSeconds seconds."
+      throw "Layout probe at $size ($lang) did not finish within $TimeoutSeconds seconds."
     }
     $stdout = $stdoutTask.GetAwaiter().GetResult()
     $stderr = $stderrTask.GetAwaiter().GetResult()
@@ -282,7 +340,7 @@ try {
     if ($stdout -notmatch 'LAYOUT_PROBE_OK') {
       Write-Host $stdout
       if ($stderr) { Write-Host $stderr }
-      throw "Layout probe at $size did not reach the end of the run."
+      throw "Layout probe at $size ($lang) did not reach the end of the run."
     }
     foreach ($line in ($stdout -split "`r?`n")) {
       if ($line -match '^LAYOUT-OVERLAP' -or $line -match '^LAYOUT-SCROLL') { Write-Host "  $line" }
@@ -290,13 +348,14 @@ try {
       elseif ($line -match '^LAYOUT-THEME') { Write-Host "  $line" }
     }
     $count = if ($stdout -match 'LAYOUT_OVERLAPS=(\d+)') { [int]$Matches[1] } else { -1 }
-    if ($count -lt 0) { throw "Layout probe at $size did not report a result." }
+    if ($count -lt 0) { throw "Layout probe at $size ($lang) did not report a result." }
     if ($count -gt 0) {
-      Write-Host ("Layout probe {0}: {1} finding(s)." -f $size, $count)
+      Write-Host ("Layout probe {0} [{1}]: {2} finding(s)." -f $size, $lang, $count)
       $failures += $count
     } else {
-      Write-Host ("Layout probe {0}: no overlapping controls, no scroll shift." -f $size)
+      Write-Host ("Layout probe {0} [{1}]: no overlapping controls, no scroll shift." -f $size, $lang)
     }
+   }
   }
 } finally {
   try { Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue } catch { }

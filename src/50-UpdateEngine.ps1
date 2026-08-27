@@ -851,14 +851,14 @@ function Get-SessionLeistungsHeader {
 # Held in LocalApplicationData (per-user, not roamed), like the logs: it contains customer data
 # (tenant UPNs, app names, versions) and must not follow the user to other machines. The old Roaming
 # copy is migrated once on first start. See SECURITY.md for what it holds and how long.
-$script:activityHistoryPath = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'WinTunerGUI\activity-history.json'
+$script:activityHistoryPath = Join-Path (Get-LocalAppDataRoot) 'WinTunerGUI\activity-history.json'
 # Zwei Altlasten, in der Reihenfolge ihrer Entstehung: erst lag die Datei im Roaming-Profil,
 # dann unter dem alten Anwendungsnamen. Beide werden beim ersten Start berücksichtigt, damit
 # ein Nachweis aus einer der beiden Epochen nicht verschwindet - er ist nicht rekonstruierbar.
 $script:activityHistoryLegacyPaths = @(
-  (Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'WinTunerGUI\activity-history.json'),
-  (Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'WinTunerGUI\activity-history.json'),
-  (Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'WinTunerGUI\activity-history.json')
+  (Join-Path (Get-AppDataRoot) 'WinTunerGUI\activity-history.json'),
+  (Join-Path (Get-LocalAppDataRoot) 'WinTunerGUI\activity-history.json'),
+  (Join-Path (Get-AppDataRoot) 'WinTunerGUI\activity-history.json')
 )
 $script:previousSessionActivity = @()
 

@@ -497,7 +497,7 @@ function Get-WingetVersions {
 
 # Where the WinTuner module caches the community package index. Not our file - we only look at it,
 # never write it. Measured: 3.2 MB, pulled from raw.githubusercontent.com.
-$script:wingetIndexCachePath = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'WingetCommunityRepo\index.v2.json'
+$script:wingetIndexCachePath = Join-Path (Get-LocalAppDataRoot) 'WingetCommunityRepo\index.v2.json'
 
 # Is the module about to download the package index rather than read it from disk?
 #

@@ -123,7 +123,14 @@ if ($psVersion -lt $minimumPowerShellVersion) {
 
 # Offer the required module before WinForms starts. Declining keeps the GUI available in a
 # diagnostic state; no package is installed without an explicit confirmation.
-if (-not (Get-Module -ListAvailable -Name WinTuner)) {
+#
+# Die Kennungen der Prueflaeufe stehen hier ausgeschrieben und nicht als Test-UnattendedRun: diese
+# Datei ist Teil 00 und laeuft, bevor irgendeine Funktion definiert ist. Ohne das haengt die
+# Rueckfrage an -NonInteractive - dort wirft Read-Host, was hier gefangen wird. Das ist aber eine
+# Nebenwirkung, kein Vorsatz: wer einen Prueflauf einmal ohne -NonInteractive startet, wartet
+# stattdessen auf eine Eingabe, die nie kommt. Ein Prueflauf installiert ohnehin nichts.
+$script:unattendedStart = (($env:WINTUNER_SMOKE -eq '1') -or ($env:WINTUNER_LAYOUT -eq '1'))
+if (-not $script:unattendedStart -and -not (Get-Module -ListAvailable -Name WinTuner)) {
   Write-Host ''
   if ($startupLanguage -eq 'de') {
     Write-Host 'Das erforderliche PowerShell-Modul "WinTuner" ist nicht installiert.' -ForegroundColor Yellow

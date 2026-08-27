@@ -92,7 +92,7 @@ $script:activityTenantUpn = ""
 $script:builtVersions = @{}
 # Cache for winget version lookups (speeds up repeated searches)
 $script:wingetVersionCache = @{}
-$script:versionCachePath = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'WinTunerGUI\version-cache.json'
+$script:versionCachePath = Join-Path (Get-LocalAppDataRoot) 'WinTunerGUI\version-cache.json'
 # Disk cache loaded once at first use (Fix 1)
 $script:diskCache = @{}
 $script:diskCacheLoaded = $false

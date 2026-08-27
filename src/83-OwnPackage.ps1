@@ -206,7 +206,7 @@ function Invoke-WtSandboxTest {
   # folders are usually covered by Controlled Folder Access, and mapping one of those is a common
   # cause of "access denied (0x80070005)" at sandbox start. LocalAppData is not a protected folder,
   # so the map succeeds. Old stage folders from previous runs are swept first.
-  $stageBase = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'WinTunerGUI\SandboxTest'
+  $stageBase = Join-Path (Get-LocalAppDataRoot) 'WinTunerGUI\SandboxTest'
   try {
     if (Test-Path -LiteralPath $stageBase) {
       foreach ($d in @(Get-ChildItem -LiteralPath $stageBase -Directory -ErrorAction SilentlyContinue)) {

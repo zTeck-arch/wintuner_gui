@@ -15,6 +15,10 @@ permissions:
   contents: read
 
 jobs:
+  # In diesem Job wird das WinTuner-Modul ABSICHTLICH nicht installiert: so laufen Smoke-Test und
+  # Layout-Probe genau den Weg, den ein Benutzer beim ersten Start ohne Modul nimmt. Dort hing 0.16.0
+  # (modaler Dialog im Fehlerzweig des Modul-Imports). Wer hier ein "Install-Module WinTuner"
+  # ergaenzt, nimmt diese Abdeckung weg - der Modulvertrag braucht es, dieser Job nicht.
   parser:
     runs-on: windows-latest
     steps:

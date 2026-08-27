@@ -45,8 +45,16 @@ try {
     [void]$psi.ArgumentList.Add($a)
   }
   $psi.EnvironmentVariables['WINTUNER_SMOKE'] = '1'
-  # Redirect the whole per-user profile so settings.json, the version cache and the logs land in the
-  # sandbox rather than in the real profile.
+  # Die eigenen Daten in die Sandbox umlenken: Einstellungen, Protokolle, Zwischenspeicher, Verlauf.
+  #
+  # WINTUNER_DATA_DIR ist das, was wirklich wirkt. APPDATA/LOCALAPPDATA allein taten es NICHT:
+  # die Anwendung fragt [Environment]::GetFolderPath('ApplicationData'), und das liest den bekannten
+  # Ordner von Windows und ignoriert die Umgebungsvariable. Jeder Prueflauf las und schrieb also das
+  # echte Profil - gemessen am 26.08.2026. Beide Folgen waren schlecht: der Lauf konnte die
+  # Einstellungen des Benutzers anfassen, und der Erstlauf-Zustand (frisches Profil, wie auf jedem
+  # CI-Laeufer) wurde hier nie geprueft. Die beiden alten Variablen bleiben gesetzt, weil der
+  # Token-Zwischenspeicher $env:LOCALAPPDATA direkt liest.
+  $psi.EnvironmentVariables['WINTUNER_DATA_DIR'] = $sandbox
   $psi.EnvironmentVariables['APPDATA'] = $sandbox
   $psi.EnvironmentVariables['LOCALAPPDATA'] = $sandbox
 
