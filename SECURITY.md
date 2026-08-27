@@ -7,7 +7,7 @@ Please report security issues **privately**, not as a public issue.
 **Preferred:** use GitHub's private reporting on this repository, under
 **Security → Report a vulnerability**. The report stays visible only to the maintainers.
 
-**Alternative:** <app.t.schnabel@posteo.de>
+**Alternative:** <zteck@posteo.de>
 
 Please include what you need to describe the problem: affected version, what you did,
 what happened, and what you expected. A proof of concept helps but is not required.
