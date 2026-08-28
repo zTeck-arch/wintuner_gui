@@ -1318,6 +1318,12 @@ function Show-Section {
   if ($Key -eq 'workrecord' -and (Get-Command Update-WorkRecordSectionLayout -ErrorAction SilentlyContinue)) {
     try { Update-WorkRecordSectionLayout } catch {}
   }
+  # Der Nachweis wird beim OEFFNEN neu erzeugt, nicht beim Aufbau des Fensters: gebaut wird der
+  # Bereich vor der Anmeldung, und was dann darin steht, ist der Anmelde-Hinweis - auch nach einem
+  # kompletten Update-Lauf. Layout und Inhalt sind zwei Dinge, deshalb ein eigener Aufruf.
+  if ($Key -eq 'workrecord' -and (Get-Command Update-WorkRecordText -ErrorAction SilentlyContinue)) {
+    try { Update-WorkRecordText } catch {}
+  }
   if ($Key -eq 'appsettings' -and (Get-Command Update-AppSettingsLayout -ErrorAction SilentlyContinue)) {
     try { Update-AppSettingsLayout } catch {}
   }

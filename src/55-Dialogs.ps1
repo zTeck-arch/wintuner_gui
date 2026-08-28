@@ -1044,8 +1044,7 @@ function Show-LeistungstextDialog {
   $sessionCombo.Add_SelectedIndexChanged({
     $ui = $script:workRecordUi
     $script:leistungShowPrevious = ($ui.SessionCombo.SelectedIndex -eq 1)
-    $ui.Box.Text = Get-SessionLeistungstext
-    $ui.Header.Text = Get-SessionLeistungsHeader
+    Update-WorkRecordText -Force
   })
 
   $header = New-Object System.Windows.Forms.Label
@@ -1071,8 +1070,7 @@ function Show-LeistungstextDialog {
   $langCombo.Add_SelectedIndexChanged({
     $ui = $script:workRecordUi
     $script:leistungLang = if ($ui.LangCombo.SelectedIndex -eq 1) { 'en' } else { 'de' }
-    $ui.Header.Text = Get-SessionLeistungsHeader
-    $ui.Box.Text = Get-SessionLeistungstext
+    Update-WorkRecordText -Force
   })
 
   $copyButton = New-Object System.Windows.Forms.Button
@@ -1106,9 +1104,7 @@ function Show-LeistungstextDialog {
     )
     if ($confirm -eq [System.Windows.Forms.DialogResult]::Yes) {
       Clear-SessionActivityRecord
-      $ui = $script:workRecordUi
-      $ui.Header.Text = Get-SessionLeistungsHeader
-      $ui.Box.Text = Get-SessionLeistungstext
+      Update-WorkRecordText -Force
     }
   })
   $dlg.Controls.Add($clearButton)
@@ -1128,6 +1124,9 @@ function Show-LeistungstextDialog {
     LangLabel = $langLabel; LangCombo = $langCombo; SessionCombo = $sessionCombo
     Header = $header; Box = $box
     CopyButton = $copyButton; ClearButton = $clearButton; CloseButton = $closeButton
+    # Der zuletzt SELBST erzeugte Text. Update-WorkRecordText vergleicht damit, um eine
+    # Hand-Aenderung im Feld nicht beim naechsten Bereichswechsel zu ueberschreiben.
+    LastGenerated = [string]$box.Text
   }
 
   Set-GuiTheme -control $dlg -theme $script:currentTheme
@@ -1139,6 +1138,36 @@ function Show-LeistungstextDialog {
     $script:workRecordUi = $previousWorkRecordUi
     $dlg.Dispose()
   }
+}
+
+# Zieht Kopfzeile und Textfeld nach.
+#
+# Der Text entsteht beim AUFBAU des Bereichs - und der Bereich wird gebaut, bevor sich jemand
+# angemeldet hat. Ohne dieses Nachziehen stand nach einem vollstaendigen Update-Lauf immer noch
+# "Bitte an einem Tenant anmelden, um dessen Leistungsnachweis zu sehen." im Feld: gemeldet am
+# 28.08.2026, Protokoll 08:25:35 zwei Apps erfolgreich aktualisiert, 08:29:47 Wechsel in den
+# Bereich - und dort der Anmelde-Hinweis. Sichtbar wurde der echte Text nur, wenn man zufaellig die
+# Sprache oder die Sitzung umschaltete, denn nur diese beiden Handler haben ihn je neu erzeugt.
+#
+# Eine HAND-Aenderung wird nicht ueberschrieben: das Feld ist bearbeitbar, weil der Text in ein
+# Ticket wandert, und wer dort etwas ergaenzt hat, darf es nicht durch einen Bereichswechsel
+# verlieren. Erkannt wird das am Vergleich mit dem zuletzt selbst erzeugten Text; -Force ist fuer
+# die Faelle, in denen der Inhalt sich WIRKLICH aendert (Sprache, Sitzung, Loeschen).
+function Update-WorkRecordText {
+  param([switch]$Force)
+  $ui = $script:workRecordUi
+  if (-not $ui -or -not $ui.Box) { return }
+  try {
+    if (-not $Force -and $null -ne $ui.LastGenerated -and
+        -not [string]::Equals([string]$ui.Box.Text, [string]$ui.LastGenerated, [System.StringComparison]::Ordinal)) {
+      Write-LogDebug 'Work record: the text was edited by hand - keeping it instead of regenerating.'
+      return
+    }
+    $text = Get-SessionLeistungstext
+    $ui.Box.Text = $text
+    $ui.LastGenerated = $text
+    if ($ui.Header) { $ui.Header.Text = Get-SessionLeistungsHeader }
+  } catch { Write-LogDebug 'work record text' }
 }
 
 # Anordnung aus dem vorhandenen Platz, nicht aus Pixelkonstanten: als Bereich ist das Feld so hoch
