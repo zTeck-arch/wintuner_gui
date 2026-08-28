@@ -974,6 +974,9 @@ $form.Add_Resize({
   try { if (Get-Command Update-LocalPackagesLayout -ErrorAction SilentlyContinue) { Update-LocalPackagesLayout } } catch {}
   try { if (Get-Command Update-AppSettingsLayout -ErrorAction SilentlyContinue) { Update-AppSettingsLayout } } catch {}
   try { if (Get-Command Update-WorkRecordSectionLayout -ErrorAction SilentlyContinue) { Update-WorkRecordSectionLayout } } catch {}
+  try { if (Get-Command Update-WingetLayout -ErrorAction SilentlyContinue) { Update-WingetLayout } } catch {}
+  try { if (Get-Command Update-DiscoveredLayout -ErrorAction SilentlyContinue) { Update-DiscoveredLayout } } catch {}
+  try { if (Get-Command Update-CustomerDataLayout -ErrorAction SilentlyContinue) { Update-CustomerDataLayout } } catch {}
 })
 
 # Disconnect button – quick session end, keeps the cached sign-in for a fast reconnect
@@ -1088,6 +1091,7 @@ $script:navGlyphs = @{
                            # bewusst nicht das Listensymbol der Nachbarn darueber
   discovered = 0xE721   # search
   workrecord = 0xE9D9   # analytics - der Leistungsnachweis dieser/der letzten Sitzung
+  customerdata = 0xE77B # contact - die kundenbezogenen Daten dieses Rechners
   settings   = 0xE713   # settings gear
   leistung   = 0xE9D9   # report / chart
 }
@@ -1313,6 +1317,19 @@ function Show-Section {
   if ($Key -eq 'store' -and (Get-Command Update-StoreLayout -ErrorAction SilentlyContinue)) {
     try { Update-StoreLayout } catch {}
   }
+  # Der Bereich zeigt beim Betreten den STAND: Kundennamen und Favoriten werden woanders
+  # geaendert (Dialog bzw. Knopf am Zuweisungsziel), und ein Bereich, der den Aufbau-Stand zeigt,
+  # ist schlimmer als keiner - er behauptet etwas Falsches ueber Kundendaten.
+  if ($Key -eq 'customerdata') {
+    if (Get-Command Update-CustomerDataLists -ErrorAction SilentlyContinue) { try { Update-CustomerDataLists } catch {} }
+    if (Get-Command Update-CustomerDataLayout -ErrorAction SilentlyContinue) { try { Update-CustomerDataLayout } catch {} }
+  }
+  if ($Key -eq 'winget' -and (Get-Command Update-WingetLayout -ErrorAction SilentlyContinue)) {
+    try { Update-WingetLayout } catch {}
+  }
+  if ($Key -eq 'discovered' -and (Get-Command Update-DiscoveredLayout -ErrorAction SilentlyContinue)) {
+    try { Update-DiscoveredLayout } catch {}
+  }
   # Der Editor laedt die App-Liste beim OEFFNEN, nicht beim Aufbau des Fensters - vorher ist niemand
   # angemeldet. Nur einmal je Sitzung; der Knopf "Neu laden" im Bereich holt den Rest.
   if ($Key -eq 'workrecord' -and (Get-Command Update-WorkRecordSectionLayout -ErrorAction SilentlyContinue)) {
@@ -1409,7 +1426,10 @@ function Show-GroupFavoriteDialog {
   $dlg.MinimizeBox = $false; $dlg.MaximizeBox = $false
   $dlg.ClientSize = New-Object System.Drawing.Size(520, 380)
 
-  $pendingId = ([string]$GroupIdBox.Text).Trim()
+  # Ohne Zielfeld aufrufbar: der Bereich "Kundendaten" oeffnet denselben Dialog zum PFLEGEN, nicht
+  # zum Auswaehlen. Dann gibt es keine vorgemerkte Id, und das Feld "Aktuelle Id speichern" bleibt
+  # leer - alles Uebrige (umbenennen, entfernen) arbeitet unveraendert weiter.
+  $pendingId = if ($GroupIdBox) { ([string]$GroupIdBox.Text).Trim() } else { '' }
 
   $nameLabel = New-Object System.Windows.Forms.Label
   $nameLabel.Text = Get-UiString 'FavDialogPromptName'

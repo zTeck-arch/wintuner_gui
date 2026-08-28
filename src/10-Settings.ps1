@@ -166,11 +166,21 @@ $script:settings = @{
   # Liste je Kunde fängt bei jeder NEUEN Umgebung leer an, und genau dort passiert der Unfall.
   # Produktnamen sind ausserdem keine Kundendaten, es gibt also nichts zu trennen.
   ProtectedApps = @()
+  # Welche Werksmuster schon einmal eingetragen wurden. Ohne diesen Merker gaebe es nur zwei
+  # schlechte Moeglichkeiten: die Werksliste bei jedem Start erzwingen (dann kann der Benutzer
+  # keines davon loswerden - es kaeme beim naechsten Start zurueck) oder sie nur bei einer frischen
+  # Installation setzen (dann bekaeme sie niemand, der die Anwendung schon benutzt). Der Merker
+  # trennt "hat der Benutzer bewusst entfernt" von "kannte er noch nicht".
+  ProtectedAppsSeeded = @()
 }
 
 # Set when Load-Settings had to resolve a conflict, so the change can be logged and explained once
 # the UI exists (Write-Log and the form are not available this early).
 $script:cleanupConflictResolved = $false
+
+# Welche Werksmuster dieser Start ergaenzt hat. Wird gesetzt, solange es noch kein Protokoll gibt,
+# und beim Anzeigen des Fensters einmal protokolliert und gespeichert (90-Main).
+$script:protectedAppsSeeded = @()
 
 # Der Abdruck der wirksamen Einstellungen fuer das Protokoll.
 #
@@ -384,6 +394,60 @@ function Add-ProtectedAppPattern {
   return @(Set-ProtectedAppPatterns -Patterns (@($Patterns) + @([string]$Pattern)))
 }
 
+# Werksseitig geschuetzte Namen.
+#
+# Diese Programme werden in der Praxis fast immer SELBST paketiert - mit kundeneigener
+# Konfiguration, eigener Lizenz oder eingebauten Zugangsdaten. Ein Update darauf baut eine neue App,
+# loest die vorhandene ab und zieht deren Zuweisungen mit; bei einem von Hand gebauten Paket laesst
+# sich das durch keinen zweiten Lauf zurueckholen. Genau dieser Unfall soll nicht davon abhaengen,
+# dass jemand in einer neuen Umgebung zuerst an die Schutzliste denkt.
+#
+# Alle mit '*', weil es um JEDE Fassung des Produkts geht ("TeamViewer", "TeamViewer Host",
+# "TeamViewer Meeting"). Geschuetzt heisst nicht gesperrt: die App bleibt sichtbar und anhakbar, der
+# Lauf fragt bei ihr nur ausdruecklich nach - auch bei abgeschalteten Rueckfragen. Ein zu breites
+# Muster kostet daher eine Rueckfrage, ein fehlendes eine App.
+#
+# Die Liste ist bewusst kurz und nennt nur, was hier tatsaechlich vorkommt. Wer sie erweitert,
+# traegt hier ein: der Merker ProtectedAppsSeeded sorgt dafuer, dass Nachtraege auch bei
+# Bestandsinstallationen ankommen, ohne von Hand entfernte Muster zurueckzuholen.
+$script:defaultProtectedApps = @(
+  'TeamViewer*'
+  'Jamf*'
+  'Splashtop*'
+)
+
+# Reine Rechnung: welche Werksmuster fehlen noch, und wie sehen die beiden Listen danach aus.
+# Getrennt von der Oberflaeche, damit die Regel "einmal eintragen, danach nie wieder aufzwingen"
+# ohne Anmeldung und ohne Fenster pruefbar ist.
+function Get-SeededProtectedApps {
+  param(
+    [AllowNull()][object[]]$Patterns,
+    [AllowNull()][object[]]$Seeded,
+    [AllowNull()][object[]]$Defaults
+  )
+  $already = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($s in @($Seeded)) {
+    $t = ([string]$s).Trim()
+    if (-not [string]::IsNullOrWhiteSpace($t)) { [void]$already.Add($t) }
+  }
+  $added = [System.Collections.Generic.List[string]]::new()
+  $result = @($Patterns)
+  foreach ($d in @($Defaults)) {
+    $t = ([string]$d).Trim()
+    if ([string]::IsNullOrWhiteSpace($t)) { continue }
+    if ($already.Contains($t)) { continue }   # schon einmal angeboten - Entscheidung des Benutzers gilt
+    $result = @(Add-ProtectedAppPattern -Patterns $result -Pattern $t)
+    $added.Add($t)
+  }
+  return @{
+    Patterns = @(Set-ProtectedAppPatterns -Patterns $result)
+    # Der Merker fuehrt IMMER die vollstaendige Werksliste, nicht nur das eben Ergaenzte: sonst
+    # wuerde ein Muster, das der Benutzer entfernt, beim naechsten Start erneut eingetragen.
+    Seeded   = @(Set-ProtectedAppPatterns -Patterns (@($Seeded) + @($Defaults)))
+    Added    = @($added.ToArray())
+  }
+}
+
 function Remove-ProtectedAppPattern {
   param([AllowNull()][object[]]$Patterns, [string]$Pattern)
   $target = ([string]$Pattern).Trim()
@@ -465,6 +529,7 @@ function Load-Settings {
         # Ueber Set-ProtectedAppPatterns, damit eine von Hand bearbeitete Datei denselben
         # Normalisierungs- und Doppelten-Filter durchlaeuft wie die Oberflaeche.
         $script:settings.ProtectedApps = @(Set-ProtectedAppPatterns -Patterns (Get-SettingValue -Source $o -Name 'ProtectedApps' -Type StringArray -Default @()))
+        $script:settings.ProtectedAppsSeeded = @(Set-ProtectedAppPatterns -Patterns (Get-SettingValue -Source $o -Name 'ProtectedAppsSeeded' -Type StringArray -Default @()))
         $script:settings.SuppressChangeConfirmations = Get-SettingValue -Source $o -Name 'SuppressChangeConfirmations' -Type Bool -Default $false
         $script:settings.ChangeConfirmationRiskAcceptedVersion = Get-SettingValue -Source $o -Name 'ChangeConfirmationRiskAcceptedVersion' -Type String -Default ''
         # Friendly tenant names: a plain UPN -> string map. Anything that is not a usable pair is
@@ -531,6 +596,17 @@ function Load-Settings {
   # Runs outside the try block on purpose: a settings file that failed to parse leaves the defaults
   # in place, and those must be normalized just the same.
   if (Resolve-CleanupOptionConflict) { $script:cleanupConflictResolved = $true }
+
+  # Ebenfalls ausserhalb des try: die Werksmuster gelten fuer die frische Installation UND fuer den
+  # Bestand. Gespeichert wird hier NICHT - das passiert einmal, sobald das Fenster steht
+  # (Add_Shown in 90-Main), wie beim Aufraeum-Konflikt daneben. Load-Settings laeuft so frueh, dass
+  # es weder Write-Log noch ein Fenster gibt.
+  $seed = Get-SeededProtectedApps -Patterns $script:settings.ProtectedApps `
+                                  -Seeded $script:settings.ProtectedAppsSeeded `
+                                  -Defaults $script:defaultProtectedApps
+  $script:settings.ProtectedApps = @($seed.Patterns)
+  $script:settings.ProtectedAppsSeeded = @($seed.Seeded)
+  if (@($seed.Added).Count -gt 0) { $script:protectedAppsSeeded = @($seed.Added) }
 }
 
 function Save-Settings {

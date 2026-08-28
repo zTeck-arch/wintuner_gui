@@ -1,4 +1,4 @@
-# Blends Fore 50% toward Back – used to draw legible "disabled" button text/borders
+﻿# Blends Fore 50% toward Back – used to draw legible "disabled" button text/borders
 # ourselves, since WinForms' own disabled rendering ignores ForeColor (see Set-GuiTheme).
 function Get-DimmedColor {
   param([System.Drawing.Color]$Fore, [System.Drawing.Color]$Back, [double]$Ratio = 0.5)
@@ -392,22 +392,76 @@ function Get-ScrollOffsetY {
   } catch { return 0 }
 }
 
+# --- Zeilenfarben in den Listen ------------------------------------------------------------------
+#
+# Drei Aussagen, die ein Anwender auf einen Blick auseinanderhalten koennen muss:
+#   protected  diese App wird selbst paketiert - ein Lauf darf sie nicht versehentlich abloesen
+#   warn       an dieser Zeile stimmt etwas nicht ganz (fremde Herkunft, unklare Zuweisungen)
+#   blocked    diese Zeile konnte gar nicht geprueft werden - sie ist nicht handlungsfaehig
+#
+# Vorher waren protected und warn DIESELBE feste Farbe (DarkOrange), blockiert war IndianRed. Damit
+# stand die staerkste Aussage der Liste - "Finger weg" - im selben Ton wie drei Randbemerkungen.
+#
+# Warum die Farben vom Design abhaengen: gemessen gegen die Listenflaeche (dunkle Designs
+# 38,38,38; die sechs hellen weiss) erreichte DarkOrange auf hellem Grund nur 2,33:1. In SECHS von
+# sieben Designs war die Warnung also kaum lesbar - unbemerkt geblieben, weil am
+# Entwicklungsrechner das dunkle Design lief. Eine einzelne feste Farbe kann beides nicht: der
+# beste Kompromiss ueber beide Gruende lag bei 3,3:1.
+#
+# Gemessene Kontraste dieser Paare (dunkel / hell):
+#   protected 5,88 / 6,68    warn 6,49 / 5,31    blocked 5,79 / 4,42
+#
+# Weil die Farbe jetzt vom Design abhaengt, muss ein Designwechsel die Zeilen neu einfaerben -
+# Set-GuiTheme faerbt nur die Liste, nicht ihre Eintraege. Das erledigt Update-UpdateListRows,
+# aufgerufen aus Set-ActiveTheme.
+function Get-RowAlertColor {
+  param([Parameter(Mandatory)][ValidateSet('protected', 'warn', 'blocked')][string]$Level)
+  $dark = [bool]($script:currentTheme -and $script:currentTheme.Dark)
+  switch ($Level) {
+    'protected' {
+      if ($dark) { return [System.Drawing.Color]::FromArgb(255, 120, 110) }
+      return [System.Drawing.Color]::FromArgb(178, 34, 34)
+    }
+    'blocked' {
+      # Bewusst neutral statt rot: "konnte nicht geprueft werden" ist keine Gefahr, sondern eine
+      # Luecke. Rot ist hier fuer die geschuetzten Apps reserviert.
+      if ($dark) { return [System.Drawing.Color]::FromArgb(160, 160, 160) }
+      return [System.Drawing.Color]::FromArgb(120, 120, 120)
+    }
+    default {
+      if ($dark) { return [System.Drawing.Color]::DarkOrange }
+      return [System.Drawing.Color]::FromArgb(166, 86, 0)
+    }
+  }
+}
+
 function Update-StackedCards {
   param(
     [Parameter(Mandatory)][System.Windows.Forms.Control]$Panel,
     [Parameter(Mandatory)][object[]]$Cards,
     [int]$Top = 48,
     [int]$Gap = 12,
-    [int]$Padding = 16
+    [int]$Padding = 16,
+    # Steuerelemente, die bei DIESEM Aufruf nicht mitzaehlen: der zugeklappte Teil eines
+    # Aufklappers. Sonst waere eine zugeklappte Karte so hoch wie eine aufgeklappte.
+    #
+    # Warum nicht einfach $child.Visible fragen: WinForms liefert dort die WIRKSAME Sichtbarkeit,
+    # und die ist fuer jedes Kind einer versteckten Sektion $false - nachgemessen mit einem Panel,
+    # dessen Elternteil auf Visible=$false steht. Waehrend eine ANDERE Sektion offen ist, waeren
+    # also alle Kinder unsichtbar und jede Karte schrumpfte auf ihren Rand zusammen. Der
+    # Aufklapp-Zustand gehoert deshalb in eine Variable, nicht an das Control.
+    [object[]]$Exclude = @()
   )
   try {
     $y = $Top + (Get-ScrollOffsetY $Panel)
     foreach ($card in $Cards) {
       if (-not $card) { continue }
-      # Unterkante des tiefsten Kindes. Unsichtbare zaehlen mit: eine Karte, die ein Feld nur
-      # zeitweise ausblendet, darf beim Wiedereinblenden nicht zu klein sein.
+      # Unterkante des tiefsten Kindes. Unsichtbare zaehlen mit, sofern sie nicht ausdruecklich
+      # ausgenommen sind: eine Karte, die ein Feld nur zeitweise ausblendet (etwa das Gruppenfeld,
+      # das nur bei "Bestimmte Gruppe" erscheint), darf beim Wiedereinblenden nicht zu klein sein.
       $bottom = 0
       foreach ($child in $card.Controls) {
+        if ($Exclude.Count -gt 0 -and ($Exclude -contains $child)) { continue }
         $b = $child.Top + $child.Height
         if ($b -gt $bottom) { $bottom = $b }
       }
@@ -783,10 +837,18 @@ function Set-ActiveTheme {
   # sie beim Designwechsel die Geometrie der VORHERIGEN Schriftart, bis man sie einmal verlaesst und
   # neu oeffnet - eine Anordnung, die niemand ausgeloest hat und die niemand erklaeren kann.
   foreach ($layoutFn in @('Update-TenantAppsLayout', 'Update-StoreLayout', 'Update-LocalPackagesLayout',
-                          'Update-UpdatesLayout', 'Update-AppSettingsLayout', 'Update-WorkRecordSectionLayout')) {
+                          'Update-UpdatesLayout', 'Update-AppSettingsLayout', 'Update-WorkRecordSectionLayout',
+                          'Update-WingetLayout', 'Update-DiscoveredLayout', 'Update-CustomerDataLayout')) {
     if (Get-Command $layoutFn -ErrorAction SilentlyContinue) {
       try { & $layoutFn } catch { Write-LogDebug ("theme relayout: {0}" -f $layoutFn) }
     }
+  }
+  # Die Zeilenfarben der Update-Liste haengen am Design (siehe Get-RowAlertColor), und Set-GuiTheme
+  # faerbt nur die Liste selbst - ihre Eintraege behielten sonst die Farben des vorigen Designs.
+  # Update-UpdateListRows baut die Zeilen aus dem vorhandenen Scan neu auf, ohne den Tenant zu
+  # befragen, und stellt die Haken wieder her.
+  if (Get-Command Update-UpdateListRows -ErrorAction SilentlyContinue) {
+    try { Update-UpdateListRows } catch { Write-LogDebug 'theme recolor update rows' }
   }
   $form.Refresh()
 }

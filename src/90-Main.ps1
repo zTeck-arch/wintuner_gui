@@ -2166,7 +2166,7 @@ $navGroupOrder = @('start', 'deploy', 'manage', 'local')
 $navKeyOrder = @('dashboard',
                  'winget', 'store', 'ownpackage',
                  'updates', 'discovered', 'tenant', 'appsettings',
-                 'localpackages', 'workrecord', 'settings')
+                 'localpackages', 'workrecord', 'customerdata', 'settings')
 $navOrdered = @($script:sections | Sort-Object -Stable `
   @{ Expression = {
       $idx = $navGroupOrder.IndexOf([string]$_.Group)
@@ -2440,6 +2440,22 @@ $form.Add_Shown({
 # Hinweis auf einen Umzug, den es nicht gibt, waere schlimmer als keiner. Der Merker
 # RepoMoveNoticeShown bleibt in den Einstellungen liegen und stoert dort nicht.
 
+# Die werksseitig geschuetzten Namen einmal festschreiben. Bewusst OHNE Dialog: das ist kein
+# Konflikt, den jemand entscheiden muesste, sondern eine Voreinstellung - und sie steht sichtbar
+# unter "Geschuetzte Apps...". Ein Dialog hier waere zudem der vierte im Startpfad.
+#
+# Ohne Test-UnattendedRun-Ausstieg, weil hier nichts Modales passiert: auch ein Pruef-Lauf darf
+# den Merker schreiben, und ohne das Speichern kaeme die Ergaenzung bei jedem Start erneut.
+$form.Add_Shown({
+  if (@($script:protectedAppsSeeded).Count -eq 0) { return }
+  $added = @($script:protectedAppsSeeded)
+  $script:protectedAppsSeeded = @()
+  Save-Settings
+  Write-Log ("Protected apps: {0} factory pattern(s) added ({1}); the app list now holds {2} entr(y/ies). They can be removed under 'Protected apps...' and will not come back." -f `
+    $added.Count, ($added -join ', '), @($script:settings.ProtectedApps).Count)
+  try { if (Get-Command Update-ProtectedAppsList -ErrorAction SilentlyContinue) { Update-ProtectedAppsList } } catch { Write-LogDebug 'protected apps list after seeding' }
+})
+
 $form.Add_Shown({
   # Unbeaufsichtigt: nichts von hier - siehe der erste Add_Shown-Handler oben.
   if (Test-UnattendedRun) { return }
@@ -2562,6 +2578,11 @@ if ($keepVersionCountLabel) { $toolTip.SetToolTip($keepVersionCountLabel, (Get-U
 if ($languageSelectorCombo) { $toolTip.SetToolTip($languageSelectorCombo, (Get-UiString 'TtLanguageSelector')) }
 if ($saveSettingsButton)       { $toolTip.SetToolTip($saveSettingsButton,       (Get-UiString 'TtSaveSettings')) }
 if ($clearCacheButton)         { $toolTip.SetToolTip($clearCacheButton,         (Get-UiString 'TtClearCache')) }
+# Der Nachbarknopf in derselben Reihe hatte seinen Text seit jeher, aber niemand haengte ihn an -
+# gefunden bei der Durchsicht der "toten" Sprachschluessel: TtPrunePackages galt als unbenutzt,
+# weil der Knopf ihn nie las. Von den 38 gemeldeten Schluesseln war genau dieser kein toter Text,
+# sondern eine fehlende Verdrahtung. Und gerade hier zaehlt der Hinweis: der Knopf loescht Dateien.
+if ($prunePackagesButton)      { $toolTip.SetToolTip($prunePackagesButton,      (Get-UiString 'TtPrunePackages')) }
 if ($checkUpdateButton)        { $toolTip.SetToolTip($checkUpdateButton,        (Get-UiString 'TtCheckUpdate')) }
 if ($moveAssignmentsCheckbox)  { $toolTip.SetToolTip($moveAssignmentsCheckbox,  (Get-UiString 'TtMoveAssignments')) }
 if ($openLogButton)            { $toolTip.SetToolTip($openLogButton,            (Get-UiString 'TtOpenLogFile')) }

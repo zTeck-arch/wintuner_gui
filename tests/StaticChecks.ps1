@@ -67,7 +67,24 @@ Assert-True ($missingKeys.Count -eq 0) "Undefined UI keys: $($missingKeys -join 
 $indirectKeys = @([regex]::Matches($content, '-(?:TextKey|TitleKey|InfoKey)\s+["''](?<key>[A-Za-z][A-Za-z0-9_]*)["'']') |
   ForEach-Object { $_.Groups['key'].Value })
 $dynamicLookup = [regex]::IsMatch($content, 'Get-UiString\s+\$')
-$reachable = [Collections.Generic.HashSet[string]]::new([string[]]($usedKeys + $indirectKeys), [StringComparer]::OrdinalIgnoreCase)
+
+# Der dritte Weg: der Schluessel steht als EINFACH gequotetes Literal im Code und wird ueber eine
+# Variable geholt ($key = if (...) { 'DashStaleHint' } else { 'DashAsOfLabel' }; -NormalKey
+# 'UpdatesEmptyHint'; [string]$HintKey = 'StorePickerHint').
+#
+# Ohne diesen Weg meldete die Pruefung 38 Schluessel, von denen 20 nachweislich benutzt waren -
+# eine Liste, die zu 53 % aus Fehlalarmen besteht, liest niemand mehr durch, und genau dann faellt
+# eine echte Leiche nicht mehr auf. Nach der Durchsicht am 28.08.2026 blieben von den 38 noch
+# 17 wirklich tote (entfernt) und einer, der gar kein toter Text war, sondern eine fehlende
+# Verdrahtung (TtPrunePackages, siehe 90-Main).
+#
+# Bewusst nur EINFACHE Anfuehrungszeichen: Schluessel werden im Code so uebergeben, die UI-Texte in
+# 15-Strings stehen in doppelten. Die Grenze der Regel: hiesse ein Schluessel wie ein irgendwo
+# sonst benutztes Wort, gaelte er faelschlich als benutzt. Das ist der Preis dafuer, dass die
+# Warnung ueberhaupt gelesen wird - und sie ist eine Warnung, kein roter Build.
+$literalKeys = @([regex]::Matches($content, "'(?<key>[A-Za-z][A-Za-z0-9_]*)'") |
+  ForEach-Object { $_.Groups['key'].Value })
+$reachable = [Collections.Generic.HashSet[string]]::new([string[]]($usedKeys + $indirectKeys + $literalKeys), [StringComparer]::OrdinalIgnoreCase)
 $deadKeys = @($enKeys | Where-Object { -not $reachable.Contains($_) } | Sort-Object)
 if ($deadKeys.Count -gt 0) {
   $note = if ($dynamicLookup) { ' (einige davon koennen ueber eine Variable geholt werden)' } else { '' }
@@ -312,5 +329,29 @@ foreach ($call in $folderCalls) {
 Assert-True ($strayFolderCalls.Count -eq 0) (
   "GetFolderPath for a per-user data folder outside Get-AppDataRoot/Get-LocalAppDataRoot ({0} site(s)); such a path ignores WINTUNER_DATA_DIR, so a verification run would read and write the real profile:`r`n  {1}" -f
     $strayFolderCalls.Count, ($strayFolderCalls -join "`r`n  "))
+
+# Jeder Bereich braucht seinen Platz in der Seitenleiste UND ein Symbol.
+#
+# $navKeyOrder ist die Entscheidung ueber die Reihenfolge; wer dort fehlt, landet HINTEN in seiner
+# Gruppe. Das ist mit Absicht so gebaut, damit ein neuer Bereich nie verschwindet - aber es faellt
+# eben auch nicht auf. Beim Bau des Bereichs "Kundendaten" ist genau das passiert: er stand unter
+# "Einstellungen" statt davor und hatte kein Symbol, weil er in beiden Tabellen fehlte. Gesehen hat
+# das erst eine Bildschirmkopie - kein Test und kein Parser, denn falsch war nichts, nur die
+# Reihenfolge.
+$sectionKeys = @([regex]::Matches($content, "Add-Section\s+-Key\s+'(?<key>[a-z]+)'") |
+  ForEach-Object { $_.Groups['key'].Value } | Sort-Object -Unique)
+$navOrderBlock = [regex]::Match($content, '\$navKeyOrder\s*=\s*@\((?<body>[^)]*)\)')
+$navGlyphBlock = [regex]::Match($content, '\$script:navGlyphs\s*=\s*@\{(?<body>[^}]*)\}')
+Assert-True ($navOrderBlock.Success -and $navGlyphBlock.Success) 'navKeyOrder or navGlyphs not found; the sidebar checks cannot run.'
+$orderedKeys = @([regex]::Matches($navOrderBlock.Groups['body'].Value, "'(?<key>[a-z]+)'") | ForEach-Object { $_.Groups['key'].Value })
+$glyphKeys   = @([regex]::Matches($navGlyphBlock.Groups['body'].Value, '(?m)^\s*(?<key>[a-z]+)\s*=') | ForEach-Object { $_.Groups['key'].Value })
+$missingOrder = @($sectionKeys | Where-Object { $_ -notin $orderedKeys })
+$missingGlyph = @($sectionKeys | Where-Object { $_ -notin $glyphKeys })
+Assert-True ($missingOrder.Count -eq 0) (
+  "Section(s) missing from `$navKeyOrder ({0}); they would silently sort to the end of their group: {1}" -f
+    $missingOrder.Count, ($missingOrder -join ', '))
+Assert-True ($missingGlyph.Count -eq 0) (
+  "Section(s) missing from `$script:navGlyphs ({0}); their sidebar entry would have no icon while every neighbour has one: {1}" -f
+    $missingGlyph.Count, ($missingGlyph -join ', '))
 
 Write-Host "Static checks passed for WinTuner GUI $($version.Groups['v'].Value): $($functionNames.Count) functions, $($enKeys.Count) UI keys per language."

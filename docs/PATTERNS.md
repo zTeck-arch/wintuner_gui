@@ -38,6 +38,14 @@ ignoriert ForeColor — auf dunklem Grund 3,56 : 1. Statt zu deaktivieren: `Set-
 -Dimmed $true` (65-Theme). Für Eingabeelemente (Kästchen, Zahlenfelder) bleibt Windows' Darstellung —
 die müssen wirklich gesperrt sein. Tests: `DimmedLabels.Tests.ps1`, `LAYOUT-CONTRAST` in der Probe.
 
+### `.Visible` sagt nicht, was Sie meinen
+WinForms liefert die **wirksame** Sichtbarkeit: für jedes Kind einer versteckten Sektion ist
+`.Visible` gleich `$false` — nachgemessen mit einem Panel, dessen Elternteil auf `Visible = $false`
+steht. Wer damit eine Kartenhöhe misst, während ein *anderer* Bereich offen ist, bekommt „kein Kind
+sichtbar" und lässt die Karte auf ihren Rand zusammenschrumpfen. Der Zustand eines Aufklappers
+gehört deshalb in eine Variable (`$script:advExpanded`), und `Update-StackedCards` bekommt die
+ausgeblendeten Steuerelemente über `-Exclude` genannt, statt sie zu erraten.
+
 ### `@($liste)[0]` auf einer `List[object]`
 wirft „Argument types do not match". In einer Funktion mit `catch { Write-LogDebug }` fällt das
 nirgends auf — außer im gerenderten Bild (sieben Karten lagen übereinander). Elemente lieber in
@@ -246,6 +254,23 @@ unter dem Minimum). Deshalb rein und getestet, nicht inline im Startcode.
 ### Eine Layout-Funktion muss an drei Stellen aufgerufen werden
 `Show-Section`, `$form.Add_Resize`, `Set-ActiveTheme`. Fehlt die dritte, behält der Bereich nach
 einem Designwechsel die Geometrie der alten Schriftart, bis man ihn verlässt und neu öffnet.
+
+### Ein neuer Bereich braucht zwei Einträge, die niemand vermisst
+`Add-Section` allein genügt nicht: `$navKeyOrder` (90-Main) bestimmt die Reihenfolge, `$navGlyphs`
+(75-UiState) das Symbol. Wer dort fehlt, landet **hinten in seiner Gruppe und ohne Symbol** — mit
+Absicht so gebaut, damit ein neuer Bereich nie verschwindet, aber eben auch ohne jede Fehlermeldung.
+Beim Bereich „Kundendaten" ist genau das passiert; gesehen hat es erst eine Bildschirmkopie.
+Seither hält eine StaticCheck-Regel beide Tabellen vollständig.
+
+### Zeilenfarben in Listen hängen am Design
+Eine feste Farbe kann nicht beides: gemessen gegen die Listenfläche (dunkel `38,38,38`, die sechs
+hellen weiß) erreichte das frühere `DarkOrange` auf hellem Grund **2,33 : 1**. `Get-RowAlertColor`
+(65-Theme) liefert je Design ein Paar für `protected` / `warn` / `blocked` (gemessen 4,4 – 6,7 : 1).
+Weil die Farbe damit vom Design abhängt, muss ein Designwechsel die **Zeilen** neu einfärben —
+`Set-GuiTheme` färbt nur die Liste, nicht ihre Einträge; das erledigt `Update-UpdateListRows`.
+Und: eine Zeile bekommt **eine** Farbe, am Ende einmal gesetzt. Vorher überschrieb jede folgende
+Regel ihr Orange über das Rot der geschützten App — die Kennzeichnung verschwand genau dann, wenn
+zusätzlich etwas unklar war.
 
 ### Leere Listen tragen den Verbindungszustand
 `Set-ListEmptyText -Label X -NormalKey 'Y'` schreibt „Nicht verbunden…", solange keine Sitzung

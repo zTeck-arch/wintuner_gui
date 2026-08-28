@@ -9,7 +9,7 @@ function New-UpdateRow {
   if ($App.PSObject.Properties['IsBlocked'] -and $App.IsBlocked) {
     [void]$it.SubItems.Add((Get-UiString 'UpdateStateBlocked'))
     [void]$it.SubItems.Add([string]$App.BlockedReason)
-    $it.ForeColor = [System.Drawing.Color]::IndianRed
+    $it.ForeColor = Get-RowAlertColor -Level 'blocked'
     return $it
   }
 
@@ -23,9 +23,14 @@ function New-UpdateRow {
   # Ganz vorn, weil es die wichtigste Aussage der Zeile ist: diese App ist als selbst paketiert
   # markiert. Sie bleibt anhakbar - Umgebungen muss man pflegen koennen - aber der Lauf fragt vorher
   # ausdruecklich nach, auch bei abgeschalteten Bestaetigungen (Confirm-ProtectedAppsInRun).
+  # Die Farbe wird am ENDE einmal gesetzt, nicht hier. Vorher setzte jede der folgenden Regeln ihr
+  # Orange nach - die geschuetzte App stand zuerst und wurde von der naechsten Regel wieder
+  # ueberschrieben. Bei einer selbst paketierten App, deren Zuweisungen unklar sind, verschwand die
+  # rote Kennzeichnung also genau dann, wenn sie am wichtigsten ist.
+  $alertLevel = ''
   if ($App.PSObject.Properties['IsProtected'] -and $App.IsProtected) {
     $noteParts.Add((Get-UiString 'UpdateStateProtected'))
-    $it.ForeColor = [System.Drawing.Color]::DarkOrange
+    $alertLevel = 'protected'
   }
   # Zuerst genannt, weil es die Herkunft der ganzen Zeile relativiert: bei einer App ohne
   # WinTuner-Marke kommt die Paket-Id aus dem Namensabgleich, nicht aus dem Notizfeld. Der Lauf
@@ -40,23 +45,25 @@ function New-UpdateRow {
     } else {
       $noteParts.Add((Get-UiString 'UpdateStateUnmanaged'))
     }
-    $it.ForeColor = [System.Drawing.Color]::DarkOrange
+    if (-not $alertLevel) { $alertLevel = 'warn' }
   }
   # Two separate statements, because they mean different things to the reader: "the predecessors
   # really carry different assignments" versus "one of them could not be read". A predecessor with no
   # assignment at all is neither - it has nothing to hand over, so it is not mentioned here.
   if ($App.PSObject.Properties['ScopeWarning'] -and $App.ScopeWarning) {
     $noteParts.Add((Get-UiString 'UpdateStateScopeWarning'))
-    $it.ForeColor = [System.Drawing.Color]::DarkOrange
+    if (-not $alertLevel) { $alertLevel = 'warn' }
   }
   if ($App.PSObject.Properties['ScopeUnknown'] -and $App.ScopeUnknown) {
     $noteParts.Add((Get-UiString 'UpdateStateScopeUnknown'))
-    $it.ForeColor = [System.Drawing.Color]::DarkOrange
+    if (-not $alertLevel) { $alertLevel = 'warn' }
   }
   # Only shown when every scope probe succeeded and came back empty - see Group-UpdateCandidates.
   if ($App.PSObject.Properties['NoAssignment'] -and $App.NoAssignment) {
     $noteParts.Add((Get-UiString 'UpdateStateNoAssignment'))
   }
+  # Eine Zeile, eine Farbe - und 'protected' gewinnt gegen jede Randbemerkung.
+  if ($alertLevel) { $it.ForeColor = Get-RowAlertColor -Level $alertLevel }
   [void]$it.SubItems.Add($targetState)
   [void]$it.SubItems.Add(($noteParts -join '; '))
   if ($App.Checked) { $it.Checked = $true }
@@ -773,6 +780,41 @@ $cardDetected.Controls.Add($discoveredEmptyLabel)
 $discoveredListBox.Visible = $false
 $discoveredEmptyLabel.Visible = $true
 
+# Die Ergebnisliste stand auf festen 158 px - vier Zeilen, egal wie gross das Fenster war. Gemessen
+# bei 1146x854: die Karte endete auf 472, der Bereich hat 639 - 167 px blieben ungenutzt, waehrend
+# man in einer Vier-Zeilen-Liste durch dreissig erkannte Apps scrollte.
+#
+# Aufgebaut wie Update-StoreLayout, weil es dasselbe Muster ist: die obere Karte bekommt ihre Hoehe
+# aus dem Inhalt, die untere den Rest.
+function Update-DiscoveredLayout {
+  try {
+    if (-not $tabDiscovered -or -not $cardScan -or -not $cardDetected -or -not $discoveredListBox) { return }
+    $avail = $tabDiscovered.ClientSize.Height
+    if ($avail -lt 200) { return }
+    $topY = 48; $gap = 12; $bottomPad = 6
+
+    # Karte 1 misst sich selbst (setzt Top einschliesslich Scrollversatz und Height).
+    Update-StackedCards -Panel $tabDiscovered -Cards @($cardScan) -Top $topY -Gap $gap
+
+    # Was ueber der Liste steht (Titel, Filterzeile, Knopfreihe), wird an der Liste abgelesen statt
+    # gezaehlt - sonst muesste diese Zahl bei jeder neuen Filterzeile von Hand nachgezogen werden.
+    $chrome = $discoveredListBox.Top + 16
+    $detectedH = $avail - $topY - $cardScan.Height - $gap - $bottomPad
+    $minDetectedH = $chrome + 120
+    if ($detectedH -lt $minDetectedH) { $detectedH = $minDetectedH }
+    $cardDetected.Top = $cardScan.Bottom + $gap
+    $cardDetected.Height = $detectedH
+
+    # Nur die Hoehe: die Breite haengt am Right-Anker der Liste und wird von Update-CardWidths
+    # gefuehrt. Wer sie hier zusaetzlich setzt, kaempft gegen den Anker.
+    $listH = $detectedH - $chrome
+    $discoveredListBox.Height = $listH
+    # Der Leerzustand belegt exakt das Rechteck der Liste (siehe Kommentar dort) - er muss also
+    # mitwachsen, sonst steht der zentrierte Hinweis nach einem Resize nicht mehr in der Mitte.
+    if ($discoveredEmptyLabel) { $discoveredEmptyLabel.Height = $listH }
+  } catch { Write-LogDebug 'discovered layout' }
+}
+
 $script:discoveredRaw = @()
 
 # ==================================================
@@ -844,6 +886,280 @@ function Update-WorkRecordSectionLayout {
       Update-WorkRecordLayout
     }
   } catch { Write-LogDebug 'work record section layout' }
+}
+
+# ==================================================
+# Section: Kundendaten
+# ==================================================
+#
+# Fuehrt die drei kundenbezogenen Datenbestaende zusammen, die vorher an drei Stellen lagen:
+# Gruppen-Favoriten (nur ueber den Knopf "Gruppen..." neben einem Zuweisungsziel erreichbar),
+# Kundennamen (ein Menuepunkt unter Extras) und gemerkte Anmeldungen (Kopfzeile plus ein zweiter
+# Menuepunkt unter Extras). Wer wissen wollte, was diese Anwendung ueber seine Kunden gespeichert
+# hat, musste das an drei Orten nachsehen - und die Gruppen-Favoriten fand ohne Vorwissen niemand.
+#
+# Gruppe "Dieser Rechner": es sind rein lokale Daten. Kein Aufruf von hier schreibt oder liest
+# etwas in Intune.
+#
+# Die vorhandenen Bearbeitungswege bleiben und werden von hier aus geoeffnet, statt sie ein zweites
+# Mal zu bauen - zwei Fassungen derselben Bearbeitung waeren zwei Fassungen ihrer Regeln.
+$tabCustomerData = New-Object System.Windows.Forms.Panel
+$tabCustomerData.AutoScroll = $true
+Add-Section -Key 'customerdata' -Panel $tabCustomerData -Label (Get-UiString 'NavCustomerData') -Group 'local'
+
+$customerDataHeaderLabel = New-Object System.Windows.Forms.Label
+$customerDataHeaderLabel.Text = Get-UiString 'CustomerDataTitle'
+$customerDataHeaderLabel.Location = New-Object System.Drawing.Point(16, 12)
+$customerDataHeaderLabel.AutoSize = $true
+$customerDataHeaderLabel.Font = New-Object System.Drawing.Font("Segoe UI", 13, [System.Drawing.FontStyle]::Bold)
+$tabCustomerData.Controls.Add($customerDataHeaderLabel)
+[void](Add-SectionInfoBadge -Parent $tabCustomerData -AfterLabel $customerDataHeaderLabel -TextKey 'InfoCustomerData')
+
+# --- Karte 1: Kundennamen ---
+$cardCustomerNames = New-Card -X 16 -Y 48 -W 726 -H 230
+$tabCustomerData.Controls.Add($cardCustomerNames)
+
+$customerNamesTitle = New-Object System.Windows.Forms.Label
+$customerNamesTitle.Text = Get-UiString 'CustomerNamesCardTitle'
+$customerNamesTitle.Location = New-Object System.Drawing.Point(14, 10)
+$customerNamesTitle.AutoSize = $true
+$customerNamesTitle.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$cardCustomerNames.Controls.Add($customerNamesTitle)
+
+$customerNamesHint = New-Object System.Windows.Forms.Label
+$customerNamesHint.Tag = 'hint'
+$customerNamesHint.Text = Get-UiString 'CustomerNamesCardHint'
+$customerNamesHint.Location = New-Object System.Drawing.Point(14, 32)
+$customerNamesHint.Size = New-Object System.Drawing.Size(690, 20)
+$cardCustomerNames.Controls.Add($customerNamesHint)
+
+$customerNamesList = New-Object System.Windows.Forms.ListView
+$customerNamesList.Location = New-Object System.Drawing.Point(14, 58)
+$customerNamesList.Size = New-Object System.Drawing.Size(698, 120)
+$customerNamesList.View = [System.Windows.Forms.View]::Details
+$customerNamesList.FullRowSelect = $true
+$customerNamesList.HeaderStyle = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
+$customerNamesList.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+[void]$customerNamesList.Columns.Add((Get-UiString 'ColCustomerDomain'), 330)
+[void]$customerNamesList.Columns.Add((Get-UiString 'ColCustomerName'), 340)
+$cardCustomerNames.Controls.Add($customerNamesList)
+
+$customerNamesEditButton = New-Object System.Windows.Forms.Button
+$customerNamesEditButton.Tag = 'btn-secondary'
+$customerNamesEditButton.Text = Get-UiString 'CustomerNamesEditButton'
+$customerNamesEditButton.Location = New-Object System.Drawing.Point(14, 186)
+$customerNamesEditButton.Width = 230
+$customerNamesEditButton.Height = 32
+$customerNamesEditButton.Add_Click({
+  Show-TenantNamesDialog
+  Update-CustomerDataLists
+})
+$cardCustomerNames.Controls.Add($customerNamesEditButton)
+
+# --- Karte 2: Gruppen-Favoriten des aktuellen Kunden ---
+$cardGroupFavorites = New-Card -X 16 -Y 290 -W 726 -H 230
+$tabCustomerData.Controls.Add($cardGroupFavorites)
+
+$groupFavoritesTitle = New-Object System.Windows.Forms.Label
+$groupFavoritesTitle.Text = Get-UiString 'GroupFavoritesCardTitle'
+$groupFavoritesTitle.Location = New-Object System.Drawing.Point(14, 10)
+$groupFavoritesTitle.AutoSize = $true
+$groupFavoritesTitle.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$cardGroupFavorites.Controls.Add($groupFavoritesTitle)
+
+$groupFavoritesHint = New-Object System.Windows.Forms.Label
+$groupFavoritesHint.Tag = 'hint'
+$groupFavoritesHint.Text = Get-UiString 'GroupFavoritesCardHint'
+$groupFavoritesHint.Location = New-Object System.Drawing.Point(14, 32)
+$groupFavoritesHint.Size = New-Object System.Drawing.Size(690, 20)
+$cardGroupFavorites.Controls.Add($groupFavoritesHint)
+
+$groupFavoritesList = New-Object System.Windows.Forms.ListView
+$groupFavoritesList.Location = New-Object System.Drawing.Point(14, 58)
+$groupFavoritesList.Size = New-Object System.Drawing.Size(698, 120)
+$groupFavoritesList.View = [System.Windows.Forms.View]::Details
+$groupFavoritesList.FullRowSelect = $true
+$groupFavoritesList.HeaderStyle = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
+$groupFavoritesList.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+[void]$groupFavoritesList.Columns.Add((Get-UiString 'GroupColName'), 330)
+[void]$groupFavoritesList.Columns.Add((Get-UiString 'GroupColId'), 340)
+$cardGroupFavorites.Controls.Add($groupFavoritesList)
+
+$groupFavoritesEditButton = New-Object System.Windows.Forms.Button
+$groupFavoritesEditButton.Tag = 'btn-secondary'
+$groupFavoritesEditButton.Text = Get-UiString 'GroupFavoritesEditButton'
+$groupFavoritesEditButton.Location = New-Object System.Drawing.Point(14, 186)
+$groupFavoritesEditButton.Width = 230
+$groupFavoritesEditButton.Height = 32
+$groupFavoritesEditButton.Add_Click({
+  # Ohne Zieltextfeld: hier wird gepflegt, nicht ausgewaehlt. Show-GroupFavoriteDialog kommt damit
+  # zurecht - der Parameter ist optional und wird nur zum Uebernehmen einer Auswahl gebraucht.
+  Show-GroupFavoriteDialog
+  Update-CustomerDataLists
+})
+$cardGroupFavorites.Controls.Add($groupFavoritesEditButton)
+
+# --- Karte 3: gemerkte Anmeldungen ---
+$cardRecentLogins = New-Card -X 16 -Y 532 -W 726 -H 230
+$tabCustomerData.Controls.Add($cardRecentLogins)
+
+$recentLoginsTitle = New-Object System.Windows.Forms.Label
+$recentLoginsTitle.Text = Get-UiString 'RecentLoginsCardTitle'
+$recentLoginsTitle.Location = New-Object System.Drawing.Point(14, 10)
+$recentLoginsTitle.AutoSize = $true
+$recentLoginsTitle.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$cardRecentLogins.Controls.Add($recentLoginsTitle)
+
+$recentLoginsHint = New-Object System.Windows.Forms.Label
+$recentLoginsHint.Tag = 'hint'
+$recentLoginsHint.Text = Get-UiString 'RecentLoginsCardHint'
+$recentLoginsHint.Location = New-Object System.Drawing.Point(14, 32)
+$recentLoginsHint.Size = New-Object System.Drawing.Size(690, 20)
+$cardRecentLogins.Controls.Add($recentLoginsHint)
+
+$recentLoginsList = New-Object System.Windows.Forms.ListBox
+$recentLoginsList.Location = New-Object System.Drawing.Point(14, 58)
+$recentLoginsList.Size = New-Object System.Drawing.Size(698, 120)
+$recentLoginsList.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$cardRecentLogins.Controls.Add($recentLoginsList)
+
+$recentLoginsRemoveButton = New-Object System.Windows.Forms.Button
+$recentLoginsRemoveButton.Tag = 'btn-secondary'
+$recentLoginsRemoveButton.Text = Get-UiString 'RecentLoginsRemoveButton'
+$recentLoginsRemoveButton.Location = New-Object System.Drawing.Point(14, 186)
+$recentLoginsRemoveButton.Width = 230
+$recentLoginsRemoveButton.Height = 32
+$recentLoginsRemoveButton.Add_Click({
+  $sel = [string]$recentLoginsList.SelectedItem
+  if ([string]::IsNullOrWhiteSpace($sel)) { return }
+  $script:settings.RecentLogins = @($script:settings.RecentLogins | Where-Object {
+    -not [string]::Equals(([string]$_).Trim(), $sel.Trim(), [System.StringComparison]::OrdinalIgnoreCase)
+  })
+  Save-Settings
+  # Die Adresse selbst gehoert NICHT ins Protokoll - siehe der Datenschutzkommentar in 10-Settings.
+  Write-Log ("Customer data: one saved login removed ({0} left)." -f @($script:settings.RecentLogins).Count)
+  try { Update-RecentLoginsUI } catch { Write-LogDebug 'recent logins ui after removal' }
+  Update-CustomerDataLists
+})
+$cardRecentLogins.Controls.Add($recentLoginsRemoveButton)
+
+$recentLoginsClearButton = New-Object System.Windows.Forms.Button
+$recentLoginsClearButton.Tag = 'btn-secondary'
+$recentLoginsClearButton.Text = Get-UiString 'RecentLoginsClearButton'
+$recentLoginsClearButton.Location = New-Object System.Drawing.Point(256, 186)
+$recentLoginsClearButton.Width = 230
+$recentLoginsClearButton.Height = 32
+$recentLoginsClearButton.Add_Click({
+  # Dieselbe Rueckfrage wie im Menuepunkt - eine Liste zu leeren ist eine Aenderung, kein Blick.
+  $confirm = [System.Windows.Forms.MessageBox]::Show(
+    (Get-UiString 'ClearRecentLoginsConfirm'),
+    (Get-UiString 'ClearRecentLoginsTitle'),
+    [System.Windows.Forms.MessageBoxButtons]::YesNo,
+    [System.Windows.Forms.MessageBoxIcon]::Question
+  )
+  if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+  $script:settings.RecentLogins = @()
+  Save-Settings
+  Write-Log 'Customer data: all saved logins removed.'
+  try { Update-RecentLoginsUI } catch { Write-LogDebug 'recent logins ui after clear' }
+  Update-CustomerDataLists
+  Update-Status (Get-UiString 'RecentLoginsClearedStatus')
+})
+$cardRecentLogins.Controls.Add($recentLoginsClearButton)
+
+# Fuellt alle drei Listen aus den Einstellungen. Eine Funktion, weil jede Aenderung an einem der
+# drei Bestaende diesen Bereich betrifft - und weil er beim Betreten den STAND zeigen muss, nicht
+# den von seinem Aufbau: die Kundennamen aendert man im Dialog, die Favoriten am Zuweisungsziel.
+function Update-CustomerDataLists {
+  try {
+    if (-not $customerNamesList) { return }
+
+    $customerNamesList.BeginUpdate()
+    try {
+      $customerNamesList.Items.Clear()
+      $names = if ($script:settings.TenantDisplayNames) { $script:settings.TenantDisplayNames } else { @{} }
+      foreach ($k in @($names.Keys | Sort-Object)) {
+        $it = New-Object System.Windows.Forms.ListViewItem([string]$k)
+        [void]$it.SubItems.Add([string]$names[$k])
+        [void]$customerNamesList.Items.Add($it)
+      }
+    } finally { $customerNamesList.EndUpdate() }
+
+    $groupFavoritesList.BeginUpdate()
+    try {
+      $groupFavoritesList.Items.Clear()
+      foreach ($f in @(Get-GroupFavorites)) {
+        $it = New-Object System.Windows.Forms.ListViewItem([string]$f.Name)
+        [void]$it.SubItems.Add([string]$f.Id)
+        [void]$groupFavoritesList.Items.Add($it)
+      }
+    } finally { $groupFavoritesList.EndUpdate() }
+
+    $recentLoginsList.BeginUpdate()
+    try {
+      $recentLoginsList.Items.Clear()
+      foreach ($u in @($script:settings.RecentLogins)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$u)) { [void]$recentLoginsList.Items.Add([string]$u) }
+      }
+    } finally { $recentLoginsList.EndUpdate() }
+
+    # Eine leere Liste erklaert sich nicht von selbst - und bei Kundendaten ist "leer" die eine
+    # Aussage, bei der man sicher sein will, dass sie stimmt. Der Hinweis der Karte traegt sie,
+    # statt eines Overlay-Labels: ein natives ListView-HWND uebermalt jede ueberlappende Label
+    # (siehe der Leerzustand bei den erkannten Apps).
+    if ($customerNamesList.Items.Count -eq 0) {
+      $customerNamesHint.Text = Get-UiString 'CustomerNamesEmpty'
+    } else {
+      $customerNamesHint.Text = Get-UiString 'CustomerNamesCardHint'
+    }
+
+    # Die Favoriten haengen am angemeldeten Kunden. Ohne Anmeldung ist die leere Liste keine
+    # Aussage ueber den Bestand, sondern ueber die fehlende Sitzung - das muss dastehen, sonst
+    # sieht es aus, als waere etwas verlorengegangen.
+    $hasTenant = [bool](Get-TenantFavoriteKey)
+    $groupFavoritesEditButton.Enabled = $hasTenant
+    $groupFavoritesHint.Text = if (-not $hasTenant) { Get-UiString 'GroupFavoritesNoTenant' }
+                               elseif ($groupFavoritesList.Items.Count -eq 0) { Get-UiString 'GroupFavoritesEmpty' }
+                               else { Get-UiString 'GroupFavoritesCardHint' }
+
+    $recentLoginsRemoveButton.Enabled = ($recentLoginsList.Items.Count -gt 0)
+    $recentLoginsClearButton.Enabled = ($recentLoginsList.Items.Count -gt 0)
+
+    # Nur ZAHLEN, nie die Eintraege - dieselbe Regel wie im Protokoll (10-Settings): eine
+    # Statuszeile wird abfotografiert und in ein Ticket geklebt.
+    Update-Status ((Get-UiString 'CustomerDataCountStatus') -f `
+      $customerNamesList.Items.Count, $groupFavoritesList.Items.Count, $recentLoginsList.Items.Count)
+  } catch { Write-LogDebug 'customer data lists' }
+}
+
+function Update-CustomerDataLayout {
+  try {
+    if (-not $tabCustomerData -or -not $cardCustomerNames) { return }
+
+    # Die drei Listen teilen sich, was uebrig bleibt. Mit festen 120 px je Liste ragte die dritte
+    # Karte bei 1146x854 unten aus dem Bild - gerendert und nachgesehen. Und feste Hoehen waeren
+    # hier besonders schade: auf einem grossen Schirm ist genau der Platz da, den eine Kundenliste
+    # braucht.
+    $lists = @($customerNamesList, $groupFavoritesList, $recentLoginsList)
+    $listTop = 58          # ueber der Liste: Kartentitel und Hinweiszeile
+    $belowList = 8 + 32    # Abstand und Knopfreihe
+    $cardChrome = $listTop + $belowList + 16   # + Innenabstand von Update-StackedCards
+    $avail = $tabCustomerData.ClientSize.Height - 48 - (2 * 12) - 6
+    $perList = [int](($avail - (3 * $cardChrome)) / 3)
+    # Untergrenze: unter sechs Zeilen wird eine Liste zum Guckloch. Passt das nicht mehr ins
+    # Fenster, scrollt der Bereich - wie die Einstellungen, und aus demselben Grund.
+    if ($perList -lt 120) { $perList = 120 }
+    foreach ($l in $lists) {
+      if (-not $l) { continue }
+      $l.Height = $perList
+      # Die Knopfreihe wandert mit der Liste; sie steht in jeder der drei Karten an derselben Stelle.
+      foreach ($sibling in $l.Parent.Controls) {
+        if ($sibling -is [System.Windows.Forms.Button]) { $sibling.Top = $l.Bottom + 8 }
+      }
+    }
+
+    Update-StackedCards -Panel $tabCustomerData -Cards @($cardCustomerNames, $cardGroupFavorites, $cardRecentLogins)
+  } catch { Write-LogDebug 'customer data layout' }
 }
 
 function Update-AppSettingsLayout {

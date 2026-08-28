@@ -42,9 +42,9 @@ Invoke-ScriptAnalyzer -Path .\src   -Settings .\PSScriptAnalyzerSettings.psd1 -R
 Invoke-ScriptAnalyzer -Path .\tests -Settings .\PSScriptAnalyzerSettings.Tests.psd1 -Recurse
 ```
 
-Erwartet (gemessen am 28.08.2026, Stand 0.17.0): StaticChecks grün (**328 Funktionen, 994 UI-Keys
-je Sprache**), SmokeTest grün, LayoutProbe grün, **627 Pester** grün (1 übersprungen), Analyzer
-**0 blockierend** (5 informational in `65-Theme.ps1` sind Altbestand).
+Erwartet (gemessen am 28.08.2026, Stand 0.17.0 + unveröffentlichte Arbeit): StaticChecks grün
+(**335 Funktionen, 996 UI-Keys je Sprache**), SmokeTest grün, LayoutProbe grün, **648 Pester** grün
+(1 übersprungen), Analyzer **0 blockierend** (5 informational in `65-Theme.ps1` sind Altbestand).
 
 Die eine übersprungene Prüfung wechselt die Seite, je nachdem was auf dem Rechner installiert ist:
 mit WinTuner-Modul läuft der Modulvertrag (`ModuleContract.Tests.ps1`) und der Platzhalter
@@ -56,8 +56,8 @@ Die drei Läufer, die kein Parser ersetzt:
 | Läufer | fängt |
 |---|---|
 | `SmokeTest.ps1` | Ladefehler des gebauten Skripts (falsche Teil-Reihenfolge, Control vor seiner Erzeugung benutzt) |
-| `LayoutProbe.ps1` | überlappende Steuerelemente, abgeschnittener Text, zu geringer Kontrast, Karten die beim Scrollen verrutschen — in **allen 7 Designs**, 2 Fenstergrößen × **2 Sprachen**, jeweils auf frischem Profil |
-| `StaticChecks.ps1` | Version/Kopf, UI-Key-Parität EN/DE, `-LiteralPath`-Regeln, `Show-Progress` ohne `Hide-Progress`, MessageBox auf oberster Ebene vor dem Smoke-Tor, `Add_Shown` mit Dialog ohne `Test-UnattendedRun`, Datenpfad außerhalb der zwei Wurzelfunktionen |
+| `LayoutProbe.ps1` | überlappende Steuerelemente, abgeschnittener Text, zu geringer Kontrast, Karten die beim Scrollen verrutschen, **aufgeklappte** „Erweiterte Optionen", **ein Aufklapper der etwas außerhalb seiner Sektion verschiebt** — in **allen 7 Designs**, 2 Fenstergrößen × **2 Sprachen**, jeweils auf frischem Profil |
+| `StaticChecks.ps1` | Version/Kopf, UI-Key-Parität EN/DE, tote UI-Schlüssel, `-LiteralPath`-Regeln, `Show-Progress` ohne `Hide-Progress`, MessageBox auf oberster Ebene vor dem Smoke-Tor, `Add_Shown` mit Dialog ohne `Test-UnattendedRun`, Datenpfad außerhalb der zwei Wurzelfunktionen, **Sektion ohne Eintrag in `$navKeyOrder`/`$navGlyphs`** |
 
 `Invoke-CheckChain.ps1` prüft selbst nichts — es startet diese Läufer, jeden in einem eigenen
 pwsh-Kindprozess (SmokeTest und LayoutProbe rufen `exit` auf und laden WinForms; nacheinander im

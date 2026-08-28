@@ -1086,13 +1086,73 @@ $advControls = @($archLabel, $archHost, $contextLabel, $contextHost, $localeLabe
                  $script:deployRestartEnableCheck, $deployRestartGraceLabel, $script:deployRestartGraceValue,
                  $deployRestartCountdownLabel, $script:deployRestartCountdownValue, $script:deployRestartSnoozeCheck,
                  $deployRestartSnoozeLabel, $script:deployRestartSnoozeValue, $deployDeliveryLabel, $script:deployDeliveryCombo)
+# Die beiden Karten dieser Sektion bekommen ihre Hoehe aus dem Inhalt (siehe Update-StackedCards).
+#
+# Vorher standen hier zwei Konstanten: der Aufklapper setzte die Hoehe der Karte auf 874 oder 214.
+# Zwei Zahlen, die niemand nachzieht, wenn eine Option dazukommt - und die bei der Tahoma-Schrift
+# der Retro-Designs ohnehin nicht mehr passen.
+#
+# Derselbe Handler schob ausserdem $cardFavorites nach unten. Diese Karte gehoert aber seit der
+# Trennung der Store-Sektion zu "Lokale Pakete", nicht hierher. Gemessen: nach einem Klick auf
+# "Erweiterte Optionen" stand sie dort auf Top=1108 statt 48 - unsichtbar geblieben ist das nur,
+# weil Update-LocalPackagesLayout den Bereich beim Betreten neu anordnet.
+# Der untere Teil der Karte - die App-Zuweisungseinstellungen - stand auf festen Spalten:
+# Beschriftung ab 14 bzw. 32, Bedienelement ab 240. Gemessen im Deutschen ragte
+# "Installationsstichtag planen (sonst so bald wie moeglich)" 98 px in seinen eigenen Datumswaehler,
+# "Verfuegbarkeit planen ..." 64 px und "Neustart-Countdown vorher anzeigen (Minuten)" 62 px in sein
+# Zahlenfeld. Gefunden hat das die Aufklapper-Runde der Layout-Probe: vorher hat diesen Bereich nie
+# jemand AUFGEKLAPPT gemessen, und zugeklappt ist er unsichtbar.
+#
+# Die Spalte richtet sich jetzt nach der breitesten Beschriftung DIESER Sprache - dieselben Helfer,
+# die der Store-Bereich seit 0.16.0 benutzt.
+function Set-DeployAssignmentRows {
+  param([Parameter(Mandatory)][int]$Y)
+  $m = 14
+  $contentW = [Math]::Max(400, $cardDeploy.ClientSize.Width - (2 * $m))
+  $rows = @(
+    @{ Cells = @(@{ L = $deployNotifyLabel; C = $script:deployNotifyCombo; W = 300 }) }
+    # Ganze Aussagen (Kaestchen) gehoeren an den linken Rand, ihr Wertfeld dahinter - nicht in die
+    # Spalte der Bedienelemente, wo sie wie der Wert einer fehlenden Beschriftung aussaehen.
+    @{ FullWidth = $true; Cells = @(@{ L = $null; C = $script:deployAvailCheck; W = (Get-ControlTextWidth $script:deployAvailCheck) + 24 },
+                                    @{ L = $null; C = $script:deployAvailPicker; W = 240 }) }
+    @{ FullWidth = $true; Cells = @(@{ L = $null; C = $script:deployDeadlineCheck; W = (Get-ControlTextWidth $script:deployDeadlineCheck) + 24 },
+                                    @{ L = $null; C = $script:deployDeadlinePicker; W = 240 }) }
+    @{ FullWidth = $true; Cells = @(@{ L = $null; C = $script:deployLocalTimeCheck; W = (Get-ControlTextWidth $script:deployLocalTimeCheck) + 24 }) }
+    @{ FullWidth = $true; Cells = @(@{ L = $null; C = $script:deployRestartEnableCheck; W = (Get-ControlTextWidth $script:deployRestartEnableCheck) + 24 }) }
+    # Eingerueckt: die drei Neustart-Werte gehoeren zum Kaestchen darueber.
+    @{ Indent = 20; Cells = @(@{ L = $deployRestartGraceLabel; C = $script:deployRestartGraceValue; W = 110 }) }
+    @{ Indent = 20; Cells = @(@{ L = $deployRestartCountdownLabel; C = $script:deployRestartCountdownValue; W = 110 }) }
+    # Das Kaestchen, seine Beschriftung und sein Wert in EINER Zeile. Ohne die Beschriftung in der
+    # Zeile bliebe sie auf ihrer alten festen Stelle stehen und das verschobene Zahlenfeld liefe in
+    # sie hinein - genau das hat die Probe im ersten Anlauf gemeldet.
+    @{ Indent = 20; FullWidth = $true; Cells = @(@{ L = $null; C = $script:deployRestartSnoozeCheck; W = (Get-ControlTextWidth $script:deployRestartSnoozeCheck) + 24 },
+                                                 @{ L = $deployRestartSnoozeLabel; C = $script:deployRestartSnoozeValue; W = 110 }) }
+    @{ Cells = @(@{ L = $deployDeliveryLabel; C = $script:deployDeliveryCombo; W = 300 }) }
+  )
+  return (Set-AppSettingsRowBlock -Rows $rows -X $m -Y $Y -Width $contentW -Gap 6)
+}
+
+function Update-WingetLayout {
+  try {
+    if (-not $tabCreate -or -not $cardFind -or -not $cardDeploy) { return }
+    # Nur im aufgeklappten Zustand anordnen: zugeklappt sind die Zeilen ausgeblendet, und
+    # Set-AppSettingsRowBlock wuerde sie nach oben ziehen, wo sie beim Aufklappen falsch stuenden.
+    if ($script:advExpanded -and $deployAppSettingsLabel -and $script:autoUpdateCheckbox) {
+      $deployAppSettingsLabel.Left = 14
+      $deployAppSettingsLabel.Top = $script:autoUpdateCheckbox.Bottom + 14
+      [void](Set-DeployAssignmentRows -Y ($deployAppSettingsLabel.Bottom + 8))
+    }
+    # Zugeklappt zaehlen die ausgeblendeten Optionen nicht mit. Der Zustand kommt aus der Variablen
+    # und nicht aus $child.Visible - die Begruendung steht an Update-StackedCards.
+    $hidden = if ($script:advExpanded) { @() } else { @($advControls | Where-Object { $_ }) }
+    Update-StackedCards -Panel $tabCreate -Cards @($cardFind, $cardDeploy) -Exclude $hidden
+  } catch { Write-LogDebug 'winget layout' }
+}
+
 $advToggle.Add_Click({
   $script:advExpanded = -not $script:advExpanded
   foreach ($c in $advControls) { $c.Visible = $script:advExpanded }
-  $cardDeploy.Height = if ($script:advExpanded) { 874 } else { 214 }
-  # Keep the favorites card just below the (now taller/shorter) deploy card so they never overlap.
-  # The Microsoft Store card used to sit between the two; it has its own section now.
-  if ($cardFavorites) { $cardFavorites.Top = $cardDeploy.Bottom + 12 }
+  Update-WingetLayout
   $chev = if ($script:advExpanded) { [System.Char]::ConvertFromUtf32(0x25B4) } else { [System.Char]::ConvertFromUtf32(0x25BE) }
   $advToggle.Text = (Get-UiString 'AdvancedOptions') + "  " + $chev
 })
@@ -1134,6 +1194,12 @@ function Update-StoreLayout {
     $storeTenantListView.Size = New-Object System.Drawing.Size($inner, ($storeH - 170 - 16 - $btnGap - $btnH))
     if ($storeManageAssignmentsButton) {
       $storeManageAssignmentsButton.Location = New-Object System.Drawing.Point($storeTenantListView.Left, ($storeTenantListView.Bottom + $btnGap))
+      # Breite aus dem Text, nicht aus der Konstante 260. Gemessen brauchte "Zuweisungen dieser App
+      # verwalten..." 261 px - EIN Pixel mehr, als der Knopf hatte, in fuenf der sieben Designs.
+      # Ein Pixel schneidet keinen Buchstaben ab, aber die naechste Uebersetzung tut es, und eine
+      # Zahl, die niemand nachrechnet, bleibt falsch.
+      $needed = (Get-ControlTextWidth $storeManageAssignmentsButton) + 28
+      $storeManageAssignmentsButton.Width = [Math]::Max(260, $needed)
     }
     $listInner = $inner - [System.Windows.Forms.SystemInformation]::VerticalScrollBarWidth - 2
     $extra = $listInner - 670

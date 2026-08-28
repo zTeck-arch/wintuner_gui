@@ -252,6 +252,52 @@ if ($env:WINTUNER_LAYOUT -eq '1') {
       Write-Host ("LAYOUT-SCROLL {0}: Inhalt {1}px, sichtbar {2}px" -f $s.Key, $needed, $s.Panel.ClientSize.Height)
     }
   }
+
+  # Aufklapper ("Erweiterte Optionen"). Bis hierher hat diese Probe nur den ZUGEKLAPPTEN Zustand
+  # gesehen - der aufgeklappte war nie gemessen, und dort lagen drei Beschriftungen auf ihren
+  # eigenen Eingabefeldern (im Deutschen bis 98 px).
+  #
+  # Zweitens: ein Aufklapper darf nichts ausserhalb seiner eigenen Sektion bewegen. Der
+  # WinGet-Aufklapper setzte $cardFavorites.Top - eine Karte der Sektion "Lokale Pakete". Gemessen
+  # stand sie danach auf Top=1108 statt 48. Aufgefallen ist es nie, weil Update-LocalPackagesLayout
+  # den Bereich beim Betreten neu anordnet; der Fehler war also nur einen Handler weit von einer
+  # leeren Seite entfernt.
+  $expanders = @(
+    @{ Key = 'winget'; Toggle = $advToggle }
+    @{ Key = 'store';  Toggle = $storeAdvToggle }
+  )
+  foreach ($e in $expanders) {
+    if (-not $e.Toggle) { continue }
+    $own = @($script:sections | Where-Object { $_.Key -eq $e.Key }) | Select-Object -First 1
+    if (-not $own) { continue }
+
+    # Lage ALLER Steuerelemente der uebrigen Sektionen merken. Nicht ueber GetHashCode: ein
+    # verworfener Hashcode wird wiederverwendet, und dann vergleicht man zwei verschiedene Dinge.
+    $foreign = New-Object System.Collections.Generic.List[object]
+    foreach ($s in $script:sections) {
+      if ($s.Key -eq $e.Key) { continue }
+      foreach ($c in $s.Panel.Controls) {
+        [void]$foreign.Add(@{ Section = $s.Key; Control = $c; Top = $c.Top; Height = $c.Height })
+      }
+    }
+
+    Show-Section $e.Key
+    [System.Windows.Forms.Application]::DoEvents()
+    $e.Toggle.PerformClick()
+    [System.Windows.Forms.Application]::DoEvents()
+    foreach ($f in $foreign) {
+      if ($f.Control.Top -ne $f.Top -or $f.Control.Height -ne $f.Height) {
+        Write-Host ("LAYOUT-CROSS-SECTION {0}: der Aufklapper hat ein Steuerelement in '{1}' verschoben (Top {2}->{3}, Hoehe {4}->{5})" -f $e.Key, $f.Section, $f.Top, $f.Control.Top, $f.Height, $f.Control.Height)
+        $overlaps++
+      }
+    }
+    $overlaps += Test-LayoutPanel $own.Panel ("{0}[aufgeklappt]" -f $e.Key)
+
+    # Wieder zuklappen - der Rest der Probe misst den Normalzustand.
+    $e.Toggle.PerformClick()
+    [System.Windows.Forms.Application]::DoEvents()
+    $overlaps += Test-LayoutPanel $own.Panel ("{0}[zugeklappt]" -f $e.Key)
+  }
   # Alle Designs: Kontrast UND Ueberlappung. Die Retro-Designs wechseln die Schriftart (Tahoma),
   # womit jede Beschriftung breiter oder hoeher wird - das ist die Lage, in der eine handgezaehlte
   # Koordinate zuschnappt. Deshalb wird hier je Design neu angeordnet und neu gemessen.
@@ -342,10 +388,15 @@ try {
       if ($stderr) { Write-Host $stderr }
       throw "Layout probe at $size ($lang) did not reach the end of the run."
     }
+    # JEDE Befundzeile durchreichen, nicht eine Aufzaehlung bekannter Praefixe.
+    #
+    # Vorher standen hier vier Muster, und eine neu hinzugekommene Meldung (LAYOUT-CROSS-SECTION)
+    # war in keinem davon: der Zaehler stieg, die Probe wurde rot - und sagte nicht, was sie
+    # gefunden hatte. Ein Befund ohne Text ist fuer den, der ihn beheben soll, kein Befund.
+    # Die Zaehl- und Endemarken (LAYOUT_OVERLAPS=, LAYOUT_PROBE_OK) tragen einen Unterstrich und
+    # fallen deshalb nicht unter diese Regel.
     foreach ($line in ($stdout -split "`r?`n")) {
-      if ($line -match '^LAYOUT-OVERLAP' -or $line -match '^LAYOUT-SCROLL') { Write-Host "  $line" }
-      elseif ($line -match '^LAYOUT-SCROLLSHIFT' -or $line -match '^LAYOUT-CONTRAST' -or $line -match '^LAYOUT-TRUNCATED') { Write-Host "  $line" }
-      elseif ($line -match '^LAYOUT-THEME') { Write-Host "  $line" }
+      if ($line -match '^LAYOUT-') { Write-Host "  $line" }
     }
     $count = if ($stdout -match 'LAYOUT_OVERLAPS=(\d+)') { [int]$Matches[1] } else { -1 }
     if ($count -lt 0) { throw "Layout probe at $size ($lang) did not report a result." }
