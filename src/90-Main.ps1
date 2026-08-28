@@ -646,8 +646,15 @@ $uploadButton.Add_Click({
 # filter was cleared, and "Update checked apps" would then update far more apps than intended.
 # The ItemChecked handler mirrors each row into the model, so no separate model loop is needed.
 $checkAllButton.Add_Click({
-  foreach ($row in $updateListBox.Items) { $row.Checked = $true }
-  Update-Status ((Get-UiString 'AllAppsCheckedStatus') -f $updateListBox.Items.Count)
+  # Gesperrte Zeilen bleiben aus. "Alle auswaehlen" darf nicht das anhaken, was der Lauf gleich
+  # wieder ueberspringen muss - das sieht wie Arbeit aus, die stattfindet, und es findet keine statt.
+  $checkedCount = 0
+  foreach ($row in $updateListBox.Items) {
+    $isBlocked = [bool]($row.Tag -and $row.Tag.PSObject.Properties['IsBlocked'] -and $row.Tag.IsBlocked)
+    $row.Checked = -not $isBlocked
+    if (-not $isBlocked) { $checkedCount++ }
+  }
+  Update-Status ((Get-UiString 'AllAppsCheckedStatus') -f $checkedCount)
 })
 
 $uncheckAllButton.Add_Click({
@@ -750,6 +757,10 @@ $updateSearchButton.Add_Click({
       }
       $all = @(Remove-SupersededInventoryOverlap -ActiveApps $activeInventory -SupersededApps $supersededInventory)
       Write-Log ("Loaded {0} active app object(s) from Intune after excluding {1} superseded overlap(s)." -f $all.Count, ($activeInventory.Count - $all.Count))
+      # Nach der Ueberlappungspruefung, nicht davor: die unmarkierten Apps werden in
+      # Select-UnmanagedWin32Apps schon nach supersededAppCount getrennt, sie duerfen also nicht
+      # noch einmal gegen das Modul-Inventar der abgeloesten Apps gerechnet werden.
+      $all = @(Get-ScanInventory -ManagedApps $all)
     } catch {
       # Include the exception TYPE, not just the message: a binding error, a Graph error and a module
       # race read very differently in a bug report, and the type is the fastest way to tell them apart.
@@ -766,6 +777,14 @@ $updateSearchButton.Add_Click({
       # Ob die Null belastbar ist, hat Get-Win32AppsResilient schon geklaert (zweiter Lesevorgang
       # plus direkte Graph-Gegenprobe) - hier wird sie nur noch richtig benannt.
       $supCount = @($supersededInventory).Count
+      # Ist die Suche ueber unmarkierte Apps eingeschaltet, heisst "null" etwas ANDERES: dann wurde
+      # der ganze Tenant gelesen, nicht nur die markierten Apps. Die alte Erklaerung ("nur WinTuner-
+      # Apps koennen hier stehen") waere hier eine falsche Auskunft.
+      if ($script:settings.ScanUnmanagedWin32Apps) {
+        Write-Log 'Update scan: this tenant has no active Win32 apps at all - the scan covered every win32LobApp, marked or not. Store, Microsoft 365, Edge and MSI line-of-business apps are a different app type and cannot be packaged or updated by WinTuner.'
+        Update-Status (Get-UiString 'NoWin32AppsStatus')
+        return
+      }
       if (Test-InventoryContradiction -ActiveCount $all.Count -SupersededCount $supCount) {
         Write-Log ("Update scan: no WinTuner-managed active apps, but {0} superseded one(s). The usual cause is that the newer versions were deleted and their predecessors kept the supersedence mark." -f $supCount)
         Update-Status ((Get-UiString 'NoWinTunerAppsSupersededStatus') -f $supCount)
@@ -815,6 +834,16 @@ $updateSearchButton.Add_Click({
     Show-Progress -Total ([Math]::Max(1, $appsToCheck.Count)) -Cancellable
 
     $candidates = [System.Collections.Generic.List[object]]::new()
+
+    # Eine App, die nicht geprueft werden konnte, gehoert IN DIE LISTE - gesperrt und begruendet.
+    # Vorher stand sie nur im Protokoll, und im Fenster sah der Tenant damit sauberer aus als er war:
+    # "keine Updates gefunden" und "vier Apps konnte ich gar nicht ansehen" sind verschiedene
+    # Antworten. Ohne Graph-Id laesst sich nichts anzeigen, worauf ein Klick reagieren koennte -
+    # diese bleiben protokollonly.
+    foreach ($bad in @($all | Where-Object { $_ -and $_.GraphId -and -not $_.CurrentVersion })) {
+      $candidates.Add((New-UpdateCandidateModel -App $bad -LatestVersion '' -PackageId ([string]$bad.PackageId) -BlockedReason (Get-UiString 'UpdateStateNoVersion')))
+    }
+
     $processedCount = 0
     $totalCount = $appsToCheck.Count
     $failedChecks = 0
@@ -881,6 +910,10 @@ $updateSearchButton.Add_Click({
         }
       } else {
         Write-Log ("Skipping update check for '{0}': no safe WinGet package id could be resolved." -f $app.Name)
+        # Sichtbar statt still: die Zeile ist gesperrt (nicht anhakbar, kein Lauf), nennt den Grund
+        # und ist der Ort, an dem der Rechtsklick eine Id zuordnet. Genau diese Apps - Keeper,
+        # Harmony SASE, Teams Machine-Wide Installer im Lauf vom 28.08.2026 - waren bisher unsichtbar.
+        $candidates.Add((New-UpdateCandidateModel -App $app -LatestVersion '' -BlockedReason (Get-UiString 'UpdateStateNoWingetId')))
       }
 
       # Fallback only when a safe package id exists; otherwise the later packaging step could not
@@ -921,11 +954,17 @@ $updateSearchButton.Add_Click({
           }
         }
       }
-      if (-not $verified) { $failedChecks++ }
+      # NUR wenn eine Id da war und die Pruefung trotzdem nicht zustande kam. Ohne diese Bedingung
+      # wurden die Apps ohne Id ein zweites Mal gezaehlt - einmal als $skippedNoWingetId, einmal hier -
+      # und die Bilanz zog sie zweimal ab: im Lauf vom 28.08.2026 stand deshalb "0 up to date +
+      # 3 check failed", obwohl Chrome, WebView2 und VS Code geprueft und aktuell waren.
+      if ($wingetId -and -not $verified) { $failedChecks++ }
     }
     # 3) Present one target row per PackageId + newest version. Every concrete predecessor remains
     # attached to that row for safe consolidation during the batch.
-    $concreteCandidateCount = $candidates.Count
+    # Gesperrte Zeilen sind KEINE Update-Ziele. Sie mitzuzaehlen haette die Bilanz unten wieder
+    # verschoben und die Statuszeile Arbeit melden lassen, die es nicht gibt.
+    $concreteCandidateCount = @($candidates | Where-Object { -not $_.IsBlocked }).Count
     $groupedCandidates = @(Group-UpdateCandidates -Candidates @($candidates))
     $count = 0
     $script:updateListRefreshing = $true
@@ -946,22 +985,36 @@ $updateSearchButton.Add_Click({
       $script:updateListRefreshing = $false
     }
 
-    $newUploadCount = @($groupedCandidates | Where-Object { -not $_.TargetAlreadyDeployed }).Count
-    $followUpCount = @($groupedCandidates | Where-Object { $_.TargetAlreadyDeployed }).Count
+    $actionableGroups = @($groupedCandidates | Where-Object { -not $_.IsBlocked })
+    $blockedGroups = @($groupedCandidates | Where-Object { $_.IsBlocked })
+    $newUploadCount = @($actionableGroups | Where-Object { -not $_.TargetAlreadyDeployed }).Count
+    $followUpCount = @($actionableGroups | Where-Object { $_.TargetAlreadyDeployed }).Count
     Write-Log ("Scan classification: {0} new upload(s), {1} follow-up item(s) with an existing target, {2} outdated active source app object(s)." -f $newUploadCount, $followUpCount, $concreteCandidateCount)
     # The reconciliation line: every app object from the inventory is accounted for exactly once.
     # If these do not add up, something was dropped silently - which is the one failure this scan
     # must never have, because a missed app looks exactly like an app that is up to date.
-    $upToDateCount = $appsToCheck.Count - $concreteCandidateCount - $skippedNoWingetId - $failedChecks
+    $reconciliation = Measure-ScanReconciliation -InventoryCount @($all).Count -OutdatedCount $concreteCandidateCount `
+      -NoWingetIdCount $skippedNoWingetId -FailedCount $failedChecks -IncompleteCount $skippedIncomplete
+    $upToDateCount = $reconciliation.UpToDate
     Set-ProgressValue $processedCount
     Write-Log ("Update scan reconciliation: {0} from inventory = {1} outdated + {2} up to date + {3} no WinGet id + {4} check failed + {5} no version/Graph id." -f `
       @($all).Count, $concreteCandidateCount, $upToDateCount, $skippedNoWingetId, $failedChecks, $skippedIncomplete)
+    if (-not $reconciliation.Balanced) {
+      Write-Log 'Update scan reconciliation does NOT add up - an app was counted twice. The list above is still complete; the numbers are not.'
+    }
+    if ($blockedGroups.Count -gt 0) {
+      Write-Log ("Update scan: {0} app(s) are shown as blocked rows - they cannot be updated as they stand, but they are visible and can be given a WinGet id by right-clicking the row." -f $blockedGroups.Count)
+    }
     if ($skippedIncomplete -gt 0 -or $skippedNoWingetId -gt 0) {
       # Said in the window as well, not only in the log: "no updates found" and "no updates found,
       # but I could not look at four of them" are different answers.
       Write-Log ("Update scan: {0} app(s) could NOT be checked at all. Review the lines above - each one names the app." -f ($skippedIncomplete + $skippedNoWingetId))
     }
-    if ($count -gt 0) {
+    # Nicht mehr an der Zeilenzahl gemessen, sondern an den ANHAKBAREN Zeilen: seit die nicht
+    # pruefbaren Apps als gesperrte Zeilen erscheinen, waere "$count > 0" auch dann wahr, wenn es
+    # nichts zu tun gibt - und die Statuszeile haette "0 neue Uploads" gemeldet statt "keine
+    # Kandidaten, aber 4 Apps nicht pruefbar".
+    if ($newUploadCount + $followUpCount -gt 0) {
       if ($failedChecks -gt 0) {
         Update-Status ((Get-UiString 'SearchUpdatesGroupedWithFailuresStatus') -f $newUploadCount, $followUpCount, $concreteCandidateCount, $failedChecks)
       } else {
@@ -971,8 +1024,12 @@ $updateSearchButton.Add_Click({
       $checkAllButton.Enabled = $true
       $uncheckAllButton.Enabled = $true
     } else {
-      if ($failedChecks -gt 0) {
-        Update-Status ((Get-UiString 'NoUpdateCandidatesWithFailuresStatus') -f $failedChecks)
+      # Alles, was gar nicht geprueft werden konnte - egal aus welchem der drei Gruende. Vorher
+      # zaehlte hier nur $failedChecks, und ausgerechnet die haeufigsten Faelle (keine Id, keine
+      # Version) tauchten in der Statuszeile nicht auf.
+      $uncheckableCount = $skippedNoWingetId + $skippedIncomplete + $failedChecks
+      if ($uncheckableCount -gt 0) {
+        Update-Status ((Get-UiString 'NoUpdateCandidatesWithFailuresStatus') -f $uncheckableCount)
       } else {
         Update-Status (Get-UiString 'NoUpdateCandidatesStatus')
       }
@@ -1012,7 +1069,12 @@ $updateSelectedButton.Add_Click({
         $foundApp = $row.Tag
         Write-Log "Looking for app: '$itemName' (GraphId: $($foundApp.GraphId))"
 
-        if ($foundApp) {
+        if ($foundApp -and $foundApp.PSObject.Properties['IsBlocked'] -and $foundApp.IsBlocked) {
+            # Der Haken laesst sich an einer ListView-Zeile nicht einzeln abschalten - also faellt die
+            # Entscheidung hier. Eine gesperrte Zeile hat keine belastbare Paket-Id oder keine
+            # Version; sie zu paketieren hiesse raten, und geraten wird an dieser Stelle nie.
+            Write-Log ("Skipping '{0}': the row is blocked ({1}). Nothing was packaged or uploaded for it." -f [string]$foundApp.Name, [string]$foundApp.BlockedReason)
+        } elseif ($foundApp) {
             Write-Log "Found: $($foundApp.Name) (Current: $($foundApp.CurrentVersion), Latest: $($foundApp.LatestVersion), GraphId: $($foundApp.GraphId))"
             $checkedApps.Add($foundApp)
         } else {
@@ -1030,6 +1092,12 @@ $updateSelectedButton.Add_Click({
     Write-Log "Successfully matched $($checkedApps.Count) apps for update"
 
     if (-not (Confirm-UpdateScopeConsolidation -Groups @($checkedApps))) {
+        Update-Status (Get-UiString 'MassUpdateCanceledStatus'); return
+    }
+
+    # VOR der allgemeinen Rueckfrage: die hier ist die ernstere, und sie ist die einzige, die auch
+    # bei abgeschalteten Bestaetigungen kommt. Ohne geschuetzte App kostet sie keinen Klick.
+    if (-not (Confirm-ProtectedAppsInRun -Apps @($checkedApps))) {
         Update-Status (Get-UiString 'MassUpdateCanceledStatus'); return
     }
 
@@ -1089,6 +1157,12 @@ $updateAllButton.Add_Click({
     }
 
     if (-not (Confirm-UpdateScopeConsolidation -Groups @($updatedApps))) {
+        Update-Status (Get-UiString 'MassUpdateCanceledStatus'); return
+    }
+
+    # Derselbe Riegel wie im Lauf ueber die markierten Zeilen: "Alle aktualisieren" ist genau der
+    # Weg, auf dem eine geschuetzte App ungesehen mitlaeuft.
+    if (-not (Confirm-ProtectedAppsInRun -Apps @($updatedApps))) {
         Update-Status (Get-UiString 'MassUpdateCanceledStatus'); return
     }
 
@@ -2365,25 +2439,6 @@ $form.Add_Shown({
 # "Verteilwerk" ist zurueckgenommen, das Repository hiess und heisst zTeck-arch/wintuner_gui. Ein
 # Hinweis auf einen Umzug, den es nicht gibt, waere schlimmer als keiner. Der Merker
 # RepoMoveNoticeShown bleibt in den Einstellungen liegen und stoert dort nicht.
-
-# Wurden Einstellungen aus dem Ordner der Zwischenfassung uebernommen (siehe 10-Settings), wird das
-# genau einmal gesagt - mit beiden Pfaden. Wer nach dem Wechsel seinen Paketordner sucht, muss
-# wissen, wo er jetzt steht und dass der alte Stand noch liegt.
-$form.Add_Shown({
-  # Unbeaufsichtigt: nichts von hier - siehe der erste Add_Shown-Handler oben.
-  if (Test-UnattendedRun) { return }
-  if (-not $script:legacySettingsCopied) { return }
-  $legacyPath = [string]$script:legacySettingsCopied
-  $script:legacySettingsCopied = $null
-  Write-Log ("Settings taken over from the previous name: {0} -> {1}" -f $legacyPath, $script:settingsPath)
-  [void]$form.BeginInvoke([System.Action]{
-    [void][System.Windows.Forms.MessageBox]::Show(
-      ((Get-UiString 'LegacyDataTakenOverDialog') -f $script:settingsPath, $legacyPath),
-      (Get-UiString 'LegacyDataTakenOverTitle'),
-      [System.Windows.Forms.MessageBoxButtons]::OK,
-      [System.Windows.Forms.MessageBoxIcon]::Information)
-  })
-})
 
 $form.Add_Shown({
   # Unbeaufsichtigt: nichts von hier - siehe der erste Add_Shown-Handler oben.

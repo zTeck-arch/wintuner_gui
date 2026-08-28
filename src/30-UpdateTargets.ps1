@@ -1,4 +1,4 @@
-# Some WinTuner/module versions can return an app through both inventory calls immediately after
+﻿# Some WinTuner/module versions can return an app through both inventory calls immediately after
 # supersedence was created. GraphId is authoritative: an object reported by the superseded query
 # must not also appear as an active update candidate or active reuse target.
 function Remove-SupersededInventoryOverlap {
@@ -42,7 +42,10 @@ function Remove-SupersededInventoryOverlap {
 function New-UpdateCandidateModel {
   param(
     [Parameter(Mandatory)]$App,
-    [Parameter(Mandatory)][string]$LatestVersion,
+    # AllowEmptyString: eine gesperrte Zeile ("keine WinGet-Id zuordenbar") hat keine Zielversion -
+    # sie existiert ja gerade, weil nichts zu vergleichen war. Ohne das lehnte der Pflichtparameter
+    # den Leerstring ab und die App waere wieder nur im Protokoll gelandet.
+    [Parameter(Mandatory)][AllowEmptyString()][string]$LatestVersion,
     [string]$PackageId,
     [string]$ExistingTargetGraphId,
     [string]$ExistingTargetName,
@@ -63,6 +66,18 @@ function New-UpdateCandidateModel {
     TargetAlreadyDeployed = -not [string]::IsNullOrWhiteSpace($ExistingTargetGraphId)
     BlockedReason  = $BlockedReason
     IsBlocked      = -not [string]::IsNullOrWhiteSpace($BlockedReason)
+    # Traegt die Quell-App keine WinTuner-Marke, stammt die Paket-Id aus dem Namensabgleich und nicht
+    # aus dem Notizfeld. Das ist der einzige Unterschied, den der Techniker vor dem Haken sehen muss -
+    # ohne ihn saehe eine ueber den Namen zugeordnete Zeile aus wie eine belegte.
+    IsUnmanaged    = [bool]($App.PSObject.Properties['IsUnmanaged'] -and $App.IsUnmanaged)
+    # Die Id stand im Notizfeld, sie wurde nicht ueber den Namen erraten. Die Zeile sagt das, weil
+    # der Unterschied fuer die Entscheidung zaehlt: aufgeschrieben ist belastbar, zugeordnet ist
+    # eine Vermutung.
+    PackageIdFromNotes = [bool]($App.PSObject.Properties['PackageIdFromNotes'] -and $App.PackageIdFromNotes)
+    # Einmal hier ausgewertet statt an jeder Anzeigestelle erneut: die Liste, die Rueckfrage vor dem
+    # Lauf und die Zeilenfarbe muessen ueber DASSELBE Urteil reden. Wird die Liste waehrend der
+    # Anzeige geaendert (Rechtsklick), zeichnet Update-UpdateListRows die Zeilen mit neuem Wert.
+    IsProtected    = [bool](Test-IsProtectedApp -Name ([string]$App.Name) -Patterns $script:settings.ProtectedApps)
     Checked        = $false
   }
 }
@@ -459,6 +474,29 @@ function Get-StringSimilarity {
 #   Failed                - the lookup itself failed
 #   Checked               - how many were actually looked at
 # Outdated + UpToDate + AlreadyNewerInTenant + NoWingetId + Failed == Checked, by construction.
+# Die Bilanz der Suche: jedes App-Objekt aus dem Inventar taucht genau einmal auf.
+#
+# Herausgezogen, weil die Rechnung inline falsch war und niemand es sehen konnte: die Apps ohne
+# WinGet-Id wurden auch als "check failed" gezaehlt, zweimal abgezogen, und "aktuell" kam auf null.
+# Als reine Funktion laesst sich das pruefen, ohne einen Tenant zu befragen - und Balanced sagt,
+# ob die Zeile ueberhaupt aufgeht.
+function Measure-ScanReconciliation {
+  param(
+    [Parameter(Mandatory)][int]$InventoryCount,
+    [Parameter(Mandatory)][int]$OutdatedCount,
+    [Parameter(Mandatory)][int]$NoWingetIdCount,
+    [Parameter(Mandatory)][int]$FailedCount,
+    [Parameter(Mandatory)][int]$IncompleteCount
+  )
+  $upToDate = $InventoryCount - $IncompleteCount - $OutdatedCount - $NoWingetIdCount - $FailedCount
+  [pscustomobject]@{
+    UpToDate = $upToDate
+    # Negativ heisst: irgendetwas wurde doppelt gezaehlt. Das ist keine Kosmetik - eine uebersehene
+    # App sieht im Fenster genauso aus wie eine aktuelle.
+    Balanced = ($upToDate -ge 0)
+  }
+}
+
 function Measure-AvailableUpdates {
   param(
     [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Apps,

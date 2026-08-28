@@ -20,6 +20,28 @@ function New-UpdateRow {
   $noteParts = [System.Collections.Generic.List[string]]::new()
   $actionNote = if ($App.TargetAlreadyDeployed) { Get-UiString 'UpdateStateExisting' } else { Get-UiString 'UpdateStateNew' }
   $noteParts.Add([string]$actionNote)
+  # Ganz vorn, weil es die wichtigste Aussage der Zeile ist: diese App ist als selbst paketiert
+  # markiert. Sie bleibt anhakbar - Umgebungen muss man pflegen koennen - aber der Lauf fragt vorher
+  # ausdruecklich nach, auch bei abgeschalteten Bestaetigungen (Confirm-ProtectedAppsInRun).
+  if ($App.PSObject.Properties['IsProtected'] -and $App.IsProtected) {
+    $noteParts.Add((Get-UiString 'UpdateStateProtected'))
+    $it.ForeColor = [System.Drawing.Color]::DarkOrange
+  }
+  # Zuerst genannt, weil es die Herkunft der ganzen Zeile relativiert: bei einer App ohne
+  # WinTuner-Marke kommt die Paket-Id aus dem Namensabgleich, nicht aus dem Notizfeld. Der Lauf
+  # loest diese App ab und zieht ihre Zuweisungen mit - das soll niemand versehentlich anhaken.
+  if ($App.PSObject.Properties['IsUnmanaged'] -and $App.IsUnmanaged) {
+    # Zwei verschiedene Aussagen, die nicht denselben Satz vertragen: eine im Notizfeld
+    # AUFGESCHRIEBENE Id ist belastbar, eine ueber den Namen zugeordnete ist eine Vermutung. Beide
+    # Zeilen bleiben orange, weil der Lauf in beiden Faellen eine App abloest, die WinTuner nicht
+    # gebaut hat.
+    if ($App.PSObject.Properties['PackageIdFromNotes'] -and $App.PackageIdFromNotes) {
+      $noteParts.Add((Get-UiString 'UpdateStateNotesId'))
+    } else {
+      $noteParts.Add((Get-UiString 'UpdateStateUnmanaged'))
+    }
+    $it.ForeColor = [System.Drawing.Color]::DarkOrange
+  }
   # Two separate statements, because they mean different things to the reader: "the predecessors
   # really carry different assignments" versus "one of them could not be read". A predecessor with no
   # assignment at all is neither - it has nothing to hand over, so it is not mentioned here.
@@ -39,6 +61,39 @@ function New-UpdateRow {
   [void]$it.SubItems.Add(($noteParts -join '; '))
   if ($App.Checked) { $it.Checked = $true }
   return $it
+}
+
+# Zeichnet die vorhandenen Zeilen neu, OHNE den Tenant erneut zu befragen.
+#
+# Gebraucht, wenn sich die Schutzliste waehrend der Anzeige aendert (Rechtsklick auf eine Zeile):
+# der Scan bleibt gueltig, nur das Urteil ueber diese Zeile nicht. Einen kompletten Scan dafuer zu
+# wiederholen waere eine halbe Minute Wartezeit fuer eine Textaenderung.
+#
+# Der Haken wird vor dem Neuaufbau ins Modell zurueckgeschrieben und von New-UpdateRow wieder
+# gesetzt - sonst verliert man beim Schuetzen einer App die Auswahl aller anderen.
+function Update-UpdateListRows {
+  if (-not $updateListBox) { return }
+  $models = @()
+  foreach ($it in @($updateListBox.Items)) {
+    $m = $it.Tag
+    if (-not $m) { continue }
+    $m.Checked = [bool]$it.Checked
+    if ($m.PSObject.Properties['IsProtected']) {
+      $m.IsProtected = [bool](Test-IsProtectedApp -Name ([string]$m.Name) -Patterns $script:settings.ProtectedApps)
+    }
+    $models += $m
+  }
+  # Der Merker haelt den ItemChecked-Handler still: der Neuaufbau setzt Haken, und das ist keine
+  # Benutzereingabe, auf die etwas reagieren soll.
+  $script:updateListRefreshing = $true
+  $updateListBox.BeginUpdate()
+  try {
+    $updateListBox.Items.Clear()
+    foreach ($m in $models) { [void]$updateListBox.Items.Add((New-UpdateRow -App $m)) }
+  } finally {
+    $updateListBox.EndUpdate()
+    $script:updateListRefreshing = $false
+  }
 }
 
 # Hovering a row shows its full content. The card has a fixed width and does not grow with the
@@ -112,6 +167,31 @@ $cardUpdates.Controls.Add($updatesEmptyLabel)
 $updateListBox.Visible = $false
 $updatesEmptyLabel.Visible = $true
 $updatesEmptyLabel.BringToFront()
+
+# Die Schutzliste von hier aus pflegen, ohne den Bereich zu wechseln.
+#
+# Der Rechtsklick auf eine Zeile deckt "genau diese App" ab; was er nicht kann, sind Muster
+# ('Splashtop*', 'TeamViewer*') und das Nachsehen, was ueberhaupt drinsteht. Beides ist genau dann
+# gefragt, wenn man auf die Trefferliste schaut - deshalb steht der Knopf hier und nicht nur in den
+# Einstellungen. Rechtsbuendig in der Kopfzeile der Karte: die Knopfreihe unten ist voll, und dort
+# stehen die Aktionen, die etwas im Tenant tun. Diese hier tut das nicht.
+$protectedManageButton = New-Object System.Windows.Forms.Button
+$protectedManageButton.Tag = 'btn-secondary'
+$protectedManageButton.Text = Get-UiString 'UpdateProtectedManageButton'
+$protectedManageButton.Location = New-Object System.Drawing.Point(530,6)
+$protectedManageButton.Size = New-Object System.Drawing.Size(182,26)
+$cardUpdates.Controls.Add($protectedManageButton)
+try { if ($toolTip) { $toolTip.SetToolTip($protectedManageButton, (Get-UiString 'TtProtectedManage')) } } catch { Write-LogDebug 'protected manage tooltip' }
+
+$protectedManageButton.Add_Click({
+  # Die ausgewaehlte Zeile fuellt das Eingabefeld vor: der haeufigste Fall ist "diese App hier".
+  $suggested = ''
+  try {
+    $sel = @($updateListBox.SelectedItems)
+    if ($sel.Count -gt 0 -and $sel[0].Tag) { $suggested = [string]$sel[0].Tag.Name }
+  } catch { Write-LogDebug 'protected dialog suggestion' }
+  Show-ProtectedAppsDialog -SuggestedPattern $suggested
+})
 
 $checkAllButton = New-Object System.Windows.Forms.Button
 $checkAllButton.Tag = 'btn-secondary'
@@ -956,6 +1036,104 @@ $dashboardFullScanCheckbox.AutoSize = $true
 $dashboardFullScanCheckbox.Checked = [bool]$script:settings.DashboardUpdatesFullScan
 [void](Add-SettingRow -Card $cardUpdateSearch -Control $dashboardFullScanCheckbox -Hint (Get-UiString 'HintDashboardFullScan'))
 
+# Steht in dieser Karte, weil es den UMFANG der Suche festlegt - nicht ihren Zeitpunkt und nicht,
+# was danach mit der alten Version passiert. AN als Standard: die WinTuner-Marke sagt, wer eine App
+# angelegt hat, nicht ob sie aktualisierbar ist, und daran gebunden fielen handgebaute Pakete und
+# Apps mit entfernter Marke lautlos aus der Suche.
+$scanUnmanagedCheckbox = New-Object System.Windows.Forms.CheckBox
+$scanUnmanagedCheckbox.Text = Get-UiString 'ScanUnmanagedCheckbox'
+$scanUnmanagedCheckbox.AutoSize = $true
+$scanUnmanagedCheckbox.Checked = [bool]$script:settings.ScanUnmanagedWin32Apps
+[void](Add-SettingRow -Card $cardUpdateSearch -Control $scanUnmanagedCheckbox -Hint (Get-UiString 'HintScanUnmanaged') -SpaceBefore 6)
+
+# --- Card 2b: apps that must not be superseded by accident ---------------------------------------
+#
+# Eigene Karte und nicht eine Zeile in der Karte darueber: das hier ist keine Ja/Nein-Einstellung,
+# sondern eine Liste, die man ueber Monate pflegt. Der uebliche Weg fuehrt ohnehin ueber den
+# Rechtsklick in der Update-Liste; diese Karte ist zum Nachsehen, Entfernen und fuer Muster.
+$cardProtected = New-SettingsCard -TitleKey 'SettingsCardProtected' -InfoKey 'InfoCardProtected'
+
+$protectedHintLabel = New-Object System.Windows.Forms.Label
+$protectedHintLabel.Tag = 'hint'
+$protectedHintLabel.Text = Get-UiString 'HintProtectedApps'
+$protectedHintLabel.AutoSize = $true
+$protectedHintLabel.MaximumSize = New-Object System.Drawing.Size(680, 0)
+[void](Add-SettingRow -Card $cardProtected -Control $protectedHintLabel)
+
+$protectedListBox = New-Object System.Windows.Forms.ListBox
+$protectedListBox.Size = New-Object System.Drawing.Size(560, 112)
+$protectedListBox.IntegralHeight = $false   # sonst kuerzt WinForms die Hoehe auf ganze Zeilen und die Karte rechnet daneben
+[void](Add-SettingRow -Card $cardProtected -Control $protectedListBox -SpaceBefore 6)
+
+# Eingabefeld + zwei Knoepfe in einer Zeile, wie die Pfadzeile in Karte 1.
+$protectedRow = New-Object System.Windows.Forms.Panel
+$protectedRow.Tag = 'row-host'
+$protectedRow.Size = New-Object System.Drawing.Size(698, 32)
+
+$protectedInputBox = New-Object System.Windows.Forms.TextBox
+$protectedInputBox.PlaceholderText = Get-UiString 'ProtectedInputPlaceholder'
+$protectedInputHost = New-RoundedInput -Inner $protectedInputBox -X 0 -Y 1 -W 330 -H 30
+$protectedRow.Controls.Add($protectedInputHost)
+
+$protectedAddButton = New-Object System.Windows.Forms.Button
+$protectedAddButton.Text = Get-UiString 'ProtectedAddButton'
+$protectedAddButton.Location = New-Object System.Drawing.Point(342,1)
+$protectedAddButton.Width = 170
+$protectedAddButton.Height = 30
+$protectedRow.Controls.Add($protectedAddButton)
+
+$protectedRemoveButton = New-Object System.Windows.Forms.Button
+$protectedRemoveButton.Tag = 'btn-secondary'
+$protectedRemoveButton.Text = Get-UiString 'ProtectedRemoveButton'
+$protectedRemoveButton.Location = New-Object System.Drawing.Point(524,1)
+$protectedRemoveButton.Width = 170
+$protectedRemoveButton.Height = 30
+$protectedRow.Controls.Add($protectedRemoveButton)
+
+[void](Add-SettingRow -Card $cardProtected -Control $protectedRow -SpaceBefore 6)
+
+# Fuellt die Anzeige aus den Einstellungen. Gerufen beim Aufbau, beim Oeffnen des Bereichs und nach
+# jeder Aenderung - auch nach einer, die im Rechtsklick der Update-Liste passiert ist.
+function Update-ProtectedAppsList {
+  if (-not $protectedListBox) { return }
+  $protectedListBox.BeginUpdate()
+  try {
+    $protectedListBox.Items.Clear()
+    foreach ($p in @($script:settings.ProtectedApps)) {
+      if (-not [string]::IsNullOrWhiteSpace([string]$p)) { [void]$protectedListBox.Items.Add([string]$p) }
+    }
+  } finally { $protectedListBox.EndUpdate() }
+}
+Update-ProtectedAppsList
+
+# Diese beiden Knoepfe wirken SOFORT, nicht erst nach "Einstellungen speichern". Das weicht bewusst
+# vom Rest der Seite ab: der Rechtsklick in der Update-Liste schreibt ebenfalls sofort, und zwei
+# Schreiber auf dieselbe Liste - einer sofort, einer beim Speichern - wuerden sich gegenseitig
+# ueberschreiben. Der Hinweis ueber der Liste sagt es.
+$protectedAddButton.Add_Click({
+  $pattern = $protectedInputBox.Text.Trim()
+  if ([string]::IsNullOrWhiteSpace($pattern)) { return }
+  $script:settings.ProtectedApps = @(Add-ProtectedAppPattern -Patterns $script:settings.ProtectedApps -Pattern $pattern)
+  Save-Settings
+  Write-Log ("Protected apps: added pattern '{0}' (now {1} entr(y/ies))." -f $pattern, @($script:settings.ProtectedApps).Count)
+  $protectedInputBox.Text = ''
+  Update-ProtectedAppsList
+  # Die Update-Liste kann offen sein und Zeilen zeigen, die dieses Muster ab jetzt trifft.
+  try { Update-UpdateListRows } catch { Write-LogDebug 'update list rows after protect' }
+  Update-Status ((Get-UiString 'ProtectedAddedStatus') -f $pattern)
+})
+
+$protectedRemoveButton.Add_Click({
+  $sel = [string]$protectedListBox.SelectedItem
+  if ([string]::IsNullOrWhiteSpace($sel)) { return }
+  $script:settings.ProtectedApps = @(Remove-ProtectedAppPattern -Patterns $script:settings.ProtectedApps -Pattern $sel)
+  Save-Settings
+  Write-Log ("Protected apps: removed pattern '{0}' (now {1} entr(y/ies))." -f $sel, @($script:settings.ProtectedApps).Count)
+  Update-ProtectedAppsList
+  try { Update-UpdateListRows } catch { Write-LogDebug 'update list rows after unprotect' }
+  Update-Status ((Get-UiString 'ProtectedRemovedStatus') -f $sel)
+})
+
 # --- Card 3: what happens to the old version after an update -------------------------------------
 $cardAfterUpdate = New-SettingsCard -TitleKey 'SettingsCardAfterUpdate' -InfoKey 'InfoCardAfterUpdate'
 
@@ -1349,6 +1527,12 @@ $saveSettingsButton.Add_Click({
     if ($dashboardFullScanCheckbox) {
       $fullScanChanged = ([bool]$script:settings.DashboardUpdatesFullScan -ne [bool]$dashboardFullScanCheckbox.Checked)
       $script:settings.DashboardUpdatesFullScan = $dashboardFullScanCheckbox.Checked
+    }
+    # Aendert ebenfalls die Grundlage der Kachel - beim echten Versionsvergleich rechnet sie ueber
+    # Get-ScanInventory. Ohne das Neuzaehlen stuende dort weiter die Zahl aus dem alten Umfang.
+    if ($scanUnmanagedCheckbox) {
+      if ([bool]$script:settings.ScanUnmanagedWin32Apps -ne [bool]$scanUnmanagedCheckbox.Checked) { $fullScanChanged = $true }
+      $script:settings.ScanUnmanagedWin32Apps = $scanUnmanagedCheckbox.Checked
     }
     if ($suppressConfirmationsCheckbox) {
       # The risk notice was already answered when the box was ticked (see its CheckedChanged), so a

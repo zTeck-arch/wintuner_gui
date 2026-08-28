@@ -99,6 +99,59 @@ Das Modul (und `Get-Win32AppInventoryViaGraph`) listen ausschließlich `win32Lob
 Apps ist für diese Sicht leer, und das muss die Meldung sagen (`NoWinTunerAppsStatus`), sonst
 widerspricht die Oberfläche dem Intune-Portal. Der Weg für alles andere ist „Alle Tenant-Apps".
 
+### Die Marke sagt, WER die App gebaut hat — nicht, ob sie aktualisierbar ist
+Deshalb entscheidet sie nicht mehr über den Umfang der Update-Suche. Handgebaute Pakete
+sind ebenfalls `.intunewin`-Apps, und die Marke wird im Betrieb auch wieder entfernt — beides ließ
+Apps lautlos aus der Suche fallen (im Protokoll vom 28.08.2026: 3 von 13 Win32-Apps geprüft).
+`Get-ScanInventory` hängt die unmarkierten Apps an (Schalter `ScanUnmanagedWin32Apps`, Standard an);
+**Kachel und Suche müssen dieselbe Liste benutzen**, sonst beantworten sie wieder zwei Fragen mit
+demselben Wort. Die Sicherheit liegt nicht am Schalter, sondern an `Resolve-WingetIdForApp`: eine
+unmarkierte App bringt **keine** `PackageId` mit, also muss die Id über einen exakten Namen, einen
+Treffer ≥ 80 mit 15 Punkten Abstand oder einen `WingetOverrides`-Eintrag kommen. Eine geratene Id
+würde das falsche Produkt paketieren und die echte App ablösen — bei einem handgebauten Paket, das
+niemand schnell nachbaut, ist das der Totalverlust. Solche Zeilen sind in der Update-Liste orange
+und mit `UpdateStateUnmanaged` beschriftet.
+
+Zwei Erweiterungen dazu (28.08.2026, gemessen am Lauf 09:30):
+
+- **Die lose Notiz-Id.** Nicht jede Notiz trägt die geklammerte Marke; oft steht dort, was ein
+  Mensch geschrieben hat („WinGet: Google.Chrome"). `Get-LoosePackageIdFromNotes` liest das,
+  `Test-IsPlausiblePackageId` zieht die Grenze (Hersteller.Produkt, mindestens ein Buchstabe, keine
+  Version, kein Dateiname). Die lose Lesart gilt **nicht** als Marke — sonst fiele die App aus dem
+  markierten Inventar *und* aus der Unmarkiert-Liste und wäre gar nicht mehr geprüft. Sie kann eine
+  Id nur hinzufügen, nie eine App entfernen.
+- **Was nicht geprüft werden konnte, gehört in die Liste.** Ohne zuordenbare Id (Keeper, Harmony
+  SASE, Teams Machine-Wide Installer) oder ohne `displayVersion` in Intune (Steam) stand eine App
+  vorher nur im Protokoll — im Fenster sah der Tenant sauberer aus als er war. Jetzt ist sie eine
+  **gesperrte Zeile** (`BlockedReason`, rot, nicht anhakbar, vom Lauf übersprungen) mit
+  Rechtsklick → `UpdateCtxAssignId`, der einen `WingetOverrides`-Eintrag schreibt und neu sucht.
+
+### Ein Gruppenobjekt verliert jeden Merker, den es nicht ausdrücklich mitnimmt
+Die Zeilen der Update-Liste werden aus dem Ergebnis von `Group-UpdateCandidates` gebaut, nicht aus
+den Kandidaten. Was dort nicht wieder eingesetzt wird, ist für die Anzeige verschwunden:
+`IsUnmanaged`, `IsProtected` und `PackageIdFromNotes` fehlten, also blieb die orange Warnung „nicht
+von WinTuner gebaut" unsichtbar, obwohl `New-UpdateRow` sie kannte — im Lauf vom 28.08.2026 bei
+**jeder** der vier angezeigten Zeilen. Zweite Falle derselben Stelle: der Gruppenschlüssel ist
+`PackageId|LatestVersion`, und beide sind bei einer gesperrten Zeile leer — ohne den eigenen
+`blocked|GraphId`-Zweig fielen alle nicht prüfbaren Apps zu **einer** Zeile zusammen.
+Regressionsprüfung: `BlockedUpdateRows.Tests.ps1`.
+
+### Eine Rückfrage, die „Rückfragen abschalten" nicht abschalten darf
+`Confirm-ProtectedAppsInRun` ruft `Confirm-ChangeAction` **mit `-AlwaysAsk`**. Ohne das Wort wäre
+der Riegel genau bei dem Benutzer stumm, der ihn am dringendsten braucht: wer
+`SuppressChangeConfirmations` gesetzt hat, startet den Lauf sonst völlig ohne Nachfrage. Der
+Normalfall kostet trotzdem keinen Klick — ohne geschützte App kehrt die Funktion sofort mit `$true`
+zurück. Beide Update-Wege müssen den Riegel haben, „Alle aktualisieren" ist der gefährlichere: dort
+liest niemand jede Zeile. Das Urteil `IsProtected` fällt **einmal** in `New-UpdateCandidateModel` —
+rechnete jede Anzeigestelle selbst, könnten Zeilenfarbe und Rückfrage auseinanderlaufen.
+
+### Zwei Schreiber auf eine Liste vertragen sich nicht
+Die Schutzliste wird an zwei Stellen gepflegt (Rechtsklick in der Update-Liste, Karte in den
+Einstellungen). Beide schreiben **sofort** und rufen `Save-Settings` — bewusst anders als die Haken
+derselben Seite, die erst „Einstellungen speichern" braucht. Ein Sofort-Schreiber neben einem
+Speichern-Schreiber überschreibt sich gegenseitig, und ein Schutz, der erst nach einem Klick an
+anderer Stelle gilt, ist genau dann keiner, wenn man ihn braucht. Der Hinweis über der Liste sagt es.
+
 ### Der untere Bereich ändert seine Höhe nie
 Protokollkasten fest auf 120 px, Fortschrittstext und Abbruch-Knopf in der Zeile des
 Protokoll-Umschalters. Eine Oberfläche, die während eines Laufs 122 px Inhalt wegnimmt und danach

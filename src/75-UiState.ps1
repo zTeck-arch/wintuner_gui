@@ -1324,6 +1324,12 @@ function Show-Section {
   if ($Key -eq 'workrecord' -and (Get-Command Update-WorkRecordText -ErrorAction SilentlyContinue)) {
     try { Update-WorkRecordText } catch {}
   }
+  # Die Schutzliste kann seit dem letzten Blick woanders geaendert worden sein - der Rechtsklick in
+  # der Update-Liste schreibt direkt in die Einstellungen. Ohne dieses Nachziehen zeigte die Karte
+  # den Stand vom Programmstart und man haette den eben gesetzten Schutz dort nicht gefunden.
+  if ($Key -eq 'settings' -and (Get-Command Update-ProtectedAppsList -ErrorAction SilentlyContinue)) {
+    try { Update-ProtectedAppsList } catch {}
+  }
   if ($Key -eq 'appsettings' -and (Get-Command Update-AppSettingsLayout -ErrorAction SilentlyContinue)) {
     try { Update-AppSettingsLayout } catch {}
   }

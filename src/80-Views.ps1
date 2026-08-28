@@ -270,15 +270,23 @@ function Refresh-Dashboard {
     # and produced "Laden der Apps aus Intune fehlgeschlagen" right after signing in.
     $updateCount = 0
     $tileTooltipKey = 'TtDashUpdatesFlag'
-    if ($all.Count -eq 0) {
-      # Ohne verwaltete App kann es kein Update geben - die dritte Tenant-Abfrage (und bei leerem
+    # Die Kachel rechnet ueber DIESELBE Liste wie die Update-Suche - das ist der ganze Sinn von
+    # Measure-AvailableUpdates. Aber nur beim echten Versionsvergleich: Get-ScanInventory liest den
+    # Tenant seitenweise ueber Graph, und fuer die Kennzeichen-Variante unten waere das ein
+    # Durchlauf fuer eine Zahl, die aus einer voellig anderen Quelle stammt.
+    #
+    # Die Kachel "verwaltete Apps" bleibt bei $all: sie beantwortet weiter die Frage, wie viele Apps
+    # WinTuner gebaut hat, und das ist eine andere Frage als "wie viele koennen aktualisiert werden".
+    $scanScope = if ($script:settings.DashboardUpdatesFullScan) { @(Get-ScanInventory -ManagedApps $all) } else { @($all) }
+    if ($scanScope.Count -eq 0) {
+      # Ohne App kann es kein Update geben - die dritte Tenant-Abfrage (und bei leerem
       # Inventar ihre Gegenprobe) war beim Anmelden reine Wartezeit fuer eine garantierte Null.
       $tileTooltipKey = if ($script:settings.DashboardUpdatesFullScan) { 'TtDashUpdatesScan' } else { 'TtDashUpdatesFlag' }
-      Write-Log 'Dashboard tile: no WinTuner-managed apps, so there is nothing that could have an update - skipping the update query.'
+      Write-Log 'Dashboard tile: no app in scope that could have an update - skipping the update query.'
     } elseif ($script:settings.DashboardUpdatesFullScan) {
       Update-Status (Get-UiString 'DashUpdatesScanning')
       [System.Windows.Forms.Application]::DoEvents()
-      $measured = Measure-AvailableUpdates -Apps $all
+      $measured = Measure-AvailableUpdates -Apps $scanScope
       $updateCount = [int]$measured.Outdated
       $tileTooltipKey = 'TtDashUpdatesScan'
       Write-Log ("Dashboard tile (full scan): {0} outdated, {1} up to date, {2} newer version already in the tenant, {3} without a WinGet id, {4} lookup failed, of {5} checked." -f
@@ -296,6 +304,13 @@ function Refresh-Dashboard {
           Write-Log ("  Intune flags an update for: {0} {1} ({2})" -f [string]$u.Name, [string]$u.CurrentVersion, [string]$u.GraphId)
         }
         Write-Log 'Note: the update scan may still report no candidates - a newer version that is already deployed needs no work. Switch on the full version comparison in Settings (Searching for app updates) to make the tile answer the same question as the scan.'
+      }
+      # Die Abweichung geht seit ScanUnmanagedWin32Apps auch in die andere Richtung, und das ist die
+      # verwirrendere Richtung:
+      # Intunes Kennzeichen kennt nur markierte Apps, die Suche prueft alle. Die Kachel kann also
+      # DEUTLICH weniger zeigen als die Suche findet - ohne diese Zeile sieht das nach einem Fehler aus.
+      if ($script:settings.ScanUnmanagedWin32Apps) {
+        Write-Log 'Note: this number counts only WinTuner-marked apps, because it comes from Intune. The update scan additionally checks Win32 apps without the marker, so it can find MORE than this tile shows. The full version comparison makes both agree.'
       }
     }
     try { if ($toolTip -and $script:dashUpdatesVal) { $toolTip.SetToolTip($script:dashUpdatesVal, (Get-UiString $tileTooltipKey)) } } catch { Write-LogDebug 'dashboard tile tooltip' }
@@ -2281,4 +2296,115 @@ $updateListBox.HeaderStyle = [System.Windows.Forms.ColumnHeaderStyle]::Nonclicka
 [void]$updateListBox.Columns.Add((Get-UiString 'ColUpdateState'), 110)
 [void]$updateListBox.Columns.Add((Get-UiString 'ColUpdateNote'), 145)
 $cardUpdates.Controls.Add($updateListBox)
+
+# Schutz direkt an der Zeile pflegen. Der Weg ueber die Einstellungen gibt es auch, aber gemerkt
+# wird "das ist unser eigenes Paket" genau hier - beim Blick auf die Liste, nicht drei Klicks
+# spaeter. Der Eintrag traegt den ANZEIGENAMEN der App, also ohne Platzhalter; breitere Muster
+# ('Splashtop*') schreibt man in der Einstellungskarte.
+$updateListMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$updateProtectItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$updateProtectItem.Text = Get-UiString 'UpdateCtxProtect'
+$updateUnprotectItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$updateUnprotectItem.Text = Get-UiString 'UpdateCtxUnprotect'
+# Der einzige Weg, einer App eine Paket-Id zu geben, ohne die settings.json von Hand zu oeffnen.
+# Genau hier wird er gebraucht: an der gesperrten Zeile, die sagt "keine WinGet-Id zuordenbar".
+$updateAssignIdItem = New-Object System.Windows.Forms.ToolStripMenuItem
+$updateAssignIdItem.Text = Get-UiString 'UpdateCtxAssignId'
+[void]$updateListMenu.Items.Add($updateProtectItem)
+[void]$updateListMenu.Items.Add($updateUnprotectItem)
+[void]$updateListMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+[void]$updateListMenu.Items.Add($updateAssignIdItem)
+$updateListBox.ContextMenuStrip = $updateListMenu
+
+# Nur der Eintrag, der auf die angeklickte Zeile passt, ist waehlbar - ein Menue, in dem beide
+# Eintraege immer anklickbar sind, laesst offen, welchen Zustand die Zeile gerade hat.
+$updateListMenu.Add_Opening({
+  $sel = @($updateListBox.SelectedItems)
+  if ($sel.Count -eq 0 -or -not $sel[0].Tag) {
+    $updateProtectItem.Enabled = $false
+    $updateUnprotectItem.Enabled = $false
+    $updateAssignIdItem.Enabled = $false
+    return
+  }
+  $isProtected = [bool]$sel[0].Tag.IsProtected
+  $updateProtectItem.Enabled = -not $isProtected
+  $updateUnprotectItem.Enabled = $isProtected
+  # Bewusst fuer JEDE Zeile waehlbar, nicht nur fuer die gesperrten: eine ueber den Namen zugeordnete
+  # Id kann auch falsch sein, und dann muss man sie hier gerade ruecken koennen.
+  $updateAssignIdItem.Enabled = $true
+})
+
+# Beide Eintraege schreiben SOFORT und speichern - anders als die Haken auf der Einstellungsseite,
+# die erst "Einstellungen speichern" braucht. Ein Schutz, der erst nach einem weiteren Klick an
+# anderer Stelle gilt, ist genau dann keiner, wenn man ihn braucht.
+$updateProtectItem.Add_Click({
+  $sel = @($updateListBox.SelectedItems)
+  if ($sel.Count -eq 0 -or -not $sel[0].Tag) { return }
+  $name = [string]$sel[0].Tag.Name
+  $script:settings.ProtectedApps = @(Add-ProtectedAppPattern -Patterns $script:settings.ProtectedApps -Pattern $name)
+  Save-Settings
+  Write-Log ("Protected apps: added '{0}' (now {1} entr(y/ies)). This app will still be listed and can still be ticked, but an update run asks first - even with confirmations switched off." -f $name, @($script:settings.ProtectedApps).Count)
+  Update-UpdateListRows
+  try { Update-ProtectedAppsList } catch { Write-LogDebug 'protected apps settings list' }
+  Update-Status ((Get-UiString 'ProtectedAddedStatus') -f $name)
+})
+
+$updateUnprotectItem.Add_Click({
+  $sel = @($updateListBox.SelectedItems)
+  if ($sel.Count -eq 0 -or -not $sel[0].Tag) { return }
+  $name = [string]$sel[0].Tag.Name
+  $script:settings.ProtectedApps = @(Remove-ProtectedAppPattern -Patterns $script:settings.ProtectedApps -Pattern $name)
+  Save-Settings
+  Write-Log ("Protected apps: removed '{0}' (now {1} entr(y/ies))." -f $name, @($script:settings.ProtectedApps).Count)
+  # Ein Muster mit Platzhalter kann DIESE App weiterhin schuetzen - der exakte Eintrag ist weg, der
+  # Schutz womoeglich nicht. Update-UpdateListRows rechnet das neu, statt es zu behaupten.
+  Update-UpdateListRows
+  try { Update-ProtectedAppsList } catch { Write-LogDebug 'protected apps settings list' }
+  Update-Status ((Get-UiString 'ProtectedRemovedStatus') -f $name)
+})
+
+# Die Paket-Id von Hand setzen - fuer Apps, deren Anzeigename keinen sicheren Treffer hergibt
+# (Keeper Password Manager, Harmony SASE, TeamViewer und alles andere mit Zusatz im Namen). Der
+# Eintrag landet in WingetOverrides und wird von Resolve-WingetIdForApp VOR jeder Suche gelesen,
+# ist also ab dem naechsten Vergleich massgeblich - deshalb laeuft die Suche gleich noch einmal.
+$updateAssignIdItem.Add_Click({
+  $sel = @($updateListBox.SelectedItems)
+  if ($sel.Count -eq 0 -or -not $sel[0].Tag) { return }
+  if (Test-UiBusy) { return }
+  $model = $sel[0].Tag
+  $name = ([string]$model.Name).Trim()
+  if (-not $name) { return }
+  $current = [string]$model.PackageId
+  $entered = Show-TextInputDialog -Title (Get-UiString 'AssignIdTitle') -Prompt ((Get-UiString 'AssignIdPrompt') -f $name) -Value $current
+  # $null heisst abgebrochen, '' heisst "Zuordnung entfernen" - der Unterschied zaehlt hier.
+  if ($null -eq $entered) { return }
+  $value = ([string]$entered).Trim()
+  if ($value -and -not (Test-IsPlausiblePackageId -Value $value)) {
+    [void][System.Windows.Forms.MessageBox]::Show(((Get-UiString 'AssignIdInvalidDialog') -f $value), (Get-UiString 'AssignIdInvalidTitle'),
+      [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+    Write-Log ("WinGet id mapping rejected for '{0}': '{1}' is not shaped like a package id; nothing was saved." -f $name, $value)
+    return
+  }
+  if (-not $script:settings.WingetOverrides) { $script:settings.WingetOverrides = @{} }
+  # Ueber eine KOPIE der Schluessel, sonst bricht das Entfernen die Aufzaehlung ab. Entfernt wird
+  # ohne Ruecksicht auf Gross-/Kleinschreibung, weil Resolve-WingetIdForApp genauso vergleicht -
+  # sonst blieben zwei Eintraege stehen und der aeltere haette gewonnen.
+  foreach ($key in @($script:settings.WingetOverrides.Keys)) {
+    if ([string]::Equals(([string]$key).Trim(), $name, [System.StringComparison]::OrdinalIgnoreCase)) {
+      $script:settings.WingetOverrides.Remove($key)
+    }
+  }
+  if ($value) { $script:settings.WingetOverrides[$name] = $value }
+  Save-Settings
+  if ($value) {
+    Write-Log ("WinGet id mapping saved: '{0}' -> {1} (now {2} mapping(s)). The scan uses it before any name matching." -f $name, $value, @($script:settings.WingetOverrides.Keys).Count)
+    Update-Status ((Get-UiString 'AssignIdSavedStatus') -f $name, $value)
+  } else {
+    Write-Log ("WinGet id mapping removed for '{0}' (now {1} mapping(s))." -f $name, @($script:settings.WingetOverrides.Keys).Count)
+    Update-Status ((Get-UiString 'AssignIdRemovedStatus') -f $name)
+  }
+  # Neu suchen statt die Zeile umzuschreiben: die Id entscheidet ueber die Zielversion, und die
+  # steht erst nach einer Abfrage fest. Eine Zeile mit behaupteter Zielversion waere geraten.
+  $updateSearchButton.PerformClick()
+})
 

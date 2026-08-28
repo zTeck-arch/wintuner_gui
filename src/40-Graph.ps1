@@ -158,7 +158,15 @@ function Group-UpdateCandidates {
   param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Candidates)
   if ($Candidates.Count -eq 0) { return @() }
   $models = @($Candidates | Group-Object -Property {
-    ("{0}|{1}" -f ([string]$_.PackageId).Trim().ToLowerInvariant(), ([string]$_.LatestVersion).Trim().ToLowerInvariant())
+    # Eine gesperrte Zeile ist eine Aussage ueber GENAU DIESE App, kein Update-Ziel. Sie hat oft
+    # weder Paket-Id noch Zielversion - nach dem Schluessel unten fielen alle nicht pruefbaren Apps
+    # zu EINER Zeile zusammen und der Rest waere unsichtbar geblieben, also genau der Fehler, den
+    # diese Zeilen sichtbar machen sollen.
+    if ($_.PSObject.Properties['IsBlocked'] -and $_.IsBlocked) {
+      ("blocked|{0}" -f ([string]$_.GraphId).Trim().ToLowerInvariant())
+    } else {
+      ("{0}|{1}" -f ([string]$_.PackageId).Trim().ToLowerInvariant(), ([string]$_.LatestVersion).Trim().ToLowerInvariant())
+    }
   })
   $result = [System.Collections.Generic.List[object]]::new()
   foreach ($group in $models) {
@@ -252,6 +260,15 @@ function Group-UpdateCandidates {
       # Rebuilding the object without these dropped the flag and the row looked actionable again.
       BlockedReason         = [string]($members | Where-Object { $_.PSObject.Properties['IsBlocked'] -and $_.IsBlocked } | Select-Object -First 1 -ExpandProperty BlockedReason)
       IsBlocked             = [bool]@($members | Where-Object { $_.PSObject.Properties['IsBlocked'] -and $_.IsBlocked }).Count
+      # Aus demselben Grund mitgenommen wie BlockedReason, und aus einem gemessenen: die Zeilen der
+      # Liste werden AUS DIESEM Objekt gebaut, nicht aus den Mitgliedern. Ohne die drei Merker hier
+      # blieb die Warnung "nicht von WinTuner gebaut" unsichtbar, obwohl New-UpdateRow sie kennt -
+      # im Lauf vom 28.08.2026 traf das jede der vier angezeigten Zeilen.
+      IsUnmanaged           = [bool]@($members | Where-Object { $_.PSObject.Properties['IsUnmanaged'] -and $_.IsUnmanaged }).Count
+      PackageIdFromNotes    = [bool]@($members | Where-Object { $_.PSObject.Properties['PackageIdFromNotes'] -and $_.PackageIdFromNotes }).Count
+      # Schutz gilt fuer die ganze Gruppe, sobald ein Vorgaenger geschuetzt ist: der Lauf fasst sie
+      # zu einem Ziel zusammen, also darf die Rueckfrage nicht an einem Mitglied vorbeigehen.
+      IsProtected           = [bool]@($members | Where-Object { $_.PSObject.Properties['IsProtected'] -and $_.IsProtected }).Count
       Checked               = $false
     })
     if ($members.Count -gt 1) {

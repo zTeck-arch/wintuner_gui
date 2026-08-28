@@ -1433,6 +1433,124 @@ function Show-TenantNamesDialog {
   $dlg.Dispose()
 }
 
+# Die Schutzliste dort bearbeiten, wo die Entscheidung faellt: an der Update-Liste.
+#
+# Der Weg ueber die Einstellungsseite gibt es weiterhin und bleibt der Ort fuer die Erklaerung. Was
+# er nicht kann: waehrend man auf die Treffer schaut, ein Muster wie 'Splashtop*' nachtragen und
+# sofort sehen, welche Zeilen es jetzt trifft - dafuer muesste man den Bereich wechseln und wieder
+# zurueck. Beide Wege schreiben in dieselbe Liste und speichern sofort (siehe 85-Rows).
+#
+# -SuggestedPattern kommt aus der angeklickten Zeile: der haeufigste Fall ist "diese App hier", und
+# das Eingabefeld steht dann schon richtig ausgefuellt da.
+function Show-ProtectedAppsDialog {
+  param([string]$SuggestedPattern = '')
+
+  $dlg = New-Object System.Windows.Forms.Form
+  $dlg.Text = Get-UiString 'ProtectedDialogTitle'
+  $dlg.Size = New-Object System.Drawing.Size(660, 500)
+  $dlg.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
+  $dlg.MinimizeBox = $false
+  $dlg.MaximizeBox = $false
+  $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+
+  $hint = New-Object System.Windows.Forms.Label
+  $hint.Tag = 'hint'
+  $hint.Text = Get-UiString 'HintProtectedApps'
+  $hint.Location = New-Object System.Drawing.Point(14, 12)
+  $hint.Size = New-Object System.Drawing.Size(616, 96)
+  $dlg.Controls.Add($hint)
+
+  $list = New-Object System.Windows.Forms.ListBox
+  $list.Location = New-Object System.Drawing.Point(14, 116)
+  $list.Size = New-Object System.Drawing.Size(616, 228)
+  $list.IntegralHeight = $false   # sonst kuerzt WinForms die Hoehe auf ganze Zeilen und der Dialog rechnet daneben
+  $dlg.Controls.Add($list)
+
+  $fillList = {
+    $list.BeginUpdate()
+    try {
+      $list.Items.Clear()
+      foreach ($p in @($script:settings.ProtectedApps)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$p)) { [void]$list.Items.Add([string]$p) }
+      }
+    } finally { $list.EndUpdate() }
+  }
+  & $fillList
+
+  # Gemessen statt gezaehlt: "Ausgewaehlten entfernen" braucht 136 px, die feste Breite gab ihm 134 -
+  # die Probe hat das gefunden, das Auge haette es als "sieht eng aus" durchgehen lassen. Die zwei
+  # Knoepfe stehen rechtsbuendig am Rand, das Eingabefeld bekommt den Rest der Zeile.
+  $rightEdge = 630
+  $addButton = New-Object System.Windows.Forms.Button
+  $addButton.Text = Get-UiString 'ProtectedAddButton'
+  $removeButton = New-Object System.Windows.Forms.Button
+  $removeButton.Tag = 'btn-secondary'
+  $removeButton.Text = Get-UiString 'ProtectedRemoveButton'
+  # +20 fuer die Innenraender des Knopfes; die Mindestbreite haelt kurze Woerter ("Add") ansehnlich.
+  $addWidth = [Math]::Max(120, (Get-ControlTextWidth -Control $addButton) + 20)
+  $removeWidth = [Math]::Max(134, (Get-ControlTextWidth -Control $removeButton) + 20)
+  $removeX = $rightEdge - $removeWidth
+  $addX = $removeX - 10 - $addWidth
+  $inputWidth = $addX - 10 - 14
+
+  $inputBox = New-Object System.Windows.Forms.TextBox
+  $inputBox.PlaceholderText = Get-UiString 'ProtectedInputPlaceholder'
+  $inputBox.Text = ([string]$SuggestedPattern).Trim()
+  $inputHost = New-RoundedInput -Inner $inputBox -X 14 -Y 356 -W $inputWidth -H 30
+  $dlg.Controls.Add($inputHost)
+
+  $addButton.Location = New-Object System.Drawing.Point($addX, 356)
+  $addButton.Width = $addWidth
+  $addButton.Height = 30
+  $addButton.Add_Click({
+    $pattern = $inputBox.Text.Trim()
+    if ([string]::IsNullOrWhiteSpace($pattern)) { return }
+    $script:settings.ProtectedApps = @(Add-ProtectedAppPattern -Patterns $script:settings.ProtectedApps -Pattern $pattern)
+    Save-Settings
+    Write-Log ("Protected apps: added pattern '{0}' from the update view (now {1} entr(y/ies))." -f $pattern, @($script:settings.ProtectedApps).Count)
+    $inputBox.Text = ''
+    & $fillList
+    # Beide anderen Anzeigen derselben Liste nachziehen: die Einstellungskarte und die Zeilenfarben.
+    # Ohne das behauptet die eine Stelle etwas anderes als die andere.
+    try { Update-ProtectedAppsList } catch { Write-LogDebug 'protected apps settings list' }
+    try { Update-UpdateListRows } catch { Write-LogDebug 'update list rows after protect' }
+    Update-Status ((Get-UiString 'ProtectedAddedStatus') -f $pattern)
+  })
+  $dlg.Controls.Add($addButton)
+  $dlg.AcceptButton = $addButton
+
+  $removeButton.Location = New-Object System.Drawing.Point($removeX, 356)
+  $removeButton.Width = $removeWidth
+  $removeButton.Height = 30
+  $removeButton.Add_Click({
+    $sel = [string]$list.SelectedItem
+    if ([string]::IsNullOrWhiteSpace($sel)) { return }
+    $script:settings.ProtectedApps = @(Remove-ProtectedAppPattern -Patterns $script:settings.ProtectedApps -Pattern $sel)
+    Save-Settings
+    Write-Log ("Protected apps: removed pattern '{0}' from the update view (now {1} entr(y/ies))." -f $sel, @($script:settings.ProtectedApps).Count)
+    & $fillList
+    try { Update-ProtectedAppsList } catch { Write-LogDebug 'protected apps settings list' }
+    try { Update-UpdateListRows } catch { Write-LogDebug 'update list rows after unprotect' }
+    Update-Status ((Get-UiString 'ProtectedRemovedStatus') -f $sel)
+  })
+  $dlg.Controls.Add($removeButton)
+
+  $closeButton = New-Object System.Windows.Forms.Button
+  $closeButton.Tag = 'btn-secondary'
+  $closeButton.Text = Get-UiString 'CloseButton'
+  $closeWidth = [Math]::Max(130, (Get-ControlTextWidth -Control $closeButton) + 20)
+  $closeButton.Location = New-Object System.Drawing.Point(($rightEdge - $closeWidth), 404)
+  $closeButton.Width = $closeWidth
+  $closeButton.Height = 30
+  $closeButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
+  $dlg.Controls.Add($closeButton)
+  $dlg.CancelButton = $closeButton
+
+  Set-GuiTheme -control $dlg -theme $script:currentTheme
+  [void]$dlg.ShowDialog()
+  $dlg.Dispose()
+}
+
 # Small one-line text prompt. WinForms has no InputBox, and pulling in the VisualBasic assembly just
 # for this would add a load to startup. Returns $null when cancelled, so "cleared" ('') and
 # "cancelled" stay distinguishable - clearing a name is a real action here.

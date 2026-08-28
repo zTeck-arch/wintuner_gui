@@ -827,6 +827,51 @@ function Get-PackageIdFromNotes {
   return ([string]$m.Groups['packageId'].Value).Trim()
 }
 
+# Der Massstab fuer "das sieht aus wie eine WinGet-Paket-Id": Hersteller.Produkt, mindestens ein
+# Punkt, mindestens ein Buchstabe.
+#
+# Gebraucht von der losen Notizsuche unten UND vom Zuordnungsdialog, damit beide dieselbe Grenze
+# ziehen. Ohne ihn liest "WinTuner 1.4.1" die Versionsnummer als Paket-Id und "WinGet setup.exe"
+# einen Dateinamen - beides erfuellt das Punktmuster und ist trotzdem keine Id. Eine falsche Id
+# waere hier besonders teuer: sie paketiert das falsche Produkt und loest die echte App ab.
+function Test-IsPlausiblePackageId {
+  param([string]$Value)
+  $v = ([string]$Value).Trim()
+  if ([string]::IsNullOrWhiteSpace($v)) { return $false }
+  if ($v -notmatch '^[A-Za-z0-9][A-Za-z0-9\-+_]*(?:\.[A-Za-z0-9][A-Za-z0-9\-+_]*)+$') { return $false }
+  # Eine reine Versionsnummer erfuellt das Muster ebenfalls - sie hat nur keinen Buchstaben.
+  if ($v -notmatch '[A-Za-z]') { return $false }
+  # Ein Dateiname erfuellt es auch. Die Endungen, die in Notizfeldern wirklich vorkommen.
+  if ($v -match '(?i)\.(exe|msi|msix|appx|ps1|cmd|bat|zip|intunewin|log|txt|json|xml)$') { return $false }
+  return $true
+}
+
+# Die LOSE Lesart des Notizfelds: das blosse Wort 'WinGet' oder 'WinTuner' vor einer Paket-Id.
+#
+# Die geklammerte Marke ist der Sonderfall, nicht die Regel. Im Betrieb steht im Notizfeld, was ein
+# Mensch hingeschrieben hat - "installiert mit WinGet: Google.Chrome", "WinTuner - Zoom.ZoomRooms".
+# Diese Notiz traegt dieselbe Auskunft wie die Marke und wurde bisher weggeworfen, obwohl sie die
+# Zuordnung ohne jedes Raten moeglich macht.
+#
+# Bewusst KEINE Marke: eine so gelesene App bleibt unmarkiert (IsUnmanaged) und damit in genau der
+# Liste, in der sie vorher schon stand. Die lose Lesart kann eine Id nur HINZUFUEGEN, niemals eine
+# App aus der Suche entfernen - haette sie die Marke gesetzt, waere die App aus dem markierten
+# Inventar und aus der Unmarkiert-Liste zugleich gefallen und gar nicht mehr geprueft worden.
+#
+# Alle Treffer werden durchgegangen, nicht nur der erste: "WinTuner GUI 0.16.0, WinGet Google.Chrome"
+# hat vor der Id noch eine Erwaehnung ohne Id.
+function Get-LoosePackageIdFromNotes {
+  param([string]$Notes)
+  if ([string]::IsNullOrWhiteSpace($Notes)) { return '' }
+  foreach ($m in [regex]::Matches($Notes, '(?i)\b(?:WinTuner|WingetIntune|WinGet)\b[\s:=|\-]*(?<packageId>[^\s,;)\]]+)')) {
+    # Satzzeichen um die Id herum abraeumen: "(Google.Chrome)." ist im Notizfeld haeufiger als die
+    # nackte Id, und Test-IsPlausiblePackageId wuerde die Klammern zu Recht ablehnen.
+    $candidate = ([string]$m.Groups['packageId'].Value).Trim() -replace '^[(\[{''"]+', '' -replace '[.,;:)\]}''"]+$', ''
+    if (Test-IsPlausiblePackageId -Value $candidate) { return $candidate }
+  }
+  return ''
+}
+
 # Decides whether an app counts as superseded, from the Graph counters.
 #
 # The two counters are easy to mix up, so this is written down rather than remembered. Per the Graph
@@ -923,6 +968,109 @@ function Get-Win32AppInventoryViaGraph {
   }
   Write-Log ("Paged Graph inventory: {0} WinTuner-managed {1} app(s)." -f $result.Count, $(if ($Superseded) { 'superseded' } else { 'active' }))
   return @($result.ToArray())
+}
+
+# Die Gegenstueck-Liste: alle Win32-Apps des Tenants OHNE WinTuner-Marke.
+#
+# Die Marke im Notizfeld sagt, WER die App angelegt hat - nicht, WAS sie enthaelt. Ein handgebautes
+# Paket ist genauso ein win32LobApp aus einer .intunewin, und die Marke wird im Betrieb auch wieder
+# entfernt. Die Update-Suche an sie zu binden hat deshalb Apps ausgeschlossen, die sehr wohl ein
+# WinGet-Gegenstueck haben: im Protokoll vom 28.08.2026 waren es 3 von 13 Win32-Apps.
+#
+# Was hier NICHT passiert: eine Paket-Id raten. Die Objekte kommen mit leerer PackageId zurueck,
+# damit Resolve-WingetIdForApp seine strengen Regeln anwenden MUSS (exakter Name, Score >= 80 mit
+# 15 Punkten Abstand, oder ein WingetOverrides-Eintrag). Eine falsch geratene Id wuerde das falsche
+# Produkt paketieren und die echte App ablösen - bei einem handgebauten Paket, das niemand schnell
+# nachbaut, ist das der Totalverlust.
+#
+# Rein gehalten, damit die Auswahl ohne Tenant pruefbar ist.
+function Select-UnmanagedWin32Apps {
+  param(
+    [AllowNull()][object[]]$RawApps,
+    [switch]$Superseded
+  )
+  $result = [System.Collections.Generic.List[object]]::new()
+  foreach ($app in @($RawApps)) {
+    if (-not $app -or -not $app.id) { continue }
+    $odataType = [string]$app.'@odata.type'
+    if (-not [string]::Equals($odataType.TrimStart([char]'#'), 'microsoft.graph.win32LobApp', [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+    # Mit Marke gehoert die App dem Modul. Sie kommt ueber das regulaere Inventar - MIT belastbarer
+    # PackageId - und wuerde hier nur ein zweites Mal auftauchen.
+    if (Get-PackageIdFromNotes -Notes ([string]$app.notes)) { continue }
+    $isSuperseded = Test-IsSupersededApp -SupersededAppCount $app.supersededAppCount
+    if ($isSuperseded -ne [bool]$Superseded) { continue }
+    # Steht im Notizfeld eine Paket-Id ohne die geklammerte Marke ("WinGet: Google.Chrome"), wird sie
+    # genommen. Sie ist AUFGESCHRIEBEN und nicht geraten und deshalb belastbarer als jeder
+    # Namensabgleich; die App bleibt trotzdem als unmarkiert gekennzeichnet.
+    $loosePackageId = Get-LoosePackageIdFromNotes -Notes ([string]$app.notes)
+    $result.Add([pscustomobject]@{
+      Name           = [string]$app.displayName
+      CurrentVersion = [string]$app.displayVersion
+      GraphId        = [string]$app.id
+      PackageId      = $loosePackageId
+      IsAssigned     = [bool]$app.isAssigned
+      # Bleibt am Objekt haengen, damit die Zeile in der Update-Liste sagen kann, woher sie kommt.
+      IsUnmanaged    = $true
+      # Getrennt vom Namensabgleich gefuehrt, weil die Zeile beides unterschiedlich benennen muss:
+      # "im Notizfeld gefunden" ist eine Auskunft, "ueber den Namen zugeordnet" eine Vermutung.
+      PackageIdFromNotes = [bool]$loosePackageId
+    })
+  }
+  return @($result.ToArray())
+}
+
+function Get-UnmanagedWin32Apps {
+  param([switch]$Superseded)
+  $apps = @(Select-UnmanagedWin32Apps -RawApps (Get-RawWin32AppsFromGraph) -Superseded:$Superseded)
+  $fromNotes = @($apps | Where-Object { $_.PSObject.Properties['PackageIdFromNotes'] -and $_.PackageIdFromNotes })
+  Write-Log ("Paged Graph inventory: {0} {1} Win32 app(s) WITHOUT a WinTuner marker; {2} of them carry a WinGet id in the notes text anyway." -f `
+    $apps.Count, $(if ($Superseded) { 'superseded' } else { 'active' }), $fromNotes.Count)
+  foreach ($a in $fromNotes) {
+    Write-Log ("  WinGet id read from the notes text of '{0}': {1} (no bracketed marker, so the app stays flagged as not WinTuner-built)." -f [string]$a.Name, [string]$a.PackageId)
+  }
+  return $apps
+}
+
+# Haengt die unmarkierten Apps an das Modul-Inventar. Bei gleicher GraphId gewinnt das Modul-Objekt:
+# es traegt die PackageId aus dem Notizfeld, das Graph-Objekt nur einen Anzeigenamen.
+# Rein, damit die Zusammenfuehrung ohne Tenant pruefbar ist.
+function Merge-UnmanagedInventory {
+  param(
+    [AllowNull()][object[]]$ManagedApps,
+    [AllowNull()][object[]]$UnmanagedApps
+  )
+  $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  $result = [System.Collections.Generic.List[object]]::new()
+  foreach ($a in @($ManagedApps)) {
+    if (-not $a -or -not $a.GraphId) { continue }
+    if ($seen.Add([string]$a.GraphId)) { $result.Add($a) }
+  }
+  foreach ($a in @($UnmanagedApps)) {
+    if (-not $a -or -not $a.GraphId) { continue }
+    if ($seen.Add([string]$a.GraphId)) { $result.Add($a) }
+  }
+  return @($result.ToArray())
+}
+
+# Das aktive Inventar, ueber das die Update-Suche UND die Kachel rechnen. Eine Stelle, damit die
+# beiden nicht wieder verschiedene Fragen beantworten - genau dafuer gibt es Measure-AvailableUpdates.
+function Get-ScanInventory {
+  param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$ManagedApps)
+  if (-not $script:settings.ScanUnmanagedWin32Apps) { return @($ManagedApps) }
+  $unmanaged = @()
+  try {
+    $unmanaged = @(Get-UnmanagedWin32Apps)
+  } catch {
+    # Kein Abbruch: die markierten Apps sind vollstaendig gelesen, und eine kuerzere Suche ist besser
+    # als gar keine. Gesagt wird es trotzdem, sonst sieht niemand die Luecke.
+    Write-Log ("Update scan: the Win32 apps without a WinTuner marker could not be read ({0}); continuing with the marked apps only." -f $_.Exception.Message)
+    return @($ManagedApps)
+  }
+  if ($unmanaged.Count -eq 0) { return @($ManagedApps) }
+  $merged = @(Merge-UnmanagedInventory -ManagedApps $ManagedApps -UnmanagedApps $unmanaged)
+  Write-Log ("Update scan inventory: {0} WinTuner-marked + {1} unmarked Win32 app(s) = {2}. An unmarked app carries no package id in its notes, so a WinGet id is only accepted from an exact name match, a high-confidence match, or a WingetOverrides entry." -f `
+    @($ManagedApps).Count, $unmanaged.Count, $merged.Count)
+  return $merged
 }
 
 # The WinTuner module hands back a live collection it is still filling and enumerates it internally

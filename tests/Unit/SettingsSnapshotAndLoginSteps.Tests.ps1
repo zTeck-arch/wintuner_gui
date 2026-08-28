@@ -121,11 +121,23 @@ Describe 'Weniger Schritte beim Anmelden' {
     $global:TestGraphPages | Should -Be 2
   }
 
-  It 'fragt ohne verwaltete Apps nicht nach gekennzeichneten Updates' {
+  It 'fragt ohne Apps im Umfang nicht nach gekennzeichneten Updates' {
     # Der dritte Schritt beim Anmelden: eine Abfrage, deren Antwort ohne Apps zwingend 0 ist.
+    # Seit die Suche auch unmarkierte Win32-Apps prueft, entscheidet nicht mehr $all darueber,
+    # sondern $scanScope - $all waere hier zu klein und wuerde die Abfrage auslassen, obwohl es
+    # sehr wohl Apps gibt, die ein Update haben koennen.
     $fn = Get-SourceFunctionText -Part '80-Views.ps1' -Name 'Refresh-Dashboard'
-    $fn | Should -Match 'if \(\$all\.Count -eq 0\) \{'
+    $fn | Should -Match 'if \(\$scanScope\.Count -eq 0\) \{'
     $fn | Should -Match 'skipping the update query'
+  }
+
+  It 'zaehlt die Kachel ueber denselben Umfang, den die Update-Suche prueft' {
+    # Kachel und Suche haben schon einmal zwei verschiedene Fragen mit demselben Wort beantwortet -
+    # dafuer gibt es Measure-AvailableUpdates ueberhaupt. Wird hier wieder $all uebergeben, zeigt die
+    # Kachel weniger als die Suche findet, und das liest sich wie ein Fehler in der Suche.
+    $fn = Get-SourceFunctionText -Part '80-Views.ps1' -Name 'Refresh-Dashboard'
+    $fn | Should -Match '\$scanScope = if \(\$script:settings\.DashboardUpdatesFullScan\) \{ @\(Get-ScanInventory -ManagedApps \$all\) \}'
+    $fn | Should -Match 'Measure-AvailableUpdates -Apps \$scanScope'
   }
 
   It 'erklaert ein leeres Inventar einmal ausfuehrlich, danach in einer Zeile' {

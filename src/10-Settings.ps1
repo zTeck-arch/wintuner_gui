@@ -105,7 +105,12 @@ $script:settings = @{
   ThemeName = "Light"
   Language = "en"
   RecentLogins = @()   # most-recent-first list of previously used UPNs, for quick re-selection
-  MaxRecentLogins = 8
+  # 15 statt 8: ein MSP betreut mehr Kunden als das, und der neunte fiel bisher lautlos hinten
+  # heraus - im Verlauf sah es dann aus, als haette man sich dort nie angemeldet. Die Liste ist
+  # eine reine Bequemlichkeit (Adresse vorschlagen), sie haelt keine Sitzung offen; laenger zu sein
+  # kostet nichts ausser Menuehoehe. Wer mehr oder weniger will, setzt MaxRecentLogins in der
+  # settings.json.
+  MaxRecentLogins = 15
   # Entra group favorites, keyed by TENANT DOMAIN: @{ 'kunde.de' = @(@{Id=..; Name=..}) }.
   # Keyed per tenant on purpose - this is an MSP tool, and offering customer A's groups while
   # connected to customer B would invite assigning an app to the wrong organisation entirely.
@@ -145,6 +150,22 @@ $script:settings = @{
   # UpdateAvailable flag. OFF by default because it costs one package lookup per app - the same work
   # the update scan does - and the dashboard is what you see first after signing in.
   DashboardUpdatesFullScan = $false
+  # Update-Suche auch ueber Win32-Apps OHNE '[WinTuner|'-Marke laufen lassen.
+  #
+  # AN, weil die Marke die falsche Frage beantwortet: sie sagt, wer die App angelegt hat, nicht ob
+  # es ein WinGet-Gegenstueck gibt. Handgebaute Pakete sind ebenfalls .intunewin-Apps, und die Marke
+  # wird im Betrieb auch wieder entfernt - beides liess Apps aus der Suche verschwinden, die sehr
+  # wohl aktualisierbar sind. Die Sicherheit liegt nicht an dieser Einstellung, sondern an
+  # Resolve-WingetIdForApp: ohne exakten Namen, hochsicheren Treffer oder Override wird KEINE
+  # Paket-Id angenommen, und ohne Paket-Id passiert an der App nichts.
+  ScanUnmanagedWin32Apps = $true
+  # Apps, die nie versehentlich abgelöst werden sollen: selbst paketierte Kundensoftware wie
+  # Splashtop, TeamViewer oder ein Passwortmanager. Namen oder Muster mit '*'.
+  #
+  # GLOBAL, nicht je Tenant - anders als die Gruppen-Favoriten. Der Unterschied ist Absicht: eine
+  # Liste je Kunde fängt bei jeder NEUEN Umgebung leer an, und genau dort passiert der Unfall.
+  # Produktnamen sind ausserdem keine Kundendaten, es gibt also nichts zu trennen.
+  ProtectedApps = @()
 }
 
 # Set when Load-Settings had to resolve a conflict, so the change can be logged and explained once
@@ -198,10 +219,10 @@ function Get-SettingsSnapshotLines {
     $Prefix, (& $val 'ThemeName'), (& $val 'Language'), (& $val 'WindowWidth' 0), (& $val 'WindowHeight' 0),
     (& $val 'WindowMaximized' $false), (& $val 'LogExpanded' $false)))
   # Die Zeile, die die meisten Rueckfragen beantwortet: was passiert von selbst?
-  $lines.Add(("{0} | onLogin: updateSearch={1} optionalScopes={2} | onStartup: selfUpdateCheck={3} favouritesRun={4} | dashboardFullScan={5}" -f `
+  $lines.Add(("{0} | onLogin: updateSearch={1} optionalScopes={2} | onStartup: selfUpdateCheck={3} favouritesRun={4} | dashboardFullScan={5} scanUnmarkedWin32={6}" -f `
     $Prefix, (& $val 'AutoCheckUpdates' $false), (& $val 'RequestOptionalScopesOnLogin' $false),
     (& $val 'CheckAppUpdateOnStartup' $false), (& $val 'AutoUpdateFavoritesOnStartup' $false),
-    (& $val 'DashboardUpdatesFullScan' $false)))
+    (& $val 'DashboardUpdatesFullScan' $false), (& $val 'ScanUnmanagedWin32Apps' $true)))
   $lines.Add(("{0} | update run: moveAssignments={1} removePredecessor={2} versionCleanup={3} keepNewest={4} saveScopeBeforeRemoval={5}" -f `
     $Prefix, (& $val 'MoveAssignmentsOnUpdate' $false), (& $val 'AutoRemoveSuperseded' $false),
     (& $val 'AutoVersionCleanup' $false), (& $val 'KeepVersionCount' 0), (& $val 'SaveScopeBeforeRemoval' $false)))
@@ -209,9 +230,9 @@ function Get-SettingsSnapshotLines {
     $Prefix, (& $val 'SuppressChangeConfirmations' $false), (& $val 'ChangeConfirmationRiskAcceptedVersion' ''),
     (& $val 'ProductionWarningAcceptedVersion' '')))
   # Nur Anzahlen: Namen, Adressen und Gruppen-IDs sind Kundendaten.
-  $lines.Add(("{0} | counts only (customer data is deliberately not logged): favourites={1} recentLogins={2} groupFavouriteTenants={3} tenantDisplayNames={4} wingetOverrides={5}" -f `
+  $lines.Add(("{0} | counts only (customer data is deliberately not logged): favourites={1} recentLogins={2} groupFavouriteTenants={3} tenantDisplayNames={4} wingetOverrides={5} protectedApps={6}" -f `
     $Prefix, (& $count 'WingetFavorites'), (& $count 'RecentLogins'), (& $count 'GroupFavorites'),
-    (& $count 'TenantDisplayNames'), (& $count 'WingetOverrides')))
+    (& $count 'TenantDisplayNames'), (& $count 'WingetOverrides'), (& $count 'ProtectedApps')))
   return @($lines.ToArray())
 }
 
@@ -307,76 +328,71 @@ function Get-SettingValue {
   }
 }
 
-# --- Einmal-Übernahme der Daten aus einer Vorabfassung -------------------------------------------
+# --- Geschützte Apps ----------------------------------------------------------------------------
 #
-# Zwischen 0.15.8 und 0.16.0 hieß die Anwendung eine Zeit lang "Verteilwerk" und legte ihre Daten
-# unter %APPDATA%\Verteilwerk bzw. %LOCALAPPDATA%\Verteilwerk ab. Diese Umbenennung ist
-# zurückgenommen - der Name ist wieder "WinTuner GUI", die Ordner heißen wieder WinTunerGUI.
-# Veröffentlicht wurde die Zwischenfassung nie; wer sie aber aus dem Quellbaum gebaut und benutzt
-# hat, hätte seine Einstellungen sonst scheinbar verloren. Deshalb bleibt die Übernahme stehen, nur
-# in die andere Richtung.
+# Selbst paketierte Kundensoftware (Splashtop, TeamViewer, Passwortmanager) darf nie versehentlich
+# abgelöst werden - aber sichtbar bleiben muss sie, sonst kann niemand die Umgebung pflegen.
+# Deshalb kein Filter, sondern eine Markierung: die Zeile steht in der Liste, ist anhakbar, und der
+# Lauf fragt vorher ausdrücklich nach (und zwar auch dann, wenn Rückfragen abgeschaltet sind).
 #
-# KOPIEREN, nicht verschieben. Der Rückweg ist mehr wert als der aufgeräumte Ordner; der Preis ist
-# ein verwaister Ordner von wenigen Kilobyte.
-$script:legacyDataFolderName = 'Verteilwerk'
+# Diese drei Funktionen sind rein und stehen hier oben, weil Load-Settings am Ende dieser Datei
+# schon läuft, wenn die späteren Teile noch gar nicht geladen sind.
 
-# Kopiert eine einzelne Datei aus dem alten in den neuen Ordner, wenn es dort noch keine gibt.
-# Gibt den Quellpfad zurück, wenn kopiert wurde - sonst $null, damit der Aufrufer protokollieren
-# kann, was tatsächlich passiert ist. Wirft nie: das läuft vor Write-Log und darf den Start nicht
-# verhindern.
-function Copy-LegacyDataFile {
+# Ein Muster OHNE '*' oder '?' trifft den Namen exakt (Gross-/Kleinschreibung egal), eines MIT
+# Platzhalter wird als Muster ausgewertet. Absicht: 'Zoom Rooms' schuetzt genau diese App und nicht
+# auch 'Zoom Workplace'; wer breiter schuetzen will, schreibt 'Zoom*' und sieht das dem Eintrag an.
+function Test-IsProtectedApp {
   param(
-    [Parameter(Mandatory)][string]$CurrentPath,
-    # BEWUSST nicht Mandatory: der Aufrufer übergibt das Ergebnis von Get-LegacyDataPath, und das
-    # ist $null, wenn der neue Pfad den Anwendungsordner nicht enthält. Mit [Parameter(Mandatory)]
-    # hätte genau dieser Fall am Aufruf geworfen - beim Start, vor Write-Log, also als Anwendung,
-    # die nicht startet. Die Prüfung unten fängt es ab und tut schlicht nichts.
-    [string]$LegacyPath = ''
+    [string]$Name,
+    [AllowNull()][object[]]$Patterns
   )
-  try {
-    if ([string]::IsNullOrWhiteSpace($LegacyPath)) { return $null }
-    # Eine schon vorhandene neue Datei ist immer die Wahrheit - eine zweite Übernahme würde sie
-    # durch einen älteren Stand ersetzen.
-    if ([IO.File]::Exists($CurrentPath)) { return $null }
-    if (-not [IO.File]::Exists($LegacyPath)) { return $null }
-    if (([IO.FileInfo]::new($LegacyPath)).Length -eq 0) { return $null }
-    $dir = Split-Path -Parent $CurrentPath
-    if ($dir -and -not (Test-Path -LiteralPath $dir -PathType Container)) {
-      [void][System.IO.Directory]::CreateDirectory($dir)
+  if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+  $n = ([string]$Name).Trim()
+  foreach ($raw in @($Patterns)) {
+    $pattern = ([string]$raw).Trim()
+    if ([string]::IsNullOrWhiteSpace($pattern)) { continue }
+    if ($pattern.IndexOfAny([char[]]@('*', '?')) -ge 0) {
+      # -like ist in PowerShell ohnehin ohne Gross-/Kleinschreibung.
+      if ($n -like $pattern) { return $true }
+    } elseif ([string]::Equals($n, $pattern, [System.StringComparison]::OrdinalIgnoreCase)) {
+      return $true
     }
-    [IO.File]::Copy($LegacyPath, $CurrentPath)
-    return $LegacyPath
-  } catch {
-    return $null
   }
+  return $false
 }
 
-# Baut den Pfad derselben Datei im Ordner der Vorabfassung. Ersetzt nur das letzte Vorkommen des
-# Ordnernamens, damit ein Benutzerprofil, das selbst "WinTunerGUI" heißt, nicht mitverbogen wird.
-$script:currentDataFolderName = 'WinTunerGUI'
-function Get-LegacyDataPath {
-  param([Parameter(Mandatory)][string]$CurrentPath)
-  try {
-    $idx = $CurrentPath.LastIndexOf($script:currentDataFolderName)
-    if ($idx -lt 0) { return $null }
-    return $CurrentPath.Substring(0, $idx) + $script:legacyDataFolderName + $CurrentPath.Substring($idx + $script:currentDataFolderName.Length)
-  } catch { return $null }
+# Bringt eine Liste in die Form, in der sie gespeichert wird: getrimmt, ohne Leereintraege, ohne
+# Doppelte (ohne Gross-/Kleinschreibung), alphabetisch. Eine Stelle fuer die Oberflaeche UND fuer
+# eine von Hand bearbeitete settings.json - sonst haengt die Ordnung davon ab, wer zuletzt geschrieben hat.
+function Set-ProtectedAppPatterns {
+  param([AllowNull()][object[]]$Patterns)
+  $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  $out = [System.Collections.Generic.List[string]]::new()
+  foreach ($raw in @($Patterns)) {
+    $p = ([string]$raw).Trim()
+    if ([string]::IsNullOrWhiteSpace($p)) { continue }
+    if ($seen.Add($p)) { $out.Add($p) }
+  }
+  return @($out.ToArray() | Sort-Object)
 }
 
-# Was übernommen wird und was nicht:
-#   settings.json        - ja. Enthält Paketordner, gemerkte Anmeldungen, Gruppenfavoriten,
-#                          Tenant-Namen und die Aufräum-Optionen. Der eigentliche Wert.
-#   activity-history.json- ja. Speist den Leistungsnachweis; ein verlorener Nachweis ist nicht
-#                          rekonstruierbar. Wird in 50-UpdateEngine mit übernommen.
-#   Protokolle           - nein. Laufen ohnehin nach zwei Wochen aus, und der alte Ordner bleibt
-#                          lesbar. Sie zu kopieren würde Kundendaten verdoppeln, statt sie zu
-#                          bewegen - genau das, was die Löschfrist verhindern soll.
-#   Pakete               - nein. Der Pfad steht IN settings.json und wandert damit mit; gebaute
-#                          Pakete bleiben liegen, wo sie sind. Gigabytes zu verschieben, um einen
-#                          Ordnernamen zu ändern, wäre das falsche Geschäft.
-#   version-cache.json   - nein. Ein Cache. Die nächste Suche baut ihn neu auf.
-$script:legacySettingsCopied = $null
-$script:legacySettingsCopied = Copy-LegacyDataFile -CurrentPath $script:settingsPath -LegacyPath (Get-LegacyDataPath -CurrentPath $script:settingsPath)
+# Hinzufuegen/Entfernen als reine Rechnung: Liste rein, neue Liste raus. Die Oberflaeche schreibt das
+# Ergebnis in die Einstellungen und speichert - so gibt es keine zweite Fassung dieser Logik.
+function Add-ProtectedAppPattern {
+  param([AllowNull()][object[]]$Patterns, [string]$Pattern)
+  if ([string]::IsNullOrWhiteSpace($Pattern)) { return @(Set-ProtectedAppPatterns -Patterns $Patterns) }
+  return @(Set-ProtectedAppPatterns -Patterns (@($Patterns) + @([string]$Pattern)))
+}
+
+function Remove-ProtectedAppPattern {
+  param([AllowNull()][object[]]$Patterns, [string]$Pattern)
+  $target = ([string]$Pattern).Trim()
+  if ([string]::IsNullOrWhiteSpace($target)) { return @(Set-ProtectedAppPatterns -Patterns $Patterns) }
+  $kept = @($Patterns | Where-Object {
+    -not [string]::Equals(([string]$_).Trim(), $target, [System.StringComparison]::OrdinalIgnoreCase)
+  })
+  return @(Set-ProtectedAppPatterns -Patterns $kept)
+}
 
 function Load-Settings {
   try {
@@ -406,7 +422,7 @@ function Load-Settings {
         $script:settings.ThemeName               = Get-SettingValue -Source $o -Name 'ThemeName'               -Type String -Default 'Light'
         $script:settings.Language                = Get-SettingValue -Source $o -Name 'Language'                -Type String -Default 'en'
         $script:settings.RecentLogins            = Get-SettingValue -Source $o -Name 'RecentLogins'            -Type StringArray -Default @()
-        $script:settings.MaxRecentLogins         = Get-SettingValue -Source $o -Name 'MaxRecentLogins'         -Type Int  -Default 8 -Minimum 1
+        $script:settings.MaxRecentLogins         = Get-SettingValue -Source $o -Name 'MaxRecentLogins'         -Type Int  -Default 15 -Minimum 1
 
         # Restore the last user-selected window state. Releases before 0.13.2 saved these
         # values but never loaded them. Migrate only the exact former built-in default;
@@ -443,6 +459,12 @@ function Load-Settings {
         }
         $script:settings.SaveScopeBeforeRemoval = Get-SettingValue -Source $o -Name 'SaveScopeBeforeRemoval' -Type Bool -Default $true
         $script:settings.DashboardUpdatesFullScan = Get-SettingValue -Source $o -Name 'DashboardUpdatesFullScan' -Type Bool -Default $false
+        # Standard $true: eine settings.json aus einer aelteren Fassung kennt den Schluessel nicht,
+        # und "nicht gespeichert" heisst hier "noch nie entschieden", nicht "abgewaehlt".
+        $script:settings.ScanUnmanagedWin32Apps = Get-SettingValue -Source $o -Name 'ScanUnmanagedWin32Apps' -Type Bool -Default $true
+        # Ueber Set-ProtectedAppPatterns, damit eine von Hand bearbeitete Datei denselben
+        # Normalisierungs- und Doppelten-Filter durchlaeuft wie die Oberflaeche.
+        $script:settings.ProtectedApps = @(Set-ProtectedAppPatterns -Patterns (Get-SettingValue -Source $o -Name 'ProtectedApps' -Type StringArray -Default @()))
         $script:settings.SuppressChangeConfirmations = Get-SettingValue -Source $o -Name 'SuppressChangeConfirmations' -Type Bool -Default $false
         $script:settings.ChangeConfirmationRiskAcceptedVersion = Get-SettingValue -Source $o -Name 'ChangeConfirmationRiskAcceptedVersion' -Type String -Default ''
         # Friendly tenant names: a plain UPN -> string map. Anything that is not a usable pair is
@@ -539,15 +561,38 @@ function Save-Settings {
 function Add-RecentLogin {
   param([string]$Upn)
   if ([string]::IsNullOrWhiteSpace($Upn)) { return }
-  $max = if ($script:settings.MaxRecentLogins -gt 0) { $script:settings.MaxRecentLogins } else { 8 }
-  $list = [System.Collections.Generic.List[string]]::new()
-  $list.Add($Upn)
-  foreach ($u in @($script:settings.RecentLogins)) {
-    if ($u -and ($u -ne $Upn) -and (-not $list.Contains($u))) { $list.Add($u) }
-  }
-  while ($list.Count -gt $max) { $list.RemoveAt($list.Count - 1) }
-  $script:settings.RecentLogins = $list.ToArray()
+  $max = if ([int]$script:settings.MaxRecentLogins -gt 0) { [int]$script:settings.MaxRecentLogins } else { 15 }
+  $script:settings.RecentLogins = @(Add-RecentLoginEntry -Entries $script:settings.RecentLogins -Upn $Upn -Max $max)
   Save-Settings
+}
+
+# Der reine Kern davon: Liste rein, Liste raus. Getrennt, damit die Reihenfolge und die Grenze ohne
+# Anmeldung pruefbar sind.
+#
+# Verglichen wird OHNE Ruecksicht auf Gross-/Kleinschreibung: eine Adresse ist bei Entra ID
+# unabhaengig davon dieselbe, und "Adm@Kunde.de" neben "adm@kunde.de" hat vorher zwei Plaetze im
+# Verlauf belegt - bei acht Plaetzen fiel dafuer ein echter Kunde hinten heraus. Die zuletzt
+# benutzte Schreibweise gewinnt, weil sie die ist, die der Benutzer gerade getippt hat.
+function Add-RecentLoginEntry {
+  param(
+    [AllowNull()][string[]]$Entries,
+    [Parameter(Mandatory)][string]$Upn,
+    [int]$Max = 15
+  )
+  if ($Max -lt 1) { $Max = 15 }
+  $trimmed = ([string]$Upn).Trim()
+  if ([string]::IsNullOrWhiteSpace($trimmed)) { return @($Entries) }
+  $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  $list = [System.Collections.Generic.List[string]]::new()
+  $list.Add($trimmed)
+  [void]$seen.Add($trimmed)
+  foreach ($u in @($Entries)) {
+    $candidate = ([string]$u).Trim()
+    if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+    if ($seen.Add($candidate)) { $list.Add($candidate) }
+  }
+  while ($list.Count -gt $Max) { $list.RemoveAt($list.Count - 1) }
+  return @($list.ToArray())
 }
 
 # --- Entra group favorites, scoped to the signed-in tenant ---------------------------------------

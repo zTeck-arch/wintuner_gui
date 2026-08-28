@@ -652,6 +652,38 @@ function Confirm-ChangeAction {
   return ($answer -eq [System.Windows.Forms.DialogResult]::Yes)
 }
 
+# Die eine Rueckfrage, die "Rueckfragen abschalten" NICHT abschalten darf.
+#
+# Geschuetzte Apps sind selbst paketierte Kundensoftware. Ein Update loest sie ab und zieht die
+# Zuweisungen mit - bei einem Paket, das niemand schnell nachbaut, ist ein Fehlgriff der
+# Totalverlust. Wer "Bestaetigungen unterdruecken" gesetzt hat, hat das fuer den Alltag getan
+# (zwei Chrome-Updates), nicht fuer diesen Fall; deshalb -AlwaysAsk.
+#
+# Gibt $true zurueck, wenn KEINE geschuetzte App dabei ist - der Normalfall kostet also keinen Klick.
+function Confirm-ProtectedAppsInRun {
+  param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Apps)
+  $protected = @($Apps | Where-Object {
+    $_ -and $_.PSObject.Properties['IsProtected'] -and $_.IsProtected
+  })
+  if ($protected.Count -eq 0) { return $true }
+  $preview = (@($protected | Select-Object -First 15 | ForEach-Object {
+    "- {0}: {1} -> {2}" -f [string]$_.Name, [string]$_.CurrentVersion, [string]$_.LatestVersion
+  }) -join "`r`n")
+  if ($protected.Count -gt 15) { $preview += "`r`n- ..." }
+  # Namentlich ins Protokoll: "3 geschuetzte Apps" beantwortet im Nachhinein nicht die Frage, WELCHE
+  # freigegeben wurden - und genau die wird nach einem Fehlgriff gestellt.
+  Write-Log ("Update run contains {0} protected app(s), asking for an explicit confirmation regardless of the suppression setting: {1}" -f `
+    $protected.Count, ((@($protected | ForEach-Object { [string]$_.Name })) -join ', '))
+  $ok = Confirm-ChangeAction -AlwaysAsk `
+    -Text ((Get-UiString 'ProtectedRunConfirmDialog') -f $protected.Count, $preview) `
+    -Title (Get-UiString 'ProtectedRunConfirmTitle') `
+    -LogContext ("update run containing {0} protected app(s)" -f $protected.Count)
+  if (-not $ok) {
+    Write-Log 'Update run canceled at the protected-apps confirmation; nothing was built or uploaded.'
+  }
+  return $ok
+}
+
 # Laeuft dieser Start unbeaufsichtigt, also als Prueflauf ohne Benutzer?
 #
 # Beide Kennungen an EINER Stelle, und das ist keine Kosmetik: die erste Fassung fragte nur
