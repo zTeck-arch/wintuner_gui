@@ -1097,8 +1097,17 @@ $updateSelectedButton.Add_Click({
 
     # VOR der allgemeinen Rueckfrage: die hier ist die ernstere, und sie ist die einzige, die auch
     # bei abgeschalteten Bestaetigungen kommt. Ohne geschuetzte App kostet sie keinen Klick.
-    if (-not (Confirm-ProtectedAppsInRun -Apps @($checkedApps))) {
-        Update-Status (Get-UiString 'MassUpdateCanceledStatus'); return
+    # Drei moegliche Antworten, nicht zwei: die geschuetzten koennen AUSGELASSEN werden, dann laeuft
+    # der Rest. Weitergerechnet wird mit der Liste AUS DEM ERGEBNIS - wer hier weiter $checkedApps
+    # nimmt, baut genau die App, die der Benutzer gerade abgewaehlt hat.
+    $protectedChoice = Confirm-ProtectedAppsInRun -Apps @($checkedApps)
+    if (-not $protectedChoice.Proceed) {
+        Update-Status (Get-UiString $(if ($protectedChoice.Reason -eq 'empty') { 'ProtectedRunNothingLeftStatus' } else { 'MassUpdateCanceledStatus' }))
+        return
+    }
+    $checkedApps = @($protectedChoice.Apps)
+    if (@($protectedChoice.Skipped).Count -gt 0) {
+        Update-Status ((Get-UiString 'ProtectedRunSkippedStatus') -f @($protectedChoice.Skipped).Count, $checkedApps.Count)
     }
 
     # Confirm before touching the tenant – the selection can be larger than expected (filters,
@@ -1162,8 +1171,14 @@ $updateAllButton.Add_Click({
 
     # Derselbe Riegel wie im Lauf ueber die markierten Zeilen: "Alle aktualisieren" ist genau der
     # Weg, auf dem eine geschuetzte App ungesehen mitlaeuft.
-    if (-not (Confirm-ProtectedAppsInRun -Apps @($updatedApps))) {
-        Update-Status (Get-UiString 'MassUpdateCanceledStatus'); return
+    $protectedChoice = Confirm-ProtectedAppsInRun -Apps @($updatedApps)
+    if (-not $protectedChoice.Proceed) {
+        Update-Status (Get-UiString $(if ($protectedChoice.Reason -eq 'empty') { 'ProtectedRunNothingLeftStatus' } else { 'MassUpdateCanceledStatus' }))
+        return
+    }
+    $updatedApps = @($protectedChoice.Apps)
+    if (@($protectedChoice.Skipped).Count -gt 0) {
+        Update-Status ((Get-UiString 'ProtectedRunSkippedStatus') -f @($protectedChoice.Skipped).Count, $updatedApps.Count)
     }
 
     $rootPackageFolder = try { [System.IO.Path]::GetFullPath($pathBox.Text.Trim()) } catch {

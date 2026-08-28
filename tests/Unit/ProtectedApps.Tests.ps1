@@ -1,10 +1,11 @@
-BeforeAll {
+﻿BeforeAll {
   . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
   Initialize-TestAmbient
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '10-Settings.ps1' -Name @(
     'Test-IsProtectedApp', 'Set-ProtectedAppPatterns',
     'Add-ProtectedAppPattern', 'Remove-ProtectedAppPattern'))))
-  . ([scriptblock]::Create((Get-SourceFunctionText -Part '70-Runtime.ps1' -Name 'Confirm-ProtectedAppsInRun')))
+  . ([scriptblock]::Create((Get-SourceFunctionText -Part '70-Runtime.ps1' -Name @(
+    'Confirm-ProtectedAppsInRun', 'Split-ProtectedApps', 'Resolve-ProtectedRunChoice'))))
 
   function New-Candidate {
     param([string]$Name, [bool]$Protected = $false, [string]$From = '1.0', [string]$To = '2.0')
@@ -112,14 +113,16 @@ Describe 'Confirm-ProtectedAppsInRun' {
   BeforeEach {
     $global:TestLog.Clear()
     $global:ConfirmCalls = 0
-    $global:LastAlwaysAsk = $false
     $global:LastConfirmText = ''
-    $global:ConfirmAnswer = $true
-    Set-Item -Path function:global:Confirm-ChangeAction -Value {
-      param([string]$Text, [string]$Title, [string]$LogContext, [switch]$AlwaysAsk)
+    # Standardantwort 'all': das ist der Weg, der dem frueheren "Ja" entspricht.
+    $global:ConfirmAnswer = 'all'
+    # Gemockt wird der EIGENE Dialog, nicht mehr Confirm-ChangeAction. Dass diese Frage nicht
+    # unterdrueckbar ist, ergibt sich seit dem Umbau daraus, dass sie gar nicht mehr durch
+    # Confirm-ChangeAction laeuft - geprueft wird das eine Ebene tiefer, in ProtectedRunChoice.Tests.
+    Set-Item -Path function:global:Show-ProtectedRunDialog -Value {
+      param([int]$Count, [string]$Preview)
       $global:ConfirmCalls++
-      $global:LastAlwaysAsk = [bool]$AlwaysAsk
-      $global:LastConfirmText = [string]$Text
+      $global:LastConfirmText = ((Get-UiString 'ProtectedRunConfirmDialog') -f $Count, $Preview)
       return $global:ConfirmAnswer
     }
     # Der Dialogtext MUSS die beiden Platzhalter behalten, sonst prueft der Test unten nur, dass ein
@@ -132,24 +135,26 @@ Describe 'Confirm-ProtectedAppsInRun' {
   }
 
   AfterAll {
-    Remove-Item -Path function:global:Confirm-ChangeAction -ErrorAction SilentlyContinue
+    Remove-Item -Path function:global:Show-ProtectedRunDialog -ErrorAction SilentlyContinue
     Remove-Item -Path function:global:Get-UiString -ErrorAction SilentlyContinue
   }
 
   It 'fragt gar nicht, wenn keine geschuetzte App dabei ist' {
     # Der Normalfall darf keinen zusaetzlichen Klick kosten, sonst wird die Rueckfrage zur Gewohnheit
     # und damit wirkungslos.
-    Confirm-ProtectedAppsInRun -Apps @((New-Candidate -Name 'Google Chrome')) | Should -BeTrue
+    $r = Confirm-ProtectedAppsInRun -Apps @((New-Candidate -Name 'Google Chrome'))
+    $r.Proceed | Should -BeTrue
+    @($r.Apps).Count | Should -Be 1
     $global:ConfirmCalls | Should -Be 0
   }
 
-  It 'fragt mit -AlwaysAsk, damit abgeschaltete Bestaetigungen sie NICHT verschlucken' {
-    # Die zentrale Regel dieser Funktion. Ohne -AlwaysAsk waere sie bei
-    # SuppressChangeConfirmations=True lautlos - also genau bei dem Benutzer, der sie am dringendsten
-    # braucht, weil sein Lauf sonst voellig ohne Rueckfrage startet.
+  It 'fragt immer, wenn eine geschuetzte App dabei ist' {
+    # Die zentrale Regel dieser Funktion: bei SuppressChangeConfirmations=True darf sie NICHT
+    # lautlos werden - also genau bei dem Benutzer, dessen Lauf sonst voellig ohne Rueckfrage
+    # startet. Sichergestellt wird das seit dem Umbau dadurch, dass hier ein eigener Dialog steht
+    # statt Confirm-ChangeAction.
     [void](Confirm-ProtectedAppsInRun -Apps @((New-Candidate -Name 'Splashtop Streamer' -Protected $true)))
     $global:ConfirmCalls | Should -Be 1
-    $global:LastAlwaysAsk | Should -BeTrue
   }
 
   It 'nennt die betroffenen Apps im Dialog' {
@@ -168,14 +173,30 @@ Describe 'Confirm-ProtectedAppsInRun' {
     ($global:TestLog -join "`n") | Should -Match 'Keeper Password Manager'
   }
 
-  It 'bricht ab, wenn der Benutzer Nein sagt' {
-    $global:ConfirmAnswer = $false
-    Confirm-ProtectedAppsInRun -Apps @((New-Candidate -Name 'Splashtop Streamer' -Protected $true)) | Should -BeFalse
+  It 'bricht ab, wenn der Benutzer abbricht' {
+    $global:ConfirmAnswer = 'cancel'
+    $r = Confirm-ProtectedAppsInRun -Apps @((New-Candidate -Name 'Splashtop Streamer' -Protected $true))
+    $r.Proceed | Should -BeFalse
     ($global:TestLog -join "`n") | Should -Match 'canceled at the protected-apps confirmation'
   }
 
+  It 'laesst die geschuetzten aus und den Rest laufen' {
+    # Der dritte Weg, und der haeufigste reale Fall: zehn Apps angehakt, zwei davon geschuetzt.
+    $global:ConfirmAnswer = 'skip'
+    $r = Confirm-ProtectedAppsInRun -Apps @(
+      (New-Candidate -Name 'Google Chrome'),
+      (New-Candidate -Name 'Splashtop Streamer' -Protected $true))
+    $r.Proceed | Should -BeTrue
+    @($r.Apps).Count | Should -Be 1
+    @($r.Apps)[0].Name | Should -Be 'Google Chrome'
+    ($global:TestLog -join "`n") | Should -Match 'Protected apps left out of this run'
+    # Auch hier namentlich: welche wurden ausgelassen, ist im Nachhinein dieselbe Frage.
+    ($global:TestLog -join "`n") | Should -Match 'Splashtop Streamer'
+  }
+
   It 'kommt mit einer leeren Auswahl aus' {
-    Confirm-ProtectedAppsInRun -Apps @() | Should -BeTrue
+    $r = Confirm-ProtectedAppsInRun -Apps @()
+    $r.Proceed | Should -BeTrue
     $global:ConfirmCalls | Should -Be 0
   }
 }
@@ -184,7 +205,7 @@ Describe 'Der Riegel haengt in beiden Update-Laeufen' {
   BeforeAll { $script:mainText = Get-SourcePartText -Part '90-Main.ps1' }
 
   It 'sichert den Lauf ueber die markierten Zeilen ab' {
-    $script:mainText | Should -Match 'Confirm-ProtectedAppsInRun -Apps @\(\$checkedApps\)'
+    $script:mainText | Should -Match '\$protectedChoice = Confirm-ProtectedAppsInRun -Apps @\(\$checkedApps\)'
   }
 
   It 'sichert auch "Alle aktualisieren" ab' {

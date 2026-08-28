@@ -1620,6 +1620,90 @@ function Show-TextInputDialog {
 #
 # Gibt 'self' | 'other' | 'cancel' zurueck. Der Text kommt ueber -TextKey, weil dieselbe Frage fuer
 # mehrere optionale Berechtigungen gestellt wird (Gruppensuche, erkannte Apps).
+# Geschuetzte Apps in einem Lauf - drei Wege statt Ja/Nein.
+#
+# Die alte Fassung fragte "Fortfahren?" mit Ja/Nein. Bei zehn angehakten Apps, von denen zwei
+# geschuetzt sind, hiess Nein: abbrechen, die zwei suchen, abwaehlen, von vorn. Der mittlere Weg ist
+# der, den man eigentlich will - und wenn eine Rueckfrage den naheliegenden Ausgang nicht anbietet,
+# gewoehnt man sich an, sie wegzuklicken.
+#
+# Reihenfolge der Knoepfe: der SICHERE zuerst. Die geschuetzten mitzunehmen ist die Entscheidung mit
+# Folgen, sie steht nicht auf dem Standardknopf.
+#
+# Gibt 'skip' | 'all' | 'cancel' zurueck.
+function Show-ProtectedRunDialog {
+  param(
+    [Parameter(Mandatory)][int]$Count,
+    [string]$Preview = ''
+  )
+  $dlg = New-Object System.Windows.Forms.Form
+  $dlg.Text = Get-UiString 'ProtectedRunConfirmTitle'
+  $dlg.ClientSize = New-Object System.Drawing.Size(720, 420)
+  $dlg.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
+  $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+  $dlg.MinimizeBox = $false
+  $dlg.MaximizeBox = $false
+  $dlg.ShowIcon = $false
+
+  $text = New-Object System.Windows.Forms.TextBox
+  $text.Multiline = $true
+  $text.ReadOnly = $true
+  $text.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
+  $text.Location = New-Object System.Drawing.Point(14, 14)
+  $text.Size = New-Object System.Drawing.Size(692, 324)
+  $text.Text = (Get-UiString 'ProtectedRunConfirmDialog') -f $Count, $Preview
+  # Sonst bekommt das Textfeld den Fokus und markiert seinen ganzen Inhalt blau.
+  $text.TabStop = $false
+  $dlg.Controls.Add($text)
+
+  # Zustandsbeutel im Skript-Bereich: ein Handler, der nach der Rueckkehr dieser Funktion laeuft,
+  # haette keine lokalen Variablen mehr (siehe docs/PATTERNS.md).
+  $script:protectedRunChoice = 'cancel'
+
+  $skipButton = New-Object System.Windows.Forms.Button
+  $skipButton.Text = Get-UiString 'ProtectedRunSkipButton'
+  $skipButton.Location = New-Object System.Drawing.Point(14, 352)
+  $skipButton.Size = New-Object System.Drawing.Size(290, 34)
+  $skipButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
+  $skipButton.Add_Click({ $script:protectedRunChoice = 'skip' })
+  $dlg.Controls.Add($skipButton)
+  $dlg.AcceptButton = $skipButton
+
+  $allButton = New-Object System.Windows.Forms.Button
+  $allButton.Tag = 'btn-secondary'
+  $allButton.Text = Get-UiString 'ProtectedRunAllButton'
+  $allButton.Location = New-Object System.Drawing.Point(314, 352)
+  $allButton.Size = New-Object System.Drawing.Size(268, 34)
+  $allButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
+  $allButton.Add_Click({ $script:protectedRunChoice = 'all' })
+  $dlg.Controls.Add($allButton)
+
+  $cancelButton = New-Object System.Windows.Forms.Button
+  $cancelButton.Tag = 'btn-secondary'
+  $cancelButton.Text = Get-UiString 'CancelButton'
+  $cancelButton.Location = New-Object System.Drawing.Point(592, 352)
+  $cancelButton.Size = New-Object System.Drawing.Size(114, 34)
+  $cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+  $cancelButton.Add_Click({ $script:protectedRunChoice = 'cancel' })
+  $dlg.Controls.Add($cancelButton)
+  # Escape und das Fensterkreuz bedeuten dasselbe wie "Abbrechen" - nie "alles aktualisieren".
+  $dlg.CancelButton = $cancelButton
+
+  Set-GuiTheme -control $dlg -theme $script:currentTheme
+  $result = $dlg.ShowDialog()
+  $dlg.Dispose()
+  # Die Wahl gilt NUR, wenn wirklich einer der beiden Knoepfe gedrueckt wurde. Jeder andere Ausgang
+  # - Escape, Fensterkreuz, ein Close() von aussen - ist ein Abbruch.
+  #
+  # Das ist ein Guertel zum Hosentraeger: die Merkervariable steht ohnehin auf 'cancel', bis ein
+  # Klick sie setzt. In einem Probelauf, in dem der Dialog auf anderem Weg geschlossen wurde, kam
+  # trotzdem einmal 'skip' zurueck - der Weg dorthin liess sich nicht nachstellen. Bei einer Frage,
+  # deren falsche Antwort eine selbst paketierte App abloest, ist "kann ich nicht erklaeren" Grund
+  # genug, den Ausgang am DialogResult festzumachen statt an einer Variablen allein.
+  if ($result -ne [System.Windows.Forms.DialogResult]::OK) { return 'cancel' }
+  return $script:protectedRunChoice
+}
+
 function Show-GraphScopeConsentDialog {
   param([string]$TextKey = 'GroupLookupConsentDialog')
   $dlg = New-Object System.Windows.Forms.Form
