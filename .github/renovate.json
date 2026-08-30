@@ -1,0 +1,7 @@
+{
+  "extends": ["config:base"],
+  "automerge": false,
+  "labels": ["dependencies"],
+  "prHourlyLimit": 2,
+  "prConcurrentLimit": 3
+}
