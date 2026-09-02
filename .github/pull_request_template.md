@@ -42,6 +42,6 @@
 ## Form
 
 - [ ] kein `dist/` im Diff — Aenderungen liegen in `src/NN-*.ps1`
-- [ ] CRLF erhalten; BOM erhalten (alle `src/*.ps1` ausser `65-Theme.ps1`)
+- [ ] CRLF erhalten; BOM erhalten (alle `src/*.ps1` ausser `45-Assignments.ps1`)
 - [ ] neue UI-Texte in **beiden** Sprachbloecken in `15-Strings.ps1`
 - [ ] `CHANGELOG.md` gepflegt
