@@ -56,7 +56,7 @@ Die drei Läufer, die kein Parser ersetzt:
 | Läufer | fängt |
 |---|---|
 | `SmokeTest.ps1` | Ladefehler des gebauten Skripts (falsche Teil-Reihenfolge, Control vor seiner Erzeugung benutzt) |
-| `LayoutProbe.ps1` | überlappende Steuerelemente, abgeschnittener Text, zu geringer Kontrast, Karten die beim Scrollen verrutschen, **aufgeklappte** „Erweiterte Optionen", **ein Aufklapper der etwas außerhalb seiner Sektion verschiebt** — in **allen 7 Designs**, 2 Fenstergrößen × **2 Sprachen**, jeweils auf frischem Profil |
+| `LayoutProbe.ps1` | überlappende Steuerelemente (**auch Beschriftung gegen gerundetes Eingabefeld** — bis 0.18.0 war genau das ausgenommen), abgeschnittener Text, zu geringer Kontrast, Karten die beim Scrollen verrutschen, **aufgeklappte** „Erweiterte Optionen", **ein Aufklapper der etwas außerhalb seiner Sektion verschiebt** — in **allen 7 Designs**, 2 Fenstergrößen × **2 Sprachen**, jeweils auf frischem Profil |
 | `StaticChecks.ps1` | Version/Kopf, UI-Key-Parität EN/DE, tote UI-Schlüssel, `-LiteralPath`-Regeln, `Show-Progress` ohne `Hide-Progress`, MessageBox auf oberster Ebene vor dem Smoke-Tor, `Add_Shown` mit Dialog ohne `Test-UnattendedRun`, Datenpfad außerhalb der zwei Wurzelfunktionen, Sektion ohne Eintrag in `$navKeyOrder`/`$navGlyphs`, **CIM/WMI im Startpfad**, **HTTP-Aufruf ohne `-TimeoutSec`**, **Layout-Tabelle mit unbekannter Funktion oder unbekanntem Bereich**, **Cache-Leerer, der nicht im Tenant-Riegel steht**, **`Save-VersionDiskCache` außerhalb von `Save-PendingVersionDiskCache`** |
 
 `Invoke-CheckChain.ps1` prüft selbst nichts — es startet diese Läufer, jeden in einem eigenen

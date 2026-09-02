@@ -421,6 +421,17 @@ Profil.
   Bildschirmkopie). Damit die Toleranz nicht unbemerkt zu groß wird, prüft die Probe bei **jedem
   Lauf** sechs Fälle gegen: die drei echten Befunde aus ihrer Geschichte müssen anschlagen, die
   Rand-Bleeds nicht.
+- **Eine Ausnahme nach Typ statt nach Geometrie ist ein blinder Fleck.** Die Überlappungsprüfung
+  übersprang jedes Paar, an dem ein `Panel` beteiligt war — begründet mit „Wirte enthalten ihre
+  Kinder". Der Gedanke stimmt, die Umsetzung nicht: `New-RoundedInput` liefert für **jedes**
+  gerundete Eingabefeld ein Panel, also war jedes Paar *Beschriftung gegen Eingabefeld* von der
+  Prüfung ausgenommen — genau die Form von Befund, um derer willen die Probe existiert. Gemessen am
+  02.09.2026 lag `Installer-Argumente:` in **allen sieben Designs und beiden Sprachen** 4–11 px auf
+  seinem Feld, und die Probe blieb grün. Gefragt wird jetzt nach der Geometrie (`Test-LayoutNested`:
+  deckt einer den anderen **vollständig** ab?), und auch diese Regel prüft sich bei jedem Lauf
+  selbst. **Die Lehre ist allgemein:** wer eine Prüfung an einem Typ vorbeiführt, nimmt sie für
+  alles heraus, was zufällig diesen Typ hat — und merkt es nie, weil das Ergebnis grün ist. Der
+  gesamte Restbestand war übrigens sauber: die verschärfte Regel fand **einen** echten Fall.
 
 ## Pester 5: Discovery und Run sind zwei Phasen
 

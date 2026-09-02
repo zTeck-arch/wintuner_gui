@@ -88,11 +88,39 @@ if ($env:WINTUNER_LAYOUT -eq '1') {
       exit 3
     }
   }
-  function Test-LayoutContainer {
-    param($C)
-    # Wirte (Karten, Rundungs-Panels) enthalten ihre Kinder - das ist keine Ueberlappung.
-    return ($C -is [System.Windows.Forms.Panel] -or $C -is [System.Windows.Forms.GroupBox] -or
-            $C -is [System.Windows.Forms.TableLayoutPanel] -or $C -is [System.Windows.Forms.FlowLayoutPanel])
+  # Ein Wirt, der seinen Inhalt umschliesst, ist keine Ueberlappung - gemeint war IMMER dieser Fall.
+  #
+  # Bis zum 02.09.2026 stand hier "ist eins der beiden ein Panel?", und das war ein grosses Loch:
+  # New-RoundedInput liefert fuer JEDES gerundete Eingabefeld ein Panel. Damit war jedes Paar
+  # "Beschriftung gegen Eingabefeld" von der Pruefung ausgenommen - also genau die Form von Befund,
+  # um derer willen diese Probe existiert. Gemessen am 02.09.2026 lag 'Installer-Argumente:' in
+  # ALLEN 7 Designs und BEIDEN Sprachen 4 bis 11 px auf seinem Feld, und die Probe blieb gruen.
+  #
+  # Gefragt wird jetzt nach der Geometrie: deckt einer den anderen vollstaendig ab, ist es ein Wirt.
+  # Zwei Geschwister, die sich nur teilweise schneiden, sind es nicht - egal welchen Typs sie sind.
+  function Test-LayoutNested {
+    param($A, $B)
+    $aInB = ($A.Left -ge $B.Left) -and ($A.Top -ge $B.Top) -and ($A.Right -le $B.Right) -and ($A.Bottom -le $B.Bottom)
+    $bInA = ($B.Left -ge $A.Left) -and ($B.Top -ge $A.Top) -and ($B.Right -le $A.Right) -and ($B.Bottom -le $A.Bottom)
+    return ($aInB -or $bInA)
+  }
+
+  # Gegenprobe der Wirt-Erkennung, bei JEDEM Lauf - aus demselben Grund wie die der Toleranz
+  # daneben. Der dritte Fall ist der, an dem die alte Regel scheiterte: eine Beschriftung, die zur
+  # Haelfte auf einem Panel liegt, ist KEIN Wirt und muss durch die Ueberlappungspruefung.
+  $nestedCases = @(
+    @{ Name = 'Karte enthaelt ihre Beschriftung';      A = @{Left=16; Top=48; Right=742; Bottom=278}; B = @{Left=30; Top=58;  Right=200; Bottom=78};  Expect = $true }
+    @{ Name = 'Beschriftung liegt in ihrem Wirt';      A = @{Left=30; Top=58; Right=200; Bottom=78};  B = @{Left=16; Top=48;  Right=742; Bottom=278}; Expect = $true }
+    @{ Name = 'Beschriftung halb auf dem Eingabefeld'; A = @{Left=14; Top=290; Right=159; Bottom=315}; B = @{Left=150; Top=284; Right=610; Bottom=316}; Expect = $false }
+    @{ Name = 'deckungsgleich - zaehlt als umschlossen'; A = @{Left=0; Top=0; Right=100; Bottom=25};  B = @{Left=0;  Top=0;   Right=100; Bottom=25};  Expect = $true }
+    @{ Name = 'nebeneinander, kein Kontakt';           A = @{Left=0;  Top=0;  Right=100; Bottom=25};  B = @{Left=120; Top=0;  Right=220; Bottom=25};  Expect = $false }
+  )
+  foreach ($case in $nestedCases) {
+    $got = Test-LayoutNested $case.A $case.B
+    if ($got -ne $case.Expect) {
+      Write-Host ("LAYOUT-SELFTEST FAILED: '{0}' erwartet {1}, gemessen {2}" -f $case.Name, $case.Expect, $got)
+      exit 3
+    }
   }
   function Get-LayoutDesc {
     param($C)
@@ -107,7 +135,7 @@ if ($env:WINTUNER_LAYOUT -eq '1') {
     for ($i = 0; $i -lt $kids.Count; $i++) {
       for ($j = $i + 1; $j -lt $kids.Count; $j++) {
         $a = $kids[$i]; $b = $kids[$j]
-        if ((Test-LayoutContainer $a) -or (Test-LayoutContainer $b)) { continue }
+        if (Test-LayoutNested $a.Bounds $b.Bounds) { continue }
         if (Test-LayoutRects $a.Bounds $b.Bounds) {
           Write-Host ("LAYOUT-OVERLAP {0}: {1}  <>  {2}" -f $Path, (Get-LayoutDesc $a), (Get-LayoutDesc $b))
           $found++

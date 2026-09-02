@@ -1135,12 +1135,51 @@ function Set-DeployAssignmentRows {
   return (Set-AppSettingsRowBlock -Rows $rows -X $m -Y $Y -Width $contentW -Gap 6)
 }
 
+# Der OBERE Teil der erweiterten Optionen - bis 0.18.0 ein Raster aus festen x-Werten: Beschriftung
+# auf 14 beziehungsweise 320, Feld auf 150 beziehungsweise 470. Damit hatte eine Beschriftung in
+# Spalte 1 genau 136 px, ohne dass irgendwo stand, dass sie das hat.
+#
+# Gemessen am 02.09.2026 reichte das nicht: 'Installer-Argumente:' braucht 145 px und lag in ALLEN
+# sieben Designs und beiden Sprachen 4 bis 11 px auf seinem eigenen Eingabefeld. Aufgefallen ist es
+# nie, weil die Layout-Probe jedes Paar uebersprang, an dem ein Panel beteiligt war - und
+# New-RoundedInput liefert fuer jedes gerundete Feld genau ein Panel.
+#
+# Die Spaltenbreite kommt jetzt aus der breitesten Beschriftung der jeweiligen Sprache.
+function Set-WingetAdvancedRows {
+  param([Parameter(Mandatory)][int]$Y)
+  $m = 14
+  $contentW = [Math]::Max(400, $cardDeploy.ClientSize.Width - (2 * $m))
+  $rows = @(
+    @{ Cells = @(@{ L = $archLabel;   C = $archHost;   W = 150 },
+                 @{ L = $contextLabel; C = $contextHost; W = 140 }) }
+    @{ Cells = @(@{ L = $localeLabel; C = $localeHost; W = 150 },
+                 @{ L = $installerTypeLabel; C = $installerTypeHost; W = 140 }) }
+    @{ Cells = @(@{ L = $installerArgsLabel;   C = $installerArgsHost;   W = 460 }) }
+    @{ Cells = @(@{ L = $overrideAppNameLabel; C = $overrideAppNameHost; W = 460 }) }
+    @{ Cells = @(@{ L = $roleScopeTagsLabel;   C = $roleScopeTagsHost;   W = 460 }) }
+    @{ Cells = @(@{ L = $categoriesLabel;      C = $categoriesHost;      W = 460 }) }
+    @{ Cells = @(@{ L = $deployGroupModeLabel;   C = $script:deployGroupModeCombo;   W = 150 },
+                 @{ L = $deployFilterModeLabel;  C = $script:deployFilterModeCombo;  W = 140 }) }
+    @{ Cells = @(@{ L = $deployExcludeBaseLabel; C = $script:deployExcludeBaseCombo; W = 150 },
+                 @{ L = $deployFilterIdLabel;    C = $deployFilterIdHost;            W = 140 }) }
+  )
+  return (Set-AppSettingsRowBlock -Rows $rows -X $m -Y $Y -Width $contentW -Gap 6)
+}
+
 function Update-WingetLayout {
   try {
     if (-not $tabCreate -or -not $cardFind -or -not $cardDeploy) { return }
     # Nur im aufgeklappten Zustand anordnen: zugeklappt sind die Zeilen ausgeblendet, und
     # Set-AppSettingsRowBlock wuerde sie nach oben ziehen, wo sie beim Aufklappen falsch stuenden.
     if ($script:advExpanded -and $deployAppSettingsLabel -and $script:autoUpdateCheckbox) {
+      # Der obere Block beginnt unter dem Aufklapper, die beiden Kaestchen folgen darunter. Vorher
+      # standen alle drei Y-Werte als Konstanten da (514 und 542) und haetten bei einer neuen Zeile
+      # von Hand nachgezogen werden muessen.
+      $y = Set-WingetAdvancedRows -Y ($advToggle.Bottom + 14)
+      $script:packageScriptCheckbox.Left = 14
+      $script:packageScriptCheckbox.Top = $y + 6
+      $script:autoUpdateCheckbox.Left = 14
+      $script:autoUpdateCheckbox.Top = $script:packageScriptCheckbox.Bottom + 6
       $deployAppSettingsLabel.Left = 14
       $deployAppSettingsLabel.Top = $script:autoUpdateCheckbox.Bottom + 14
       [void](Set-DeployAssignmentRows -Y ($deployAppSettingsLabel.Bottom + 8))
