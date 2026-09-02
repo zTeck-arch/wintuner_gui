@@ -3,8 +3,8 @@
 Nachschlagewerk. Nicht am Stück lesen: über die Tabelle „Wo ändere ich …?" einsteigen, dann gezielt
 die genannte Datei öffnen. Ergänzt [CLAUDE.md](../CLAUDE.md) (Regeln, Prüfkette, Fallen).
 
-Stand 31.08.2026 (0.17.0 + unveröffentlichte Arbeit): 21 Teile, ~24 600 Zeilen im gebauten Skript,
-344 Funktionen, 1000 UI-Texte je Sprache.
+Stand 02.09.2026 (0.18.0): 21 Teile, ~25 000 Zeilen im gebauten Skript,
+357 Funktionen, 1006 UI-Texte je Sprache.
 
 ## Aufbau in einem Absatz
 
@@ -27,7 +27,7 @@ ist reihenfolgeabhängig und nur über SmokeTest und LayoutProbe abgedeckt.
 
 | Teil | Zeilen | Inhalt / wichtigste Funktionen |
 |---|---|---|
-| `00-Bootstrap` | 190 | Startet unter PowerShell 5.1 neu in PS7, prüft/installiert das WinTuner-Modul. `$script:appVersion`, Kopfkommentar `# v0.17.0` (StaticChecks vergleicht beide) |
+| `00-Bootstrap` | 190 | Startet unter PowerShell 5.1 neu in PS7, prüft/installiert das WinTuner-Modul. `$script:appVersion`, Kopfkommentar `# v0.18.0` (StaticChecks vergleicht beide) |
 | `05-Config` | 75 | `$script:githubRepo`, Asset-Namen, `$script:settingsPath`, Datenwurzeln (`Get-AppDataRoot`), **Graph-Transport-Konstanten** (`$script:graphTimeoutSeconds`, `$script:graphRetryStatuses`) |
 | `10-Settings` | 600 | Einstellungen laden/speichern (`Load-Settings`, `Save-Settings`, `Get-SettingValue`), Protokollpfad + Löschfrist, Token-Cache (`Remove-TokenCacheFiles`, `Clear-GraphTokenCache`), Datenübernahme (`Copy-LegacyDataFile`, `Get-LegacyDataPath`) |
 | `15-Strings` | 2200 | **Alle** UI-Texte. EN-Block zuerst, DE-Block ab ~Zeile 1090. `Get-UiString` liegt in Teil 20 |

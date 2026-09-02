@@ -1,6 +1,6 @@
 ﻿# Changelog
 
-## Unveröffentlicht – Was ab Werk geschützt ist, und wo die Kundendaten liegen
+## 0.18.0 – Was ab Werk geschützt ist, und was nebenher schon gebaut wird
 
 **Aus einer Durchsicht der Architektur (31.08.2026)**
 
