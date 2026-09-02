@@ -695,7 +695,10 @@ function New-TenantStoreAppViaGraph {
 
   $json = $body | ConvertTo-Json -Depth 8
   Write-Log ("Creating Store app directly over Graph: '{0}' ({1}), publisher '{2}', runAs {3}." -f $DisplayName, $PackageIdentifier, $Publisher, $RunAsAccount)
-  $created = Invoke-RestMethod -Method POST -Uri 'https://graph.microsoft.com/beta/deviceAppManagement/mobileApps' -Headers $headers -Body $json -ErrorAction Stop
+  # -MaxRetries 0: dieser POST LEGT EINE APP AN. Bei einem Zeitablauf ist unbekannt, ob Intune sie
+  # schon erzeugt hat, und ein zweiter Versuch erzeugte eine zweite Store-App im Tenant.
+  $created = Invoke-GraphRest -Method POST -Uri 'https://graph.microsoft.com/beta/deviceAppManagement/mobileApps' `
+    -Headers $headers -Body $json -MaxRetries 0 -Context ("create Store app {0}" -f $PackageIdentifier)
   Clear-Win32AppsCache   # a new app exists; a cached inventory would not contain it
   Write-Log ("Store app created over Graph: {0}" -f [string]$created.id)
   return $created

@@ -96,7 +96,12 @@ function Get-EntraGroupDisplayName {
   # 2. Token der Anwendung
   try {
     $token = Get-WtToken -ErrorAction Stop
-    $resp = Invoke-RestMethod -Uri $uri -Method GET -Headers @{ Authorization = "Bearer $token" } -ErrorAction Stop
+    # -MaxRetries 0 mit Absicht: diese Abfrage laeuft AUS EINER SCHLEIFE ueber alle Apps einer Liste.
+    # Ein Wiederholungsversuch je Gruppe wuerde bei 300 Apps zu 300 Wartepausen - genau die Sorte
+    # Multiplikation, gegen die es $script:entraGroupLookupOff schon gibt. Der Zeitablauf gilt
+    # trotzdem, und der war hier das eigentliche Problem.
+    $resp = Invoke-GraphRest -Uri $uri -Method GET -Headers @{ Authorization = "Bearer $token" } `
+      -MaxRetries 0 -Context ("group name for {0}" -f $GroupId)
     $name = [string]$resp.displayName
   } catch {
     $status = Get-ErrorHttpStatus -ErrorRecord $_
@@ -524,12 +529,13 @@ function Set-TenantAppAssignments {
       $payload += $entry
     }
     $body = @{ mobileAppAssignments = @($payload) } | ConvertTo-Json -Depth 14
-    Invoke-RestMethod -Method POST -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assign" -Headers $headers -Body $body -ErrorAction Stop | Out-Null
+    Invoke-GraphRest -Method POST -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assign" `
+      -Headers $headers -Body $body -Context ("assignment manager: write assignments on {0}" -f $AppId) | Out-Null
     $out.Changed = $payload.Count
     Write-Log ("Assignment set rewritten for '{0}' ({1}): {2} assignment(s)." -f $AppName, $AppId, $payload.Count)
   } catch {
     $out.ErrorMessage = Get-AssignmentWriteErrorText -ErrorRecord $_
-    Write-Log ("Rewriting assignments FAILED for '{0}' ({1}): {2}" -f $AppName, $AppId, $out.ErrorMessage)
+    Write-Log ("Rewriting assignments FAILED for '{0}' ({1}): {2}" -f $AppName, $AppId, (Get-AssignmentWriteErrorText -ErrorRecord $_ -ForLog))
   }
   return $out
 }
@@ -976,7 +982,7 @@ function Get-TenantDetectedApps {
     $response = if ($UseGraphSession) {
       Invoke-MgGraphRequest -Method GET -Uri $uri -ErrorAction Stop
     } else {
-      Invoke-RestMethod -Uri $uri -Method GET -Headers $Headers -ErrorAction Stop
+      Invoke-GraphRest -Uri $uri -Method GET -Headers $Headers -Context ("collection page {0}" -f $pageCount)
     }
     $values = if ($UseGraphSession) { @($response['value']) } else { @($response.value) }
     if ($values -and $values.Count -gt 0) { $out.AddRange([object[]]$values) }

@@ -24,6 +24,7 @@ Packaging, deployment, version comparison, assignments and the controlled retire
 - [Requirements](#requirements)
 - [Account and permissions](#account-and-permissions)
 - [A typical run](#a-typical-run)
+- [A fresh customer tenant, and the steady state](#a-fresh-customer-tenant-and-the-steady-state)
 - [Limits and responsibility](#limits-and-responsibility)
 - [Project status](#project-status)
 - [License and origin](#license-and-origin)
@@ -248,6 +249,45 @@ Depending on the tenant, administrator consent, Conditional Access policies or f
 5. Check the result in Intune and in the local activity log.
 
 For an update there are two routes. Deploy the new version as its own app and supersede the old one (the default under **Updates**), or replace the content of the existing app (**Own installers**). The second route avoids ending up with several app objects per product, but it assumes the detection rules still fit.
+
+---
+
+## A fresh customer tenant, and the steady state
+
+The tool is built for a **steady state**: set up once, a recurring run keeps a tenant's apps current without hand work. That state does not establish itself on the first run, though. A tenant that has not been managed with WinTuner or WinGet before needs a closer look **once**. After that, never again.
+
+### The steady state: a few switches, and supersedence runs by itself
+
+Routine operation rests on three settings. Together they close the loop: package the new version → upload → supersede the predecessor → move the assignment → clean up the old version. Nothing is left behind, and nobody has to finish the job in the portal.
+
+| Setting | What it does for routine operation |
+|---|---|
+| **Move the group assignment to the new version (unassign the old one)** | Without it **both** versions carry the assignment after an update, and someone has to unassign the old one by hand in the portal. This is the switch that turns "an update was deployed" into "the new version is actually in use". |
+| **Delete the predecessor version right after a successful update** *or* **Keep only the newest N versions per package and delete the rest** | Both clear away the superseded app objects — otherwise the **Superseded versions** tile grows with every single update. The two options are mutually exclusive: delete immediately, or keep a number. Either way nothing is deleted until assignments and successful installations have been checked again. |
+| **Also check Win32 apps that carry no WinTuner marker** | The marker in the notes field only says **who** created an app — not whether a newer version exists. Without this switch, everything created by hand or with another tool stays invisible, and in an inherited tenant that is the majority. |
+
+With these switches set and the mappings verified once, a run via **Update all** can go through without a single click (**Skip the confirmation prompts before changes in Intune**). Protected apps still ask — that one question deliberately cannot be suppressed.
+
+### Why the first round is different
+
+In a freshly inherited tenant, **no** app came from this tool. Four consequences follow that do not exist later on:
+
+- **There is no mapping to WinGet.** No marker, no package id in the notes field; only a display name somebody chose freely. Mapping name → WinGet id is therefore the critical step of the first round. It is only accepted on an **exact** name match, a clearly dominant match, or a stored mapping — anything ambiguous is skipped. A wrong id would package the wrong product and supersede the real app.
+- **Apps that could not be checked appear as blocked rows** with a reason ("no WinGet id could be mapped safely", "Intune reports no version"). They cannot be ticked and a run leaves them out. Where it makes sense, the id can be set by hand via right-click → **Assign WinGet id...**; the rest stays blocked on purpose.
+- **Not all self-packaged apps are known yet.** Remote support, RMM and the common password managers are protected out of the box (TeamViewer, AnyDesk, ScreenConnect/ConnectWise, N-able, Datto, Jamf, Splashtop, Keeper, 1Password, Bitwarden, LastPass, KeePass). **Customer-specific** installers are known to nobody but you — those belong on the protection list **before** the first run. An update on one of them builds a new app from the public catalogue, supersedes the hand-built one and moves its assignments; for a package built by hand, no second run brings that back.
+- **Supersedence is not yet proven here.** Whether the assignment really moved to the new version only shows on a real run in this tenant.
+
+### Suggested order for the first round
+
+1. Connect and run the update scan with **Also check Win32 apps that carry no WinTuner marker** switched on. Only then does the list see what is actually there.
+2. Walk the **blocked rows**: read the reason, map the WinGet id where it is unambiguous, leave the rest. An unmapped app is inconvenient; a wrongly mapped one is expensive.
+3. **Protect self-packaged apps** while nothing is running yet.
+4. Start the first run with **confirmations on** and **cleanup off**, on two or three uncritical apps — not on all of them.
+5. Check in Intune: does the new app carry the assignments? Is the predecessor listed as superseded? The activity log records both.
+6. **Only then** switch on routine operation: cleanup, and confirmations off if you want that.
+
+> [!IMPORTANT]
+> The risky options are off by default for a reason. Switching them on in a tenant nobody has verified yet means automating deletions before anyone has seen whether the mappings in this tenant are correct.
 
 ---
 

@@ -831,18 +831,15 @@ function Set-ActiveTheme {
   # of painting over it.
   if (Get-Command Update-InfoBadgePositions -ErrorAction SilentlyContinue) { Update-InfoBadgePositions }
   if (Get-Command Update-HeaderLayout -ErrorAction SilentlyContinue) { Update-HeaderLayout }
-  if (Get-Command Update-SettingsLayout -ErrorAction SilentlyContinue) { Update-SettingsLayout }
-  if (Get-Command Update-OwnPackageLayout -ErrorAction SilentlyContinue) { Update-OwnPackageLayout }
-  # Und alle uebrigen Bereiche, die ihre Anordnung rechnen statt sie zu zaehlen. Ohne das behielten
-  # sie beim Designwechsel die Geometrie der VORHERIGEN Schriftart, bis man sie einmal verlaesst und
-  # neu oeffnet - eine Anordnung, die niemand ausgeloest hat und die niemand erklaeren kann.
-  foreach ($layoutFn in @('Update-TenantAppsLayout', 'Update-StoreLayout', 'Update-LocalPackagesLayout',
-                          'Update-UpdatesLayout', 'Update-AppSettingsLayout', 'Update-WorkRecordSectionLayout',
-                          'Update-WingetLayout', 'Update-DiscoveredLayout', 'Update-CustomerDataLayout')) {
-    if (Get-Command $layoutFn -ErrorAction SilentlyContinue) {
-      try { & $layoutFn } catch { Write-LogDebug ("theme relayout: {0}" -f $layoutFn) }
-    }
-  }
+  # ALLE Bereiche, die ihre Anordnung rechnen statt sie zu zaehlen. Ohne das behielten sie beim
+  # Designwechsel die Geometrie der VORHERIGEN Schriftart, bis man sie einmal verlaesst und neu
+  # oeffnet - eine Anordnung, die niemand ausgeloest hat und die niemand erklaeren kann.
+  #
+  # Ueber $script:sectionLayoutFunctions (75-UiState) statt ueber eine eigene Namensliste: hier
+  # standen zwei Einzelaufrufe und eine Schleife mit neun Namen, waehrend Show-Section zehn und der
+  # Resize-Handler wieder andere neun kannte. Drei Listen fuer eine Zuordnung heisst, dass ein neuer
+  # Bereich in zwei davon fehlen kann, ohne dass etwas rot wird.
+  if (Get-Command Update-AllSectionLayouts -ErrorAction SilentlyContinue) { Update-AllSectionLayouts }
   # Die Zeilenfarben der Update-Liste haengen am Design (siehe Get-RowAlertColor), und Set-GuiTheme
   # faerbt nur die Liste selbst - ihre Eintraege behielten sonst die Farben des vorigen Designs.
   # Update-UpdateListRows baut die Zeilen aus dem vorhandenen Scan neu auf, ohne den Tenant zu

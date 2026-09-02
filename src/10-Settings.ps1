@@ -315,7 +315,14 @@ function Get-SettingValue {
     [Parameter(Mandatory)][string]$Name,
     [Parameter(Mandatory)][ValidateSet('Bool', 'Int', 'String', 'StringArray')][string]$Type,
     [Parameter(Mandatory)]$Default,
-    [int]$Minimum
+    [int]$Minimum,
+    # Obergrenze, gleiche Behandlung wie -Minimum: ausserhalb des Bereichs gilt die Vorgabe.
+    #
+    # Wichtig ist, wo sie NICHT hingehoert: eine Obergrenze auf KeepVersionCount waere gefaehrlich.
+    # Ein zu hoher Wert bewahrt dort nur mehr Versionen (harmlose Richtung) - ein Rueckfall auf die
+    # Vorgabe 2 wuerde genau die Versionen LOESCHEN, die der Benutzer behalten wollte. Grenzen also
+    # nur dort, wo ein absurder Wert wirklich stoert und ein Rueckfall nichts kaputt macht.
+    [int]$Maximum
   )
   try {
     if (-not $Source.PSObject.Properties[$Name]) { return $Default }
@@ -325,6 +332,7 @@ function Get-SettingValue {
       'Int'    {
         $number = [int]$raw
         if ($PSBoundParameters.ContainsKey('Minimum') -and $number -lt $Minimum) { return $Default }
+        if ($PSBoundParameters.ContainsKey('Maximum') -and $number -gt $Maximum) { return $Default }
         return $number
       }
       'String' { return [string]$raw }
@@ -407,13 +415,40 @@ function Add-ProtectedAppPattern {
 # Lauf fragt bei ihr nur ausdruecklich nach - auch bei abgeschalteten Rueckfragen. Ein zu breites
 # Muster kostet daher eine Rueckfrage, ein fehlendes eine App.
 #
-# Die Liste ist bewusst kurz und nennt nur, was hier tatsaechlich vorkommt. Wer sie erweitert,
-# traegt hier ein: der Merker ProtectedAppsSeeded sorgt dafuer, dass Nachtraege auch bei
-# Bestandsinstallationen ankommen, ohne von Hand entfernte Muster zurueckzuholen.
+# Wer sie erweitert, traegt hier ein: der Merker ProtectedAppsSeeded sorgt dafuer, dass Nachtraege
+# auch bei Bestandsinstallationen ankommen, ohne von Hand entfernte Muster zurueckzuholen.
+#
+# Zwei Klassen, und beide aus demselben Grund:
+#
+# 1. Fernwartung und RMM. Der Installer traegt die Zuordnung zum Betreuer in sich - Mandanten-Id,
+#    Kundenschluessel, oft ein eigens erzeugtes Installationspaket. Ein aus WinGet gebautes Paket
+#    hat das nicht: es installiert dasselbe Produkt "leer", und danach meldet sich der Rechner bei
+#    niemandem mehr. Bei einer Fernwartung ist das genau der Zugang, ueber den man den Fehler
+#    haette beheben koennen.
+# 2. Passwortmanager. Sie werden mit Richtliniendatei, SSO-Anbindung oder fest eingestelltem
+#    Server ausgerollt. Ein Ersatz durch die nackte Herstellerfassung nimmt dem Benutzer nicht die
+#    Passwoerter, aber die Anmeldung an den Tresor - und das faellt erst am Endgeraet auf.
+#
+# Alle mit '*', weil die Produkte in mehreren Fassungen auftreten ("ConnectWise Control",
+# "ConnectWise Automate", "ScreenConnect Client (abc123)"). Das kostet im schlechtesten Fall eine
+# Rueckfrage bei einer App, die man doch aktualisieren wollte - ein fehlendes Muster kostet die App.
 $script:defaultProtectedApps = @(
+  # Fernwartung / RMM
   'TeamViewer*'
   'Jamf*'
   'Splashtop*'
+  'AnyDesk*'
+  'ScreenConnect*'
+  'ConnectWise*'
+  'N-able*'
+  'N-central*'
+  'Datto*'
+  # Passwortmanager
+  'Keeper*'
+  '1Password*'
+  'Bitwarden*'
+  'LastPass*'
+  'KeePass*'
 )
 
 # Reine Rechnung: welche Werksmuster fehlen noch, und wie sehen die beiden Listen danach aus.
@@ -486,7 +521,12 @@ function Load-Settings {
         $script:settings.ThemeName               = Get-SettingValue -Source $o -Name 'ThemeName'               -Type String -Default 'Light'
         $script:settings.Language                = Get-SettingValue -Source $o -Name 'Language'                -Type String -Default 'en'
         $script:settings.RecentLogins            = Get-SettingValue -Source $o -Name 'RecentLogins'            -Type StringArray -Default @()
-        $script:settings.MaxRecentLogins         = Get-SettingValue -Source $o -Name 'MaxRecentLogins'         -Type Int  -Default 15 -Minimum 1
+        # Obergrenze 50: die settings.json ist ausdruecklich von Hand bearbeitbar (der Kommentar am
+        # Vorgabeblock sagt es), und ein Tippfehler wie 1500 baut ein Menue, das ueber den unteren
+        # Bildschirmrand hinauslaeuft. Die Liste ist reine Bequemlichkeit, ein Rueckfall auf 15
+        # kostet also nichts. KeepVersionCount bekommt bewusst KEINE Obergrenze - warum, steht in
+        # Get-SettingValue.
+        $script:settings.MaxRecentLogins         = Get-SettingValue -Source $o -Name 'MaxRecentLogins'         -Type Int  -Default 15 -Minimum 1 -Maximum 50
 
         # Restore the last user-selected window state. Releases before 0.13.2 saved these
         # values but never loaded them. Migrate only the exact former built-in default;

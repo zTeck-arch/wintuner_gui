@@ -1,4 +1,47 @@
 ﻿
+# Der Zielschluessel einer App im Stapellauf: Paket-Id und angeforderte Version, klein geschrieben.
+#
+# Ein Ziel ist eindeutig ueber diese beiden. Anzeigename und Rollenbereich sind Angaben des
+# VORGAENGERS - sie loesen eine Zusammenfuehrung aus, duerfen aber nie eine zweite Kopie derselben
+# Paketversion erzeugen. Herausgeloest, weil die Schleife und die Vorab-Bau-Entscheidung denselben
+# Schluessel bilden muessen; zwei Fassungen davon waeren genau der Weg zu einem doppelten App-Objekt.
+function Get-BatchTargetKey {
+  param([string]$PackageId, [string]$Version)
+  $lane = ([string]$PackageId).Trim().ToLowerInvariant()
+  return ("{0}|{1}" -f $lane, ([string]$Version)).ToLowerInvariant()
+}
+
+# Darf fuer die naechste App vorab gebaut werden?
+#
+# Rein und ohne Fenster pruefbar, weil hier die Randbedingungen sitzen, deren Verletzung teuer waere:
+#
+# - Ein Eintrag, der ein VORHANDENES Ziel wiederverwendet, baut ueberhaupt kein Paket. Ein Vorab-Bau
+#   dafuer waere reine Verschwendung - und schlimmer, er wuerde den einen Platz belegen, den die
+#   naechste App braucht, die wirklich baut.
+# - Traegt der naechste Eintrag DENSELBEN Zielschluessel wie der laufende, ist er ein zweiter
+#   Vorgaenger derselben App. Er faehrt in dasselbe Ziel und baut nicht. Wer hier trotzdem vorbaut,
+#   riskiert ein zweites App-Objekt fuer dieselbe Paketversion.
+# - Steht der Schluessel schon in $batchTargets oder unter den unaufloesbaren, gilt dasselbe.
+function Test-ShouldPrebuildNext {
+  param(
+    [string]$PackageId,
+    [string]$Version,
+    [string]$ExistingTargetGraphId,
+    [string]$CurrentTargetKey,
+    [AllowNull()][hashtable]$KnownTargets,
+    [AllowNull()][object[]]$UnresolvedKeys
+  )
+  if ([string]::IsNullOrWhiteSpace($PackageId) -or [string]::IsNullOrWhiteSpace($Version)) { return $false }
+  if (-not [string]::IsNullOrWhiteSpace($ExistingTargetGraphId)) { return $false }
+  $key = Get-BatchTargetKey -PackageId $PackageId -Version $Version
+  if ([string]::Equals($key, ([string]$CurrentTargetKey), [System.StringComparison]::Ordinal)) { return $false }
+  if ($KnownTargets -and $KnownTargets.ContainsKey($key)) { return $false }
+  foreach ($u in @($UnresolvedKeys)) {
+    if ([string]::Equals(([string]$u), $key, [System.StringComparison]::Ordinal)) { return $false }
+  }
+  return $true
+}
+
 function Invoke-AppUpdateBatch {
   param(
     [Parameter(Mandatory=$true)]
@@ -74,8 +117,7 @@ function Invoke-AppUpdateBatch {
       # A target is unique per package id + requested version. Display names and scopes are
       # predecessor metadata and trigger a consolidation warning; they must never create a second
       # copy of the same package version.
-      $lane = ([string]$appPackageId).Trim().ToLowerInvariant()
-      $targetKey = ("{0}|{1}" -f $lane, $appLatestVersion).ToLowerInvariant()
+      $targetKey = Get-BatchTargetKey -PackageId $appPackageId -Version $appLatestVersion
       $batchTarget = if ($batchTargets.ContainsKey($targetKey)) { $batchTargets[$targetKey] } else { $null }
       $existingTargetId = if ($batchTarget) {
         [string]$batchTarget.Id
@@ -92,6 +134,29 @@ function Invoke-AppUpdateBatch {
         $failedList.Add([pscustomobject]@{ Name = $appName; Reason = $reason })
         Write-Log ("Skipped consolidation for {0} {1}: {2}" -f $appName, $appCurrentVersion, $reason)
         continue
+      }
+
+      # Die NAECHSTE App vormerken. Angestossen wird der Vorab-Bau nicht hier, sondern in
+      # Update-SingleApp - erst wenn das Paket DIESER App fertig ist und der Upload beginnt. Frueher
+      # angestossen bauten zwei gleichzeitig und naehmen sich gegenseitig die Leitung weg.
+      $script:pendingPrebuild = $null
+      $nextApp = if ($currentIndex -lt $totalCount) { $Apps[$currentIndex] } else { $null }
+      if ($nextApp) {
+        $nextPackageId = if ($nextApp.PackageId) { [string]$nextApp.PackageId } else { '' }
+        $nextVersion   = [string]$nextApp.LatestVersion
+        if (Test-ShouldPrebuildNext -PackageId $nextPackageId -Version $nextVersion `
+              -ExistingTargetGraphId ([string]$nextApp.ExistingTargetGraphId) `
+              -CurrentTargetKey $targetKey -KnownTargets $batchTargets `
+              -UnresolvedKeys @($unresolvedTargetKeys)) {
+          # Ueber Get-WingetPackageArguments, nicht von Hand zusammengesetzt: nur so ist der Satz
+          # Zeichen fuer Zeichen derselbe, den der Hauptlauf gleich bilden wird - und nur dann darf
+          # sein Ergebnis uebernommen werden.
+          $script:pendingPrebuild = @{
+            Arguments = (Get-WingetPackageArguments -PackageId $nextPackageId -PackageFolder $RootPackageFolder) +
+                        @{ Version = $nextVersion }
+            Label     = [string]$nextApp.Name
+          }
+        }
       }
 
       Write-Log "Calling Update-SingleApp with: Name='$appName', Current='$appCurrentVersion', Latest='$effectiveRequestedVersion', GraphId='$appGraphId', PackageId='$appPackageId', ExistingTarget='$existingTargetId'"
@@ -184,6 +249,9 @@ function Invoke-AppUpdateBatch {
 
     return @{ SuccessCount = $successCount; FailedList = $failedList; SucceededList = $succeededList }
   } finally {
+    # Ein Vorab-Bau ohne Lauf, der ihn abholt, wuerde bis zum Programmende weiterlaufen und den
+    # Runspace belegen. Er schreibt nur lokale Dateien, ein Abbruch ist also folgenlos.
+    Stop-PackagePrebuild -Reason 'batch finished'
     Hide-Progress
     $updateSelectedButton.Enabled = $true
     $updateAllButton.Enabled = $true

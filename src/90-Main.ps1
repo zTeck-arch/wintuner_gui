@@ -9,7 +9,15 @@ $dropdown.Add_SelectedIndexChanged({ Update-SelectedPackageVersionLabel })
 # One banner per start makes support diagnosis (and bug reports) far easier.
 try {
   $psVer  = $PSVersionTable.PSVersion.ToString()
-  $osVer  = try { (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Caption } catch { [Environment]::OSVersion.VersionString }
+  # Gemessen am 31.08.2026: `Get-CimInstance Win32_OperatingSystem` kostete hier 398-425 ms - fuer
+  # EINE Protokollzeile, und es war der teuerste Einzelposten des gesamten Startpfads (~5 % von
+  # 7,4 s). `[Environment]::OSVersion.VersionString` kostet 0 ms und nennt die Build-Nummer, die
+  # einen Support-Fall ohnehin genauer eingrenzt als der Marketingname ("10.0.26200" ist Windows 11,
+  # eindeutig). Der naheliegende dritte Weg ist die Registry - und der ist FALSCH: ProductName
+  # meldete auf diesem Windows 11 "Windows 10 Enterprise" (bekannte Eigenheit) und kostete trotzdem
+  # 78 ms. Ein falscher Betriebssystemname in einem Protokoll, das in Tickets wandert, ist schlimmer
+  # als ein unhandlicher richtiger.
+  $osVer  = [Environment]::OSVersion.VersionString
   $wtVer  = try { (Get-Module -ListAvailable -Name WinTuner | Sort-Object Version -Descending | Select-Object -First 1).Version.ToString() } catch { 'n/a' }
   Write-Log ("=" * 78)
   Write-Log ("Session start | WinTuner GUI {0} | PowerShell {1} | WinTuner module {2}" -f $script:appVersion, $psVer, $wtVer)
@@ -39,37 +47,6 @@ Update-Status (Get-UiString 'ModCheckingStatus')
 try {
   if (Get-Module -ListAvailable -Name WinTuner) {
     Update-Status (Get-UiString 'ModFoundStatus')
-
-    # Check if update is available (optional - don't force update every time)
-    # Uncomment the following block if you want automatic updates:
-    <#
-    try {
-      $installedVersion = (Get-Module -ListAvailable -Name WinTuner | Sort-Object Version -Descending | Select-Object -First 1).Version
-      $onlineVersion = (Find-Module -Name WinTuner -ErrorAction SilentlyContinue).Version
-
-      if ($onlineVersion -and $onlineVersion -gt $installedVersion) {
-        Update-Status "Module update available ($installedVersion → $onlineVersion). Updating..."
-
-        # Temporarily disable PSDefaultParameterValues for Update-Module
-        $savedDefaults = $PSDefaultParameterValues.Clone()
-        $PSDefaultParameterValues.Clear()
-
-        Update-Module -Name WinTuner -ErrorAction Stop
-
-        # Restore defaults
-        foreach ($key in $savedDefaults.Keys) {
-          $PSDefaultParameterValues[$key] = $savedDefaults[$key]
-        }
-
-        Update-Status "Module updated to $onlineVersion"
-      } else {
-        Update-Status "Module is up to date (v$installedVersion)"
-      }
-    } catch {
-      Write-Log "Module update check failed: $($_.Exception.Message)"
-      Update-Status "Module update skipped (using existing version)"
-    }
-    #>
   } else {
     Update-Status (Get-UiString 'ModNotFoundStatus')
     Write-Log 'WinTuner module is not installed; the startup installation offer was declined or failed.'
@@ -1049,6 +1026,10 @@ $updateSearchButton.Add_Click({
     $script:cancelBatch = $false
     Hide-Progress
     if (Get-Command Update-UpdatesEmptyState -ErrorAction SilentlyContinue) { Update-UpdatesEmptyState }
+    # Der Versionscache wird EINMAL geschrieben, nicht je Paket (siehe Get-WingetVersions). Im
+    # finally, damit auch eine abgebrochene oder gescheiterte Suche das behaelt, was sie schon
+    # ermittelt hat - sonst kostet der naechste Lauf dieselben Abfragen noch einmal.
+    Save-PendingVersionDiskCache | Out-Null
   }
 })
 
@@ -2319,6 +2300,11 @@ $form.Add_FormClosing({
         }
     } catch {}
 
+    # 1a. Den Versionscache nachziehen, falls diese Sitzung etwas ermittelt hat. Er wird waehrend
+    #     eines Laufs nur im Speicher gefuehrt (siehe Get-WingetVersions); ohne diese Zeile waere
+    #     jede Abfrage, die nach der letzten Schleife dazukam, beim naechsten Start wieder faellig.
+    try { Save-PendingVersionDiskCache | Out-Null } catch {}   # class 3: teardown
+
     # 2. Wenn bereits geschlossen wird, ignorieren
     if ($script:_closingInProgress) { return }
     $script:_closingInProgress = $true
@@ -2334,6 +2320,9 @@ $form.Add_FormClosing({
             Write-FileLog 'Shutdown: background packaging runspace closed.'
         }
     } catch { }   # class 3: teardown
+    # Seit dem Vorab-Bau gibt es einen zweiten Runspace. Wird er nicht geschlossen, haelt sein
+    # Thread das Beenden auf - genau der Grund, aus dem der erste hier steht.
+    try { Close-PrebuildRunspace } catch { }   # class 3: teardown
 
     # 3. Falls verbunden, regulär abmelden
     if ($script:isConnected) {

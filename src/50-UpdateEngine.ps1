@@ -406,6 +406,13 @@ function Update-SingleApp {
       }
     }
 
+    # Genau hier beginnt die lange, blockierende Phase - und genau hier lohnt sich der Vorab-Bau:
+    # das Paket DIESER App ist fertig, der Upload dauert, und der Runspace daneben kann in dieser
+    # Zeit schon die naechste App bauen. Vorgemerkt hat sie der Stapellauf; laeuft keiner oder ist
+    # nichts vorgemerkt, passiert hier nichts. Der Aufruf steht VOR dem Upload, weil er ihn nicht
+    # aufhaelt: er stoesst nur an und kehrt sofort zurueck.
+    Start-PendingPackagePrebuild
+
     # 3) Deploy with best available identifier
     Write-Log "Deploying $AppName version $effectiveVersion..."
     # Phase switch: the upload runs blocking on the UI thread (the Graph session is per-runspace),

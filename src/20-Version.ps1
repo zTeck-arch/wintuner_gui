@@ -1,8 +1,12 @@
 ﻿# Returns the current-language string for $Key (falls back to English, then the key
 # name itself, so a missing translation never crashes the UI).
+# -Language erzwingt eine bestimmte Sprache statt der eingestellten. Gebraucht wird das dort, wo
+# derselbe Text zweimal entsteht: einmal für die Oberfläche (Sprache des Benutzers) und einmal für
+# das Protokoll, das laut Hausregel englisch bleibt, weil es in Tickets wandert.
 function Get-UiString {
-  param([Parameter(Mandatory=$true)][string]$Key)
-  $lang = if ($script:i18n.ContainsKey($script:uiLanguage)) { $script:uiLanguage } else { 'en' }
+  param([Parameter(Mandatory=$true)][string]$Key, [string]$Language)
+  $wanted = if ($Language) { $Language } else { $script:uiLanguage }
+  $lang = if ($script:i18n.ContainsKey($wanted)) { $wanted } else { 'en' }
   if ($script:i18n[$lang].ContainsKey($Key)) { return $script:i18n[$lang][$Key] }
   if ($script:i18n['en'].ContainsKey($Key)) { return $script:i18n['en'][$Key] }
   return $Key

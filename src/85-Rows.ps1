@@ -1142,20 +1142,40 @@ function Update-CustomerDataLayout {
     # braucht.
     $lists = @($customerNamesList, $groupFavoritesList, $recentLoginsList)
     $listTop = 58          # ueber der Liste: Kartentitel und Hinweiszeile
-    $belowList = 8 + 32    # Abstand und Knopfreihe
+    # Unter der Liste steht seit 0.18.0 nichts mehr. Die Knopfreihe kostete dort 8 + 32 px je Karte,
+    # und genau die fehlten: gemessen brauchte der Bereich bei 1146x854 761 px bei 639 px Sicht -
+    # 122 px zu viel, also scrollte er. Die Knoepfe stehen jetzt rechts in der Titelzeile, wo ohnehin
+    # nur der kurze Kartentitel steht.
+    $belowList = 0
     $cardChrome = $listTop + $belowList + 16   # + Innenabstand von Update-StackedCards
     $avail = $tabCustomerData.ClientSize.Height - 48 - (2 * 12) - 6
     $perList = [int](($avail - (3 * $cardChrome)) / 3)
-    # Untergrenze: unter sechs Zeilen wird eine Liste zum Guckloch. Passt das nicht mehr ins
-    # Fenster, scrollt der Bereich - wie die Einstellungen, und aus demselben Grund.
-    if ($perList -lt 120) { $perList = 120 }
+    # Untergrenze: sechs Zeilen plus Spaltenkopf. Aus der Schrifthoehe gerechnet und nicht als feste
+    # Zahl gesetzt - die sieben Designs bringen verschiedene Schriftgroessen mit, und eine Zahl, die
+    # in einem davon sechs Zeilen ergibt, ergibt in einem anderen vier. Passt auch das nicht mehr
+    # ins Fenster, scrollt der Bereich - wie die Einstellungen, und aus demselben Grund.
+    $rowHeight = if ($customerNamesList -and $customerNamesList.Font) { $customerNamesList.Font.Height } else { 15 }
+    $minList = 7 * $rowHeight
+    if ($perList -lt $minList) { $perList = $minList }
     foreach ($l in $lists) {
       if (-not $l) { continue }
+      $card = $l.Parent
       $l.Height = $perList
-      # Die Knopfreihe wandert mit der Liste; sie steht in jeder der drei Karten an derselben Stelle.
-      foreach ($sibling in $l.Parent.Controls) {
-        if ($sibling -is [System.Windows.Forms.Button]) { $sibling.Top = $l.Bottom + 8 }
+      # Rechtsbuendig von rechts nach links gelegt, damit die Reihenfolge im Fenster der im
+      # Quelltext entspricht und der Kartentitel links lesbar bleibt.
+      $right = $card.ClientSize.Width - 14
+      $buttons = @($card.Controls | Where-Object { $_ -is [System.Windows.Forms.Button] })
+      for ($i = $buttons.Count - 1; $i -ge 0; $i--) {
+        $b = $buttons[$i]
+        $b.Top = 12
+        $b.Left = [Math]::Max(14, $right - $b.Width)
+        $right = $b.Left - 8
       }
+      # Die Hinweiszeile endet vor dem linken Knopf. Ohne das laeuft ihr Rechteck unter die Knoepfe -
+      # sichtbar faellt es nicht auf, weil der Text kuerzer ist als sein Feld, aber die Layout-Probe
+      # meldet dann zu Recht eine Ueberlappung, und bei einem laengeren deutschen Text waere sie echt.
+      $hint = @($card.Controls | Where-Object { [string]$_.Tag -eq 'hint' })[0]
+      if ($hint -and $buttons.Count -gt 0) { $hint.Width = [Math]::Max(120, $right - $hint.Left) }
     }
 
     Update-StackedCards -Panel $tabCustomerData -Cards @($cardCustomerNames, $cardGroupFavorites, $cardRecentLogins)
@@ -1914,6 +1934,9 @@ $clearCacheButton.Add_Click({
   $script:wingetVersionCache = @{}
   $script:diskCache = @{}
   $script:diskCacheLoaded = $false
+  # Auch den Merker loeschen: sonst schreibt der naechste Save-PendingVersionDiskCache die eben
+  # geleerte Tabelle als Datei zurueck, die der Benutzer gerade hat loeschen lassen.
+  $script:diskCacheDirty = $false
   Remove-Item -LiteralPath $script:versionCachePath -Force -ErrorAction SilentlyContinue
   Write-Log "Version cache cleared."
   Update-Status (Get-UiString 'CacheClearedStatus')
@@ -2016,16 +2039,22 @@ function Clear-TenantViews {
   try {
     # Der Sammel-Editor haelt eine Liste des VORIGEN Tenants; beim naechsten Oeffnen neu laden.
     $script:appSettingsLoaded = $false
-    # First and most important: a cached inventory belongs to the previous tenant.
-    if (Get-Command Clear-Win32AppsCache -ErrorAction SilentlyContinue) { Clear-Win32AppsCache }
-    # Gruppennamen gehoeren genauso zum Kunden wie das Inventar - eine GUID des vorigen Tenants
-    # duerfte hier nie mit dem Namen von dort auftauchen.
-    if (Get-Command Clear-EntraGroupNameCache -ErrorAction SilentlyContinue) { Clear-EntraGroupNameCache }
-    # Versionen sind kundenunabhaengig - aber ein Tenant-Wechsel ist der Punkt, an dem man frische
-    # Zahlen erwartet, und die zweite Anmeldung soll nicht auf der ersten sitzen.
-    if (Get-Command Clear-LatestVersionCache -ErrorAction SilentlyContinue) { Clear-LatestVersionCache }
-    # Welche Installationsquelle antwortet, ist eine Eigenschaft DES TENANTS.
-    if (Get-Command Clear-InstallProbeSource -ErrorAction SilentlyContinue) { Clear-InstallProbeSource }
+    # Die kundenbezogenen Zwischenspeicher - OHNE Get-Command-Gatter, und das ist der Punkt.
+    #
+    # Vorher stand vor jedem dieser vier Aufrufe ein "if (Get-Command X -ErrorAction
+    # SilentlyContinue)". In einem Ein-Datei-Skript sind diese Funktionen immer definiert; das Gatter
+    # schuetzte also vor nichts - aber es haette eine Umbenennung oder einen Tippfehler lautlos in ein
+    # "wird uebersprungen" verwandelt. Und was dieser Riegel verhindert, ist nicht Kosmetik: das
+    # Inventar, die Gruppennamen und die Installationsquelle gehoeren dem VORIGEN Kunden. Ein
+    # stillschweigend uebersprungener Aufruf zeigt Kunde A im Fenster von Kunde B.
+    #
+    # Dass diese Liste vollstaendig ist, haelt jetzt eine StaticCheck-Regel: jede neue Funktion, die
+    # einen tenantbezogenen Zwischenspeicher leert, muss hier genannt sein oder ausdruecklich als
+    # nicht-tenantbezogen eingetragen werden.
+    Clear-Win32AppsCache          # ein zwischengespeichertes Inventar gehoert dem vorigen Tenant
+    Clear-EntraGroupNameCache     # eine GUID des vorigen Tenants darf hier nie mit DEM Namen von dort auftauchen
+    Clear-LatestVersionCache      # kundenunabhaengig, aber beim Wechsel erwartet man frische Zahlen
+    Clear-InstallProbeSource      # welche Installationsquelle antwortet, ist eine Eigenschaft DES TENANTS
     # Update scan
     $script:updateApps = @()
     if ($updateListBox) { $updateListBox.Items.Clear() }

@@ -17,6 +17,9 @@ BeforeAll {
     'Add-DeferredAction', 'Test-OperationRunning', 'Invoke-PendingDeferredActions', 'Format-ErrorDetail'))))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '75-UiState.ps1' -Name @(
     'Test-ProgressVisible', 'Request-RunCancel'))))
+  # Request-RunCancel stoppt seit 0.18.0 auch den Vorab-Bau: ein Abbruch soll keinen Paketbau
+  # stehenlassen, der fuer einen Lauf baut, den es nicht mehr gibt.
+  . ([scriptblock]::Create((Get-SourceFunctionText -Part '35-Packaging.ps1' -Name 'Stop-PackagePrebuild')))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '90-Main.ps1' -Name 'Test-DeferWhileRunning')))
 }
 

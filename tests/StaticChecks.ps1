@@ -354,4 +354,161 @@ Assert-True ($missingGlyph.Count -eq 0) (
   "Section(s) missing from `$script:navGlyphs ({0}); their sidebar entry would have no icon while every neighbour has one: {1}" -f
     $missingGlyph.Count, ($missingGlyph -join ', '))
 
+# --- Hilfsmittel fuer die Regeln darunter: in WELCHER Funktion steht dieser Aufruf? ---------------
+function Get-EnclosingFunctionName {
+  param([Parameter(Mandatory)]$Node)
+  $n = $Node.Parent
+  while ($n) {
+    if ($n -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return [string]$n.Name }
+    $n = $n.Parent
+  }
+  return ''
+}
+
+# Kein CIM/WMI-Aufruf auf der obersten Ebene vor dem Smoke-Tor.
+#
+# Gemessen am 31.08.2026: ein einzelnes `Get-CimInstance Win32_OperatingSystem` im Startpfad kostete
+# 398-425 ms - fuer EINE Protokollzeile, und damit rund 5 % der gesamten Startzeit von 7,4 s. Es war
+# der teuerste Einzelposten des Starts. CIM startet eine Sitzung zum WMI-Dienst; das ist nichts, was
+# man beilaeufig fuer eine Auskunft tut, die [Environment]::OSVersion in 0 ms liefert.
+#
+# In einer FUNKTION ist es erlaubt (83-OwnPackage fragt Win32_DeviceGuard, bevor es die Sandbox
+# startet - dort wartet jemand bewusst). Verboten ist nur der Startpfad, den jeder Start bezahlt.
+$cimCalls = [Collections.Generic.List[string]]::new()
+foreach ($call in $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+    $node.GetCommandName() -in 'Get-CimInstance', 'Get-WmiObject', 'New-CimSession'
+  }, $true)) {
+  if ($call.Extent.StartLineNumber -ge $gateLine) { continue }
+  $node = $call.Parent
+  $nested = $false
+  while ($node) {
+    if ($node -is [System.Management.Automation.Language.FunctionDefinitionAst] -or
+        $node -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) { $nested = $true; break }
+    $node = $node.Parent
+  }
+  if (-not $nested) { $cimCalls.Add(('line {0}: {1}' -f $call.Extent.StartLineNumber, ($call.Extent.Text -split "`r`n")[0].Trim())) }
+}
+Assert-True ($cimCalls.Count -eq 0) (
+  "CIM/WMI call on the top level before the smoke gate ({0} site(s)); measured at 398-425 ms each, paid by every single start:`r`n  {1}" -f
+    $cimCalls.Count, ($cimCalls -join "`r`n  "))
+
+# Kein Netzaufruf ohne Zeitablauf.
+#
+# Ohne -TimeoutSec wartet Invoke-RestMethod in PowerShell 7 UNBEGRENZT. Gemessen am 31.08.2026:
+# 15 von 22 Aufrufstellen hatten keine Angabe, und alle laufen auf dem UI-Faden - eine Antwort, die
+# nie kommt, war ein eingefrorenes Fenster ohne Abbruchweg. Wer eine neue Stelle schreibt, geht
+# entweder ueber Invoke-GraphRest (40-Graph; Zeitablauf, 429-Wiederholung, Abbruchpruefung) oder
+# nennt -TimeoutSec ausdruecklich.
+#
+# Die einzige Ausnahme ist der Aufruf INNERHALB von Invoke-GraphRest selbst: der setzt TimeoutSec
+# ueber ein Splatting-Hashtable, das ein Parser nicht als Parameter sieht.
+$noTimeout = [Collections.Generic.List[string]]::new()
+foreach ($call in $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+    $node.GetCommandName() -in 'Invoke-RestMethod', 'Invoke-WebRequest'
+  }, $true)) {
+  if ((Get-EnclosingFunctionName -Node $call) -eq 'Invoke-GraphRest') { continue }
+  $hasTimeout = $false
+  foreach ($element in $call.CommandElements) {
+    if ($element -is [System.Management.Automation.Language.CommandParameterAst] -and
+        $element.ParameterName -like 'Timeout*') { $hasTimeout = $true; break }
+  }
+  if (-not $hasTimeout) { $noTimeout.Add(('line {0}: {1}' -f $call.Extent.StartLineNumber, ($call.Extent.Text -split "`r`n")[0].Trim())) }
+}
+Assert-True ($noTimeout.Count -eq 0) (
+  "HTTP call without -TimeoutSec ({0} site(s)); PowerShell 7 then waits forever, and these run on the UI thread. Use Invoke-GraphRest or name a timeout:`r`n  {1}" -f
+    $noTimeout.Count, ($noTimeout -join "`r`n  "))
+
+# Die Layout-Tabelle muss echte Funktionen und echte Bereiche nennen.
+#
+# $script:sectionLayoutFunctions (75-UiState) ist seit dem 31.08.2026 die EINE Zuordnung
+# Bereich -> Layout-Funktion; Show-Section, $form.Add_Resize und Set-ActiveTheme lesen alle daraus.
+# Vorher hatte jeder dieser drei seine eigene Liste, und die waren nachweislich verschieden: zwei
+# Bereiche ordneten sich beim Ziehen am Fensterrand gar nicht neu an.
+#
+# Der Preis dafuer, dass die Aufrufe kein Get-Command-Gatter mehr haben: ein Tippfehler in dieser
+# Tabelle waere ein Bereich, der sich nie neu anordnet, ohne jede Fehlermeldung. Deshalb hier.
+$layoutTable = [regex]::Match($content, '(?s)\$script:sectionLayoutFunctions\s*=\s*@\{(?<body>.*?)\r\n\}')
+Assert-True $layoutTable.Success '$script:sectionLayoutFunctions not found; the section-layout checks cannot run.'
+$layoutPairs = @([regex]::Matches($layoutTable.Groups['body'].Value, "(?m)^\s*(?<key>[a-z]+)\s*=\s*'(?<fn>[A-Za-z][A-Za-z0-9-]*)'") |
+  ForEach-Object { [pscustomobject]@{ Key = $_.Groups['key'].Value; Fn = $_.Groups['fn'].Value } })
+Assert-True ($layoutPairs.Count -gt 0) '$script:sectionLayoutFunctions was found but contains no key/function pairs.'
+$definedFunctions = [Collections.Generic.HashSet[string]]::new([string[]]$functionNames, [StringComparer]::OrdinalIgnoreCase)
+$missingLayoutFns = @($layoutPairs | Where-Object { -not $definedFunctions.Contains($_.Fn) } | ForEach-Object { "$($_.Key) -> $($_.Fn)" })
+Assert-True ($missingLayoutFns.Count -eq 0) (
+  "`$script:sectionLayoutFunctions names {0} function(s) that do not exist; that section would silently never be re-laid out: {1}" -f
+    $missingLayoutFns.Count, ($missingLayoutFns -join ', '))
+$strayLayoutKeys = @($layoutPairs | Where-Object { $_.Key -notin $sectionKeys } | ForEach-Object { $_.Key })
+Assert-True ($strayLayoutKeys.Count -eq 0) (
+  "`$script:sectionLayoutFunctions names {0} key(s) that are not Add-Section keys, so the entry can never match: {1}" -f
+    $strayLayoutKeys.Count, ($strayLayoutKeys -join ', '))
+
+# Der Tenant-Riegel muss vollstaendig sein.
+#
+# Clear-TenantViews ist die EINE Stelle, die beim Anmelden, Trennen und Abmelden alles wegwirft, was
+# einem bestimmten Kunden gehoert. Was dort fehlt, zeigt Kunde A im Fenster von Kunde B - bei einem
+# MSP-Werkzeug der Unterschied zwischen "Pilot-Gruppe von Kunde A" und "falsche Organisation".
+#
+# Geprueft wird gegen die Wirklichkeit statt gegen eine Liste: JEDE Funktion, die einen
+# Zwischenspeicher oder eine gemerkte Quelle leert, muss im Riegel genannt sein - oder hier
+# ausdruecklich als nicht-tenantbezogen eingetragen werden. Ein neuer Zwischenspeicher fuehrt damit
+# zu einer Entscheidung, nicht zu einem Vergessen.
+$tenantBarrier = @($ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Clear-TenantViews'
+  }, $true))
+Assert-True ($tenantBarrier.Count -eq 1) 'Clear-TenantViews not found exactly once; the tenant-barrier check cannot run.'
+# Ueber den PARSER, nicht ueber den Text der Funktion. Die erste Fassung dieser Regel suchte den
+# Funktionsnamen als Zeichenfolge im Rumpf - und die Gegenpruefung (Aufruf auskommentieren) blieb
+# gruen, weil der Name im Kommentar stehenblieb. Eine auskommentierte Zeile ist kein Aufruf.
+$barrierCalls = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($inner in $tenantBarrier[0].FindAll({
+    param($node) $node -is [System.Management.Automation.Language.CommandAst]
+  }, $true)) {
+  $callName = $inner.GetCommandName()
+  if ($callName) { [void]$barrierCalls.Add([string]$callName) }
+}
+# Bewusst NICHT tenantbezogen, mit Begruendung:
+#   Clear-GraphTokenCache       - haengt an der ANMELDUNG, nicht am Tenant; wird beim Abmelden gerufen.
+#   Clear-GraphInventoryRawCache - wird von Clear-Win32AppsCache mitgerufen, das im Riegel steht.
+$notTenantScoped = 'Clear-GraphTokenCache', 'Clear-GraphInventoryRawCache'
+$cacheClearers = @($functionNames | Where-Object { $_ -match '^clear-.*(cache|source)$' } | Sort-Object -Unique)
+$missingFromBarrier = [Collections.Generic.List[string]]::new()
+foreach ($fn in $cacheClearers) {
+  $real = @($ast.FindAll({
+      param($node)
+      $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -like $fn
+    }, $true))
+  $name = if ($real.Count -gt 0) { [string]$real[0].Name } else { $fn }
+  if ($name -in $notTenantScoped) { continue }
+  if (-not $barrierCalls.Contains($name)) { $missingFromBarrier.Add($name) }
+}
+Assert-True ($missingFromBarrier.Count -eq 0) (
+  "Cache-clearing function(s) not called from Clear-TenantViews ({0}): {1}. Either call them there or add them to `$notTenantScoped in this check with a reason - a cache that survives a tenant switch shows customer A's data to customer B." -f
+    $missingFromBarrier.Count, (($missingFromBarrier | Sort-Object) -join ', '))
+
+# Der Versionscache wird nicht je Paket geschrieben.
+#
+# Gemessen am 31.08.2026: Save-VersionDiskCache stand INNERHALB von Get-WingetVersions, und das war
+# die einzige Aufrufstelle. Eine Update-Suche ueber 100 Apps schrieb damit 100 Mal die ganze Tabelle -
+# je Paket ein Pruefdurchlauf ueber bis zu 2000 Eintraege, ein ConvertTo-Json darueber und eine
+# vollstaendige Datei, auf dem UI-Faden, zwischen zwei Netzabfragen. Geschrieben wird jetzt einmal je
+# Schleife (Save-PendingVersionDiskCache).
+$eagerCacheWrites = [Collections.Generic.List[string]]::new()
+foreach ($call in $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+    $node.GetCommandName() -eq 'Save-VersionDiskCache'
+  }, $true)) {
+  $scope = Get-EnclosingFunctionName -Node $call
+  if ($scope -eq 'Save-PendingVersionDiskCache') { continue }
+  $eagerCacheWrites.Add(('line {0}: called from {1}' -f $call.Extent.StartLineNumber, $(if ($scope) { $scope } else { 'the script body' })))
+}
+Assert-True ($eagerCacheWrites.Count -eq 0) (
+  "Save-VersionDiskCache is called outside Save-PendingVersionDiskCache ({0} site(s)); writing the whole cache per package cost one full file write per app during a scan:`r`n  {1}" -f
+    $eagerCacheWrites.Count, ($eagerCacheWrites -join "`r`n  "))
+
 Write-Host "Static checks passed for WinTuner GUI $($version.Groups['v'].Value): $($functionNames.Count) functions, $($enKeys.Count) UI keys per language."

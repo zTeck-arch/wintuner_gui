@@ -3,12 +3,14 @@
 # UND Inventar-Abfrage teilen ihn sich, und wer ihn besetzt findet, arbeitet inline weiter.
 $script:pkgRunspaceInUse = $false
 
-function Get-PackageRunspace {
-  if ($script:pkgRunspace -and $script:pkgRunspace.RunspaceStateInfo.State -eq 'Opened') {
-    return $script:pkgRunspace
-  }
+# Erzeugt EINEN Runspace mit importiertem WinTuner-Modul.
+#
+# Herausgeloest, weil es seit dem Vorab-Bau zwei davon gibt: einen fuer den Hauptbau und einen, der
+# nebenher schon die naechste App baut. Geteilt werden duerfen sie nicht - ein Runspace fuehrt genau
+# eine Pipeline, und das Nebeneinander ist der ganze Sinn der Sache.
+function New-PackagingRunspace {
+  param([string]$Purpose = 'packaging')
   try {
-    if ($script:pkgRunspace) { try { $script:pkgRunspace.Dispose() } catch { } }   # class 3: teardown
     $rs = [runspacefactory]::CreateRunspace()
     $rs.ApartmentState = [System.Threading.ApartmentState]::MTA
     $rs.ThreadOptions  = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
@@ -20,17 +22,25 @@ function Get-PackageRunspace {
     if ($init.Streams.Error.Count -gt 0) {
       $msg = ($init.Streams.Error | ForEach-Object { $_.ToString() }) -join '; '
       $init.Dispose(); $rs.Dispose()
-      Write-Log ("Background packaging unavailable (module import failed): {0}" -f $msg)
+      Write-Log ("Background {0} unavailable (module import failed): {1}" -f $Purpose, $msg)
       return $null
     }
     $init.Dispose()
-    $script:pkgRunspace = $rs
-    Write-Log "Background packaging runspace ready (WinTuner module imported)."
+    Write-Log ("Background {0} runspace ready (WinTuner module imported)." -f $Purpose)
     return $rs
   } catch {
-    Write-Log ("Could not create the background packaging runspace: {0}" -f $_.Exception.Message)
+    Write-Log ("Could not create the background {0} runspace: {1}" -f $Purpose, $_.Exception.Message)
     return $null
   }
+}
+
+function Get-PackageRunspace {
+  if ($script:pkgRunspace -and $script:pkgRunspace.RunspaceStateInfo.State -eq 'Opened') {
+    return $script:pkgRunspace
+  }
+  if ($script:pkgRunspace) { try { $script:pkgRunspace.Dispose() } catch { } }   # class 3: teardown
+  $script:pkgRunspace = New-PackagingRunspace -Purpose 'packaging'
+  return $script:pkgRunspace
 }
 
 # Runs New-WtWingetPackage in the background runspace and keeps the UI alive while it works.
@@ -42,6 +52,15 @@ function Invoke-WtPackageBuild {
     [string]$Label = '',
     [int]$TimeoutMinutes = 30
   )
+  # Hat der Vorab-Bau GENAU dieses Paket schon gebaut, wird sein Ergebnis uebernommen statt es ein
+  # zweites Mal zu bauen. Steht hier ganz vorn, weil das der einzige Trichter ist, durch den jeder
+  # Paketbau laeuft - egal ob Stapellauf, Favoritenlauf oder einzelner Klick. Passt der Schluessel
+  # nicht, gibt Get-PrebuildResult $null zurueck und verwirft den Vorab-Bau; gebaut wird dann wie
+  # immer. Auch ein GESCHEITERTER Vorab-Bau wird uebernommen: der Fehler waere hier derselbe, und
+  # die Rueckfall-Logik in New-WingetPackageWithFallback sieht ihn genauso.
+  $adopted = Get-PrebuildResult -Arguments $Arguments -Label $Label -TimeoutMinutes $TimeoutMinutes
+  if ($adopted) { return $adopted }
+
   $rs = Get-PackageRunspace
   if (-not $rs) {
     Write-Log "Falling back to synchronous packaging (UI will block until the package is built)."
@@ -167,6 +186,244 @@ function Invoke-PackageBuildWithThrottleRetry {
   }
 }
 
+# Der Argumentsatz fuer New-WtWingetPackage - OHNE Version, die kommt je Versuch dazu.
+#
+# Herausgeloest, weil ihn seit dem Vorab-Bau ZWEI Wege brauchen: der Hauptlauf und der Bau, der
+# nebenher schon die naechste App vorbereitet. Baute der eine mit anderen Optionen als der andere
+# und der Hauptlauf uebernaehme dessen Ergebnis, entstuende ein Paket mit falschen Einstellungen -
+# und das faellt nicht beim Bauen auf, sondern erst auf den Endgeraeten. Eine Quelle, keine Kopie.
+#
+# Optionale Angaben landen nur dann im Satz, wenn sie gesetzt sind: sonst behaelt das Modul seine
+# eigenen Vorgaben. Genau deshalb duerfen die Schluessel auch fehlen statt leer zu sein - beide
+# Seiten bilden den Satz ueber DIESE Funktion, also fehlen sie auf beiden Seiten gleich.
+function Get-WingetPackageArguments {
+  param(
+    [string]$PackageId,
+    [string]$PackageFolder,
+    [string]$Architecture,
+    [string]$InstallerContext,
+    [string]$Locale,
+    [string]$PreferredInstaller,
+    [string]$InstallerArguments,
+    [switch]$PackageScript
+  )
+  $base = @{ PackageId = $PackageId; PackageFolder = $PackageFolder; ErrorAction = 'Stop' }
+  if ($Architecture)     { $base.Architecture     = $Architecture }
+  if ($InstallerContext) { $base.InstallerContext = $InstallerContext }
+  if ($Locale)           { $base.Locale           = $Locale }
+  # Das Modul schreibt den Parameter "PreferedInstaller" (ein 'r'). Die Oberflaeche benutzt die
+  # richtige Schreibweise, der Tippfehler bleibt auf diese eine Zeile beschraenkt.
+  if ($PreferredInstaller) { $base.PreferedInstaller  = $PreferredInstaller }
+  if ($InstallerArguments) { $base.InstallerArguments = $InstallerArguments }
+  if ($PackageScript)      { $base.PackageScript = $true }
+  return $base
+}
+
+# Der Schluessel ueber einen Argumentsatz: sortierte Name=Wert-Paare, ErrorAction ausgenommen.
+#
+# Er entscheidet, ob ein vorab gebautes Paket uebernommen werden darf. Deshalb geht der
+# VOLLSTAENDIGE Satz ein und nicht nur Paket-Id und Version: zwei Baeufe derselben Version mit
+# unterschiedlicher Architektur oder unterschiedlichem Installerkontext sind verschiedene Pakete,
+# und sie sehen von aussen gleich aus. ErrorAction faellt heraus, weil es nur steuert, wie ein
+# Fehler gemeldet wird, und nichts am erzeugten Paket aendert.
+function Get-PackageBuildKey {
+  param([Parameter(Mandatory)][hashtable]$Arguments)
+  $names = @($Arguments.Keys |
+    Where-Object { [string]$_ -ne 'ErrorAction' } |
+    Sort-Object -Property { [string]$_ } -CaseSensitive)
+  return (@($names | ForEach-Object { '{0}={1}' -f $_, [string]$Arguments[$_] }) -join '|')
+}
+
+# --- Vorab-Bau: das Paket der NAECHSTEN App entsteht, waehrend die aktuelle hochgeladen wird ---
+#
+# Gemessen an einem echten Lauf (8 Vorgaenge, ~8,5 Minuten) steht Paketieren gegen Hochladen bei
+# Logi Tune 256 s zu 32 s, bei Chrome 13 s zu 25 s. Nacheinander addiert sich beides; nebeneinander
+# faellt je App grob die kuerzere der beiden Phasen weg.
+#
+# Der Upload bleibt sequenziell und bleibt auf dem UI-Faden: Intune drosselt (HTTP 429 ist real
+# aufgetreten), und die Graph-Sitzung gilt je Runspace. Nebenlaeufig ist ausschliesslich der
+# Paketbau, und der schreibt nur lokale Dateien.
+$script:prebuildRunspace = $null
+# Der laufende Vorab-Bau: @{ Key; Label; Shell; Handle; Stopwatch }. Immer hoechstens einer.
+$script:prebuild = $null
+# Vom Stapellauf vorgemerkt, von Update-SingleApp angestossen: @{ Arguments; Label }.
+$script:pendingPrebuild = $null
+
+function Get-PrebuildRunspace {
+  if ($script:prebuildRunspace -and $script:prebuildRunspace.RunspaceStateInfo.State -eq 'Opened') {
+    return $script:prebuildRunspace
+  }
+  if ($script:prebuildRunspace) { try { $script:prebuildRunspace.Dispose() } catch { } }   # class 3: teardown
+  $script:prebuildRunspace = New-PackagingRunspace -Purpose 'prebuild'
+  return $script:prebuildRunspace
+}
+
+# Startet den Vorab-Bau. Gibt $true zurueck, wenn wirklich einer laeuft.
+#
+# Scheitert hier irgendetwas, ist das folgenlos: der Hauptlauf baut wie bisher selbst. Deshalb wird
+# nichts geworfen und nichts angezeigt - nur protokolliert.
+function Start-PackagePrebuild {
+  param([Parameter(Mandatory)][hashtable]$Arguments, [string]$Label = '')
+  if ($script:cancelBatch) { return $false }
+  if ($script:prebuild) { return $false }
+  $rs = Get-PrebuildRunspace
+  if (-not $rs) { return $false }
+  try {
+    $ps = [powershell]::Create()
+    $ps.Runspace = $rs
+    [void]$ps.AddCommand('New-WtWingetPackage').AddParameters($Arguments)
+    $handle = $ps.BeginInvoke()
+    $script:prebuild = @{
+      Key       = (Get-PackageBuildKey -Arguments $Arguments)
+      Label     = $Label
+      Shell     = $ps
+      Handle    = $handle
+      Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    }
+    Write-Log ("Prebuild started for {0} while the current app uploads." -f $Label)
+    return $true
+  } catch {
+    Write-Log ("Prebuild could not be started for {0}: {1}" -f $Label, $_.Exception.Message)
+    $script:prebuild = $null
+    return $false
+  }
+}
+
+# Stoesst den vorgemerkten Vorab-Bau an. Aufgerufen von Update-SingleApp, sobald das Paket der
+# AKTUELLEN App fertig ist und der Upload beginnt - nicht frueher, sonst bauen zwei gleichzeitig
+# und nehmen sich gegenseitig die Leitung weg.
+function Start-PendingPackagePrebuild {
+  $pending = $script:pendingPrebuild
+  $script:pendingPrebuild = $null
+  if (-not $pending -or -not $pending.Arguments) { return }
+  [void](Start-PackagePrebuild -Arguments $pending.Arguments -Label ([string]$pending.Label))
+}
+
+# Verwirft einen laufenden Vorab-Bau. Gefahrlos: er schreibt nur lokale Dateien, im Gegensatz zu
+# einem Upload, der deshalb nie unterbrochen wird.
+function Stop-PackagePrebuild {
+  param([string]$Reason = '')
+  $pb = $script:prebuild
+  $script:prebuild = $null
+  $script:pendingPrebuild = $null
+  if (-not $pb) { return }
+  try { $pb.Shell.Stop() } catch { }      # class 3: teardown
+  try { $pb.Shell.Dispose() } catch { }   # class 3: teardown
+  Write-Log ("Prebuild for {0} discarded{1}." -f $pb.Label, $(if ($Reason) { " ($Reason)" } else { '' }))
+}
+
+function Close-PrebuildRunspace {
+  Stop-PackagePrebuild -Reason 'shutting down'
+  if ($script:prebuildRunspace) {
+    try { $script:prebuildRunspace.Close(); $script:prebuildRunspace.Dispose() } catch { }   # class 3: teardown
+    $script:prebuildRunspace = $null
+    Write-Log 'Background prebuild runspace closed.'
+  }
+}
+
+# Uebernimmt das Ergebnis des Vorab-Baus - aber NUR bei exakt gleichem Argumentsatz.
+#
+# Das ist die Stelle, an der ein Fehler teuer waere: uebernaehme sie ein Paket, das mit anderen
+# Optionen gebaut wurde, faellt das nicht beim Bauen auf, sondern erst auf den Endgeraeten. Deshalb
+# entscheidet der Schluessel ueber den VOLLSTAENDIGEN Satz, und ein nicht passender Vorab-Bau wird
+# verworfen statt irgendwie verwertet.
+#
+# Gibt $null zurueck, wenn nichts zu uebernehmen ist - dann baut der Aufrufer wie bisher selbst.
+function Get-PrebuildResult {
+  param([Parameter(Mandatory)][hashtable]$Arguments, [string]$Label = '', [int]$TimeoutMinutes = 30)
+  if (-not $script:prebuild) { return $null }
+
+  $wanted = Get-PackageBuildKey -Arguments $Arguments
+  if (-not [string]::Equals($wanted, [string]$script:prebuild.Key, [System.StringComparison]::Ordinal)) {
+    Stop-PackagePrebuild -Reason ("does not match what {0} needs" -f $Label)
+    return $null
+  }
+
+  # Erst aus dem Skript-Bereich nehmen, dann warten: sonst koennte ein zweiter Aufruf waehrend des
+  # Wartens denselben Bau ein zweites Mal einsammeln.
+  $pb = $script:prebuild
+  $script:prebuild = $null
+  try {
+    while (-not $pb.Handle.IsCompleted) {
+      [System.Windows.Forms.Application]::DoEvents()
+      Start-Sleep -Milliseconds 60
+      if ($script:cancelBatch) {
+        try { $pb.Shell.Stop() } catch { }   # class 3: teardown
+        Write-Log ("Prebuild for {0} canceled by user." -f $pb.Label)
+        return @{ Succeeded = $false; Result = $null; ErrorMessage = 'Canceled by user'; TimedOut = $false }
+      }
+      if ($pb.Stopwatch.Elapsed.TotalMinutes -ge $TimeoutMinutes) {
+        try { $pb.Shell.Stop() } catch { }   # class 3: teardown
+        Write-Log ("Prebuild for {0} timed out after {1} minute(s)." -f $pb.Label, $TimeoutMinutes)
+        return @{ Succeeded = $false; Result = $null; ErrorMessage = "Packaging timed out after $TimeoutMinutes minute(s)"; TimedOut = $true }
+      }
+    }
+    $out = $pb.Shell.EndInvoke($pb.Handle)
+    if ($pb.Shell.Streams.Error.Count -gt 0) {
+      $msg = ($pb.Shell.Streams.Error | ForEach-Object { $_.ToString() }) -join '; '
+      Write-Log ("Prebuild for {0} failed; the run continues as if there had been none: {1}" -f $pb.Label, $msg)
+      return @{ Succeeded = $false; Result = $null; ErrorMessage = $msg; TimedOut = $false }
+    }
+    $result = if ($out -and $out.Count -gt 0) { $out[$out.Count - 1] } else { $null }
+    Write-Log ("Prebuild adopted for {0}: the package was already built ({1:n1}s ago), nothing was built twice." -f $Label, $pb.Stopwatch.Elapsed.TotalSeconds)
+    return @{ Succeeded = $true; Result = $result; ErrorMessage = $null; TimedOut = $false }
+  } catch {
+    $em = $_.Exception.Message
+    if ($_.Exception.InnerException -and $_.Exception.InnerException.Message) { $em = $_.Exception.InnerException.Message }
+    Write-Log ("Prebuild for {0} failed; the run continues as if there had been none: {1}" -f $pb.Label, $em)
+    return @{ Succeeded = $false; Result = $null; ErrorMessage = $em; TimedOut = $false }
+  } finally {
+    try { $pb.Shell.Dispose() } catch { }   # class 3: teardown
+  }
+}
+
+# Entscheidet, auf WELCHE Version zurueckgefallen wird, wenn die neueste nicht baubar ist.
+#
+# Die Regel steht bewusst an einer Stelle und ohne Fenster, damit sie pruefbar ist: die
+# naechstaeltere angebotene Version, und nur dann, wenn sie gegenueber dem, was im Tenant liegt,
+# ueberhaupt noch ein Update ist. Ein Rueckfall auf eine Version, die der Tenant schon hat, waere
+# kein Notnagel, sondern ein Rueckschritt - und ein Paket, das niemand braucht.
+function Get-PackageFallbackVersion {
+  param([string]$PackageId, [string]$LatestVersion, [string]$InstalledVersion)
+  $prev = Get-PreviousWingetVersion -PackageId $PackageId -LatestVersion $LatestVersion
+  if (-not $prev) { return $null }
+  if ($InstalledVersion -and -not (Test-IsNewerVersion $prev $InstalledVersion)) { return $null }
+  return $prev
+}
+
+# Baut die Ausweichversion. Bis 0.17.0 stand dieser Block drei Mal fast gleich in
+# New-WingetPackageWithFallback (404, Rueckfrage "Nein", und gar nicht im unbeaufsichtigten Lauf);
+# einmal davon ohne Protokollzeile, sodass ein stillschweigend aelteres Paket im Tenant landete.
+#
+# $Reason nennt den Grund im Klartext, weil im Protokoll sonst nur eine Version steht, die niemand
+# angefordert hat.
+function Invoke-PackageFallbackBuild {
+  param(
+    [Parameter(Mandatory)][hashtable]$Arguments,
+    [string]$PackageId,
+    [string]$LatestVersion,
+    [string]$InstalledVersion,
+    [int]$ThrottleRetries = 3,
+    [string]$Reason = 'the newest version could not be built',
+    [string]$OriginalError
+  )
+  $deployed = if ($InstalledVersion) { $InstalledVersion } else { '(unknown)' }
+  $prev = Get-PackageFallbackVersion -PackageId $PackageId -LatestVersion $LatestVersion -InstalledVersion $InstalledVersion
+  if (-not $prev) {
+    Write-Log ("Package fallback for {0}: {1} ({2}), and no older offered version is left that would still be an update over the deployed {3}. Nothing was built." -f $PackageId, $Reason, $LatestVersion, $deployed)
+    return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; UsedFallbackVersion=$false; ErrorMessage=$OriginalError }
+  }
+  Write-Log ("Package fallback for {0}: {1} ({2}); building the previously offered {3} instead - it is still an update over the deployed {4}." -f $PackageId, $Reason, $LatestVersion, $prev, $deployed)
+  try {
+    [void](Invoke-PackageBuildWithThrottleRetry -Arguments ($Arguments + @{ Version = $prev }) -Label $PackageId -MaxRetries $ThrottleRetries)
+    Write-Log ("Package fallback for {0}: {1} built successfully; {2} stays open until the upstream installer matches its manifest hash again." -f $PackageId, $prev, $LatestVersion)
+    return [pscustomobject]@{ Succeeded=$true; EffectiveVersion=$prev; UsedFallbackVersion=$true }
+  } catch {
+    Write-Log ("Package fallback for {0}: the previously offered {1} failed to build as well: {2}" -f $PackageId, $prev, $_.Exception.Message)
+    return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; UsedFallbackVersion=$false; ErrorMessage=$_.Exception.Message }
+  }
+}
+
 function New-WingetPackageWithFallback {
   param(
     [string]$PackageId,
@@ -187,47 +444,54 @@ function New-WingetPackageWithFallback {
     # das danach ohnehin an einer Hash-Abweichung scheiterte.
     [int]$ThrottleRetries = 3
   )
-  # Base arguments splatted into every New-WtWingetPackage attempt. Optional advanced options
-  # are only included when set, so the module keeps its own defaults otherwise.
-  $base = @{ PackageId = $PackageId; PackageFolder = $PackageFolder; ErrorAction = 'Stop' }
-  if ($Architecture)     { $base.Architecture     = $Architecture }
-  if ($InstallerContext) { $base.InstallerContext = $InstallerContext }
-  if ($Locale)           { $base.Locale           = $Locale }
-  # The module spells the parameter "PreferedInstaller" (one 'r'). The GUI side uses the correct
-  # spelling, so the typo stays contained to this one line.
-  if ($PreferredInstaller) { $base.PreferedInstaller  = $PreferredInstaller }
-  if ($InstallerArguments) { $base.InstallerArguments = $InstallerArguments }
-  if ($PackageScript)      { $base.PackageScript = $true }
+  # Der Argumentsatz kommt aus Get-WingetPackageArguments - derselben Funktion, die auch der
+  # Vorab-Bau benutzt. Nur so kann sein Ergebnis hier gefahrlos uebernommen werden.
+  $base = Get-WingetPackageArguments -PackageId $PackageId -PackageFolder $PackageFolder `
+    -Architecture $Architecture -InstallerContext $InstallerContext -Locale $Locale `
+    -PreferredInstaller $PreferredInstaller -InstallerArguments $InstallerArguments `
+    -PackageScript:$PackageScript
 
   $attemptVersion = $DesiredVersion
   if (-not $attemptVersion) { $attemptVersion = $LatestVersion }
   try {
     if ($attemptVersion) { [void](Invoke-PackageBuildWithThrottleRetry -Arguments ($base + @{ Version = $attemptVersion }) -Label $PackageId -MaxRetries $ThrottleRetries) }
     else { [void](Invoke-PackageBuildWithThrottleRetry -Arguments $base -Label $PackageId -MaxRetries $ThrottleRetries) }
-    return [pscustomobject]@{ Succeeded=$true; EffectiveVersion=$attemptVersion }
+    return [pscustomobject]@{ Succeeded=$true; EffectiveVersion=$attemptVersion; UsedFallbackVersion=$false }
   } catch {
     $m = $_.Exception.Message
+    $latest = if ($attemptVersion) { $attemptVersion } else { $LatestVersion }
+    $fallbackArgs = @{
+      Arguments = $base; PackageId = $PackageId; LatestVersion = $latest
+      InstalledVersion = $InstalledVersion; ThrottleRetries = $ThrottleRetries; OriginalError = $m
+    }
+
     if ($m -match '404' -or $m -match 'Not Found') {
-      $prev = Get-PreviousWingetVersion -PackageId $PackageId -LatestVersion $attemptVersion
-      # Only allow previous if it's newer than current tenant version (if known)
-      if ($prev -and ( -not $InstalledVersion -or (Test-IsNewerVersion $prev $InstalledVersion) )) {
-        try { [void](Invoke-PackageBuildWithThrottleRetry -Arguments ($base + @{ Version = $prev }) -Label $PackageId -MaxRetries $ThrottleRetries); return [pscustomobject]@{ Succeeded=$true; EffectiveVersion=$prev } } catch { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; ErrorMessage=$_.Exception.Message } }
-      } else { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; ErrorMessage=$m } }
-    } elseif ($m -match 'Hash mismatch') {
-      if ($AllowUserRetry) {
-        $res = [System.Windows.Forms.MessageBox]::Show((Get-UiString 'HashMismatchDialog'), (Get-UiString 'HashMismatchTitle'), [System.Windows.Forms.MessageBoxButtons]::YesNoCancel, [System.Windows.Forms.MessageBoxIcon]::Warning, [System.Windows.Forms.MessageBoxDefaultButton]::Button1)
-        if ($res -eq [System.Windows.Forms.DialogResult]::Yes) {
-          try { if ($attemptVersion) { [void](Invoke-PackageBuildWithThrottleRetry -Arguments ($base + @{ Version = $attemptVersion }) -Label $PackageId -MaxRetries $ThrottleRetries) } else { [void](Invoke-PackageBuildWithThrottleRetry -Arguments $base -Label $PackageId -MaxRetries $ThrottleRetries) }; return [pscustomobject]@{ Succeeded=$true; EffectiveVersion=$attemptVersion } } catch { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; ErrorMessage=$_.Exception.Message } }
-        } elseif ($res -eq [System.Windows.Forms.DialogResult]::No) {
-          $latest = $attemptVersion; if (-not $latest) { $latest = $LatestVersion }
-          $prev = Get-PreviousWingetVersion -PackageId $PackageId -LatestVersion $latest
-          # Only allow previous if it's newer than current tenant version (if known)
-          if ($prev -and ( -not $InstalledVersion -or (Test-IsNewerVersion $prev $InstalledVersion) )) {
-            try { [void](Invoke-PackageBuildWithThrottleRetry -Arguments ($base + @{ Version = $prev }) -Label $PackageId -MaxRetries $ThrottleRetries); return [pscustomobject]@{ Succeeded=$true; EffectiveVersion=$prev } } catch { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; ErrorMessage=$_.Exception.Message } }
-          } else { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; ErrorMessage=$m } }
-        } else { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; ErrorMessage="Cancelled by user" } }
-      } else { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; ErrorMessage=$m } }
-    } else { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; ErrorMessage=$m } }
+      return (Invoke-PackageFallbackBuild @fallbackArgs -Reason 'the manifest for the newest version is gone from the WinGet repository')
+    }
+
+    if ($m -notmatch 'Hash mismatch') { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; UsedFallbackVersion=$false; ErrorMessage=$m } }
+
+    # Eine Hash-Abweichung heisst: der Hersteller hat den Installer unter derselben Adresse
+    # ausgetauscht, das WinGet-Manifest kennt aber noch die alte Pruefsumme. Das ist nichts, was ein
+    # zweiter Versuch heilt, und es dauert regelmaessig Tage, bis das Manifest nachzieht.
+    if ($AllowUserRetry) {
+      $res = [System.Windows.Forms.MessageBox]::Show((Get-UiString 'HashMismatchDialog'), (Get-UiString 'HashMismatchTitle'), [System.Windows.Forms.MessageBoxButtons]::YesNoCancel, [System.Windows.Forms.MessageBoxIcon]::Warning, [System.Windows.Forms.MessageBoxDefaultButton]::Button1)
+      if ($res -eq [System.Windows.Forms.DialogResult]::Yes) {
+        try {
+          if ($attemptVersion) { [void](Invoke-PackageBuildWithThrottleRetry -Arguments ($base + @{ Version = $attemptVersion }) -Label $PackageId -MaxRetries $ThrottleRetries) }
+          else { [void](Invoke-PackageBuildWithThrottleRetry -Arguments $base -Label $PackageId -MaxRetries $ThrottleRetries) }
+          return [pscustomobject]@{ Succeeded=$true; EffectiveVersion=$attemptVersion; UsedFallbackVersion=$false }
+        } catch { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; UsedFallbackVersion=$false; ErrorMessage=$_.Exception.Message } }
+      }
+      if ($res -ne [System.Windows.Forms.DialogResult]::No) { return [pscustomobject]@{ Succeeded=$false; EffectiveVersion=$null; UsedFallbackVersion=$false; ErrorMessage="Cancelled by user" } }
+      return (Invoke-PackageFallbackBuild @fallbackArgs -Reason 'hash mismatch, and the user chose the previous version')
+    }
+
+    # Ohne Rueckfrage - der Stapellauf reicht -AllowUserRetry nicht durch - brach der Lauf hier bis
+    # 0.17.0 einfach ab, und die App blieb auf ihrem alten Stand stehen, bis jemand das Protokoll
+    # las. Ueber Wochen wird daraus genau die Luecke, die dieses Werkzeug schliessen soll. Die
+    # naechstaeltere angebotene Version ist kein Ersatz fuer die neueste, aber sie ist ein Update.
+    return (Invoke-PackageFallbackBuild @fallbackArgs -Reason 'hash mismatch on the newest version')
   }
 }
 
@@ -362,7 +626,10 @@ function Remove-SupersededByUnlinking {
     if ($removed -eq 0) { Write-Log "Unlink: no outgoing supersedence $NewAppId -> $OldAppId found; aborting (won't risk a blind delete)."; return $false }
     $body = @{ relationships = @($keep) } | ConvertTo-Json -Depth 8
     $updUri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$NewAppId/updateRelationships"
-    Invoke-RestMethod -Method POST -Uri $updUri -Headers $headers -Body $body -ErrorAction Stop | Out-Null
+    # updateRelationships ERSETZT die Beziehungsliste durch die mitgeschickte, ist also idempotent -
+    # ein zweiter Versuch nach einer Drosselung hinterlaesst denselben Zustand wie der erste.
+    Invoke-GraphRest -Method POST -Uri $updUri -Headers $headers -Body $body `
+      -Context ("unlink supersedence on {0}" -f $NewAppId) | Out-Null
     Write-Log ("Unlink: removed supersedence {0} -> {1}; kept {2} other outgoing relationship(s)." -f $NewAppId, $OldAppId, $keep.Count)
     Start-Sleep -Seconds 2
     try {
@@ -373,7 +640,8 @@ function Remove-SupersededByUnlinking {
       # relationship set so a transient delete failure never silently breaks supersedence.
       try {
         $restoreBody = @{ relationships = @($originalOutgoing) } | ConvertTo-Json -Depth 8
-        Invoke-RestMethod -Method POST -Uri $updUri -Headers $headers -Body $restoreBody -ErrorAction Stop | Out-Null
+        Invoke-GraphRest -Method POST -Uri $updUri -Headers $headers -Body $restoreBody `
+          -Context ("restore supersedence on {0}" -f $NewAppId) | Out-Null
         Write-Log ("Unlink rollback: restored {0} outgoing relationship(s) on {1} after delete failed." -f $originalOutgoing.Count, $NewAppId)
       } catch {
         Write-Log ("CRITICAL: could not restore relationships on {0} after delete of {1} failed: {2}" -f $NewAppId, $OldAppId, $_.Exception.Message)

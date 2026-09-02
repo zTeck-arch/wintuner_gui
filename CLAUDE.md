@@ -42,8 +42,8 @@ Invoke-ScriptAnalyzer -Path .\src   -Settings .\PSScriptAnalyzerSettings.psd1 -R
 Invoke-ScriptAnalyzer -Path .\tests -Settings .\PSScriptAnalyzerSettings.Tests.psd1 -Recurse
 ```
 
-Erwartet (gemessen am 28.08.2026, Stand 0.17.0 + unveröffentlichte Arbeit): StaticChecks grün
-(**338 Funktionen, 1000 UI-Keys je Sprache**), SmokeTest grün, LayoutProbe grün, **662 Pester** grün
+Erwartet (gemessen am 02.09.2026, Stand 0.17.0 + unveröffentlichte Arbeit): StaticChecks grün
+(**357 Funktionen, 1006 UI-Keys je Sprache**), SmokeTest grün, LayoutProbe grün, **768 Pester** grün
 (1 übersprungen), Analyzer **0 blockierend** (5 informational in `65-Theme.ps1` sind Altbestand).
 
 Die eine übersprungene Prüfung wechselt die Seite, je nachdem was auf dem Rechner installiert ist:
@@ -57,7 +57,7 @@ Die drei Läufer, die kein Parser ersetzt:
 |---|---|
 | `SmokeTest.ps1` | Ladefehler des gebauten Skripts (falsche Teil-Reihenfolge, Control vor seiner Erzeugung benutzt) |
 | `LayoutProbe.ps1` | überlappende Steuerelemente, abgeschnittener Text, zu geringer Kontrast, Karten die beim Scrollen verrutschen, **aufgeklappte** „Erweiterte Optionen", **ein Aufklapper der etwas außerhalb seiner Sektion verschiebt** — in **allen 7 Designs**, 2 Fenstergrößen × **2 Sprachen**, jeweils auf frischem Profil |
-| `StaticChecks.ps1` | Version/Kopf, UI-Key-Parität EN/DE, tote UI-Schlüssel, `-LiteralPath`-Regeln, `Show-Progress` ohne `Hide-Progress`, MessageBox auf oberster Ebene vor dem Smoke-Tor, `Add_Shown` mit Dialog ohne `Test-UnattendedRun`, Datenpfad außerhalb der zwei Wurzelfunktionen, **Sektion ohne Eintrag in `$navKeyOrder`/`$navGlyphs`** |
+| `StaticChecks.ps1` | Version/Kopf, UI-Key-Parität EN/DE, tote UI-Schlüssel, `-LiteralPath`-Regeln, `Show-Progress` ohne `Hide-Progress`, MessageBox auf oberster Ebene vor dem Smoke-Tor, `Add_Shown` mit Dialog ohne `Test-UnattendedRun`, Datenpfad außerhalb der zwei Wurzelfunktionen, Sektion ohne Eintrag in `$navKeyOrder`/`$navGlyphs`, **CIM/WMI im Startpfad**, **HTTP-Aufruf ohne `-TimeoutSec`**, **Layout-Tabelle mit unbekannter Funktion oder unbekanntem Bereich**, **Cache-Leerer, der nicht im Tenant-Riegel steht**, **`Save-VersionDiskCache` außerhalb von `Save-PendingVersionDiskCache`** |
 
 `Invoke-CheckChain.ps1` prüft selbst nichts — es startet diese Läufer, jeden in einem eigenen
 pwsh-Kindprozess (SmokeTest und LayoutProbe rufen `exit` auf und laden WinForms; nacheinander im
@@ -66,7 +66,10 @@ selben Prozess wäre die Kette nach dem ersten Schritt tot).
 ## Harte Formregeln (der Build bricht sonst ab)
 
 - **CRLF** überall. `sed -i` und Python-Skripte zerstören das lautlos → danach nachmessen.
-- **BOM:** alle `src/*.ps1` **außer** `65-Theme.ps1` (das hat keins). Beim Bearbeiten erhalten.
+- **BOM:** alle `src/*.ps1` **außer** `45-Assignments.ps1` (das hat keins). Beim Bearbeiten erhalten.
+  (Hier stand bis zum 31.08.2026 `65-Theme.ps1` — nachgemessen ist es `45-Assignments.ps1`. Wer der
+  alten Angabe folgt, dreht beide Dateien um. Funktional harmlos, weil `Build-SingleFile` jeden BOM
+  beim Zusammenbauen entfernt und genau einen an den Anfang der Ausgabe schreibt.)
 - **Einzeilige UI-Strings** in `15-Strings.ps1` vertragen **keine** deutschen Anführungszeichen
   (`„…"` beendet den String). Here-Strings (`@"…"@`) schon. Eine StaticCheck-Regel fängt das.
 - **Backticks nie über die Shell setzen.** `` `r`n `` in einem Bash-Heredoc wird zur
@@ -110,6 +113,17 @@ Vollständig mit Begründung in [docs/PATTERNS.md](docs/PATTERNS.md) — hier nu
   dort einen Dialog öffnet, braucht `if (Test-UnattendedRun) { return }`.
 - Layout aus Pixelkonstanten ist Altbestand; neu geschriebenes Layout misst (`Get-ControlTextWidth`,
   `Set-AppSettingsRowBlock`).
+- Welcher Bereich welche Layout-Funktion hat, steht an **einer** Stelle: `$script:sectionLayoutFunctions`
+  (75-UiState). `Update-SectionLayout` ordnet einen Bereich neu an, `Update-AllSectionLayouts` alle
+  (nur für den Designwechsel). Ein neuer Bereich braucht einen Eintrag dort — kein Aufruf mehr in
+  `Show-Section`, `Add_Resize` und `Set-ActiveTheme` einzeln.
+- **Kein Netzaufruf ohne Zeitablauf.** Graph läuft über `Invoke-GraphRest` (40-Graph): Zeitablauf,
+  429-Wiederholung mit `Retry-After`, Abbruchprüfung. `-MaxRetries 0` für alles, was **nicht**
+  idempotent ist (App anlegen) und für Aufrufer mit eigener Wiederholungsschleife (Inventar).
+- **`if (Get-Command X …)` vor einem Aufruf im eigenen Skript schützt vor nichts** — die Funktion ist
+  immer da. Es verwandelt nur eine Umbenennung in ein stilles „wird übersprungen". Im Tenant-Riegel
+  (`Clear-TenantViews`) war das der Unterschied zwischen „Kunde A gelöscht" und „Kunde A steht noch
+  im Fenster von Kunde B". Berechtigt ist es nur bei einem echten Vorwärtsbezug über Teilgrenzen.
 
 ## Sprache und Ton
 

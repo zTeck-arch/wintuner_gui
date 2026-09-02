@@ -24,6 +24,7 @@ Paketierung, Bereitstellung, Versionsvergleich, Zuweisungen und die kontrolliert
 - [Voraussetzungen](#voraussetzungen)
 - [Konto und Berechtigungen](#konto-und-berechtigungen)
 - [Ein typischer Ablauf](#ein-typischer-ablauf)
+- [Erste Kundenumgebung und Dauerbetrieb](#erste-kundenumgebung-und-dauerbetrieb)
 - [Grenzen und Verantwortung](#grenzen-und-verantwortung)
 - [Projektstatus](#projektstatus)
 - [Lizenz und Herkunft](#lizenz-und-herkunft)
@@ -248,6 +249,45 @@ Je nach Tenant können zusätzlich Administratorzustimmung, Richtlinien für bed
 5. Ergebnis in Intune und im lokalen Aktivitätsprotokoll prüfen.
 
 Für ein Update gibt es zwei Wege. Die neue Version als eigene App bereitstellen und die alte ablösen (Standard unter **Updates**), oder den Inhalt der vorhandenen App ersetzen (**Eigene Installer**). Der zweite Weg vermeidet mehrere App-Objekte je Produkt, setzt aber voraus, dass die Erkennungsregeln weiterhin passen.
+
+---
+
+## Erste Kundenumgebung und Dauerbetrieb
+
+Das Werkzeug ist auf einen **Dauerzustand** hin gebaut: einmal eingerichtet, hält ein wiederkehrender Lauf die Apps eines Tenants ohne Handarbeit aktuell. Dieser Zustand stellt sich aber nicht von allein beim ersten Lauf ein — eine Umgebung, die bisher nicht über WinTuner beziehungsweise WinGet betreut wurde, braucht **einmal** eine genauere Betrachtung. Danach nie wieder.
+
+### Der Dauerbetrieb: wenige Schalter, und die Ablösung läuft von selbst
+
+Der Regelbetrieb hängt an drei Einstellungen. Zusammen ergeben sie eine geschlossene Kette: neue Version paketieren → hochladen → Vorgänger ablösen → Zuweisung umziehen → alte Version aufräumen. Nichts bleibt liegen, und niemand muss im Portal nacharbeiten.
+
+| Einstellung | Was sie im Dauerbetrieb leistet |
+|---|---|
+| **Gruppenzuweisung auf die neue Version umziehen (alte Version entziehen)** | Ohne sie tragen nach dem Update **beide** Versionen die Zuweisung, und jemand muss die alte im Portal von Hand entziehen. Das ist der Schalter, der aus „ein Update wurde bereitgestellt" ein „die neue Version ist tatsächlich im Einsatz" macht. |
+| **Vorgänger-Version direkt nach einem erfolgreichen Update löschen** *oder* **Nur die neuesten N Versionen je Paket behalten** | Beide räumen die abgelösten App-Objekte weg — die Kachel **Abgelöste Versionen** wächst sonst mit jedem einzelnen Update weiter. Die beiden Optionen schließen einander aus: entweder sofort löschen oder eine Anzahl behalten. Gelöscht wird in beiden Fällen erst, nachdem Zuweisungen und erfolgreiche Installationen erneut geprüft wurden. |
+| **Auch Win32-Apps ohne WinTuner-Marke prüfen** | Die Marke im Notizfeld sagt nur, **wer** eine App angelegt hat — nicht, ob es eine neuere Version gibt. Ohne diesen Schalter bleibt alles unsichtbar, was von Hand oder mit einem anderen Werkzeug angelegt wurde, und genau das ist in einer übernommenen Umgebung die Mehrheit. |
+
+Sind diese Schalter gesetzt und die Zuordnungen einmal geprüft, kann ein Lauf über **Alle aktualisieren** ohne einen einzigen Klick durchlaufen (**Rückfragen vor Änderungen in Intune überspringen**). Geschützte Apps fragen weiterhin nach — diese eine Rückfrage lässt sich bewusst nicht wegdrücken.
+
+### Warum die erste Runde anders ist
+
+In einer frisch übernommenen Umgebung stammt **keine** App aus diesem Werkzeug. Daraus folgen vier Dinge, die es später nicht mehr gibt:
+
+- **Es gibt keine Zuordnung zu WinGet.** Weder eine Marke noch eine Paket-Id im Notizfeld; nur einen Anzeigenamen, den jemand frei gewählt hat. Die Zuordnung Name → WinGet-Id ist deshalb der kritische Schritt der ersten Runde. Übernommen wird sie nur bei einem **exakten** Namenstreffer, einem klar dominierenden Treffer oder einer hinterlegten Zuordnung — alles Mehrdeutige wird übersprungen. Eine falsche Id würde das falsche Produkt paketieren und die echte App ablösen.
+- **Nicht prüfbare Apps stehen als gesperrte Zeilen in der Liste**, mit Grund („keine WinGet-Id sicher zuzuordnen", „Intune meldet keine Version"). Sie sind nicht anhakbar und werden von einem Lauf ausgelassen. Wo es sinnvoll ist, lässt sich die Id per Rechtsklick → **WinGet-Id zuordnen…** von Hand setzen; der Rest bleibt bewusst stehen.
+- **Selbst paketierte Apps sind noch nicht alle bekannt.** Fernwartung, RMM und die gängigen Passwortmanager sind ab Werk geschützt (TeamViewer, AnyDesk, ScreenConnect/ConnectWise, N-able, Datto, Jamf, Splashtop, Keeper, 1Password, Bitwarden, LastPass, KeePass). **Kundeneigene** Installer kennt niemand außer Ihnen — die gehören in die Schutzliste, **bevor** der erste Lauf startet. Ein Update darauf baut eine neue App aus dem öffentlichen Katalog, löst die selbst gebaute ab und zieht deren Zuweisungen mit; bei einem von Hand gebauten Paket holt das kein zweiter Lauf zurück.
+- **Die Ablösung ist beim ersten Mal noch nicht belegt.** Ob die Zuweisung wirklich auf die neue Version übergegangen ist, sieht man erst an einem echten Lauf in diesem Tenant.
+
+### Empfohlene Reihenfolge für die erste Runde
+
+1. Verbinden und die Update-Suche mit **Auch Win32-Apps ohne WinTuner-Marke prüfen** laufen lassen. Erst dadurch sieht die Liste den tatsächlichen Bestand.
+2. Die **gesperrten Zeilen** durchgehen: Grund lesen, wo es eindeutig ist die WinGet-Id zuordnen, sonst stehen lassen. Eine nicht zugeordnete App ist unangenehm, eine falsch zugeordnete ist teuer.
+3. **Selbst paketierte Apps schützen**, solange noch nichts läuft.
+4. Den ersten Lauf mit **eingeschalteten Rückfragen** und **ausgeschaltetem Aufräumen** starten, und zwar mit zwei oder drei unkritischen Apps — nicht mit allen.
+5. In Intune nachsehen: Trägt die neue App die Zuweisungen? Steht der Vorgänger als abgelöst da? Das Aktivitätsprotokoll hält beides fest.
+6. **Erst danach** den Dauerbetrieb einschalten: Aufräumen, und wenn gewünscht die Rückfragen abschalten.
+
+> [!IMPORTANT]
+> Die risikoreichen Optionen sind aus gutem Grund standardmäßig aus. Sie in einer noch nicht geprüften Umgebung sofort einzuschalten heißt, Löschungen zu automatisieren, bevor irgendjemand gesehen hat, ob die Zuordnungen in diesem Tenant stimmen.
 
 ---
 

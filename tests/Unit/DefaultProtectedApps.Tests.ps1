@@ -15,7 +15,23 @@ BeforeAll {
     'Test-IsProtectedApp', 'Set-ProtectedAppPatterns',
     'Add-ProtectedAppPattern', 'Remove-ProtectedAppPattern', 'Get-SeededProtectedApps'))))
 
+  # Die Faelle zur Einspiel-Logik pruefen die RECHNUNG, nicht den Inhalt - dafuer reicht eine kurze
+  # Beispielliste.
   $script:factory = @('TeamViewer*', 'Jamf*', 'Splashtop*')
+
+  # Fuer die Faelle zum INHALT dagegen die echte Liste aus der Quelle, nicht eine Kopie: eine Kopie
+  # laeuft auseinander, und dann prueft der Test eine Werksliste, die niemand ausliefert. Ueber den
+  # Parser statt per Textsuche, damit eine auskommentierte Zeile nicht als Eintrag durchgeht.
+  $script:settingsAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Get-SourcePartPath -Part '10-Settings.ps1'), [ref]$null, [ref]$null)
+  $assign = $script:settingsAst.Find({
+    param($n)
+    $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+    $n.Left.Extent.Text -eq '$script:defaultProtectedApps'
+  }, $true)
+  if (-not $assign) { throw 'Werksliste $script:defaultProtectedApps nicht gefunden - umbenannt?' }
+  . ([scriptblock]::Create($assign.Extent.Text))
+  $script:realFactory = @($script:defaultProtectedApps)
 }
 
 Describe 'Get-SeededProtectedApps' {
@@ -43,12 +59,15 @@ Describe 'Get-SeededProtectedApps' {
     @($r.Added).Count | Should -Be 0
   }
 
+  # Genau der Weg, auf dem die Erweiterung vom 02.09.2026 bei einer bestehenden Installation
+  # ankommt. Das Beispielmuster steht bewusst NICHT in der echten Werksliste, sonst prueft der Fall
+  # beim naechsten Nachtrag versehentlich etwas anderes.
   It 'ergaenzt ein SPAETER hinzugekommenes Werksmuster, ohne die entfernten zurueckzuholen' {
-    $spaeter = @($script:factory + 'AnyDesk*')
+    $spaeter = @($script:factory + 'Frei Erfundenes RMM*')
     $r = Get-SeededProtectedApps -Patterns @('Jamf*') -Seeded $script:factory -Defaults $spaeter
-    $r.Added | Should -Be @('AnyDesk*')
+    $r.Added | Should -Be @('Frei Erfundenes RMM*')
     $r.Patterns | Should -Not -Contain 'TeamViewer*'
-    $r.Patterns | Should -Contain 'AnyDesk*'
+    $r.Patterns | Should -Contain 'Frei Erfundenes RMM*'
   }
 
   It 'meldet beim zweiten Lauf nichts mehr - der Start speichert also nur einmal' {
@@ -78,6 +97,57 @@ Describe 'Die Werksmuster treffen, was sie treffen sollen' {
     $seed = (Get-SeededProtectedApps -Patterns @() -Seeded @() -Defaults $script:factory).Patterns
     foreach ($name in @('Google Chrome', 'Microsoft Edge WebView2', '7-Zip', 'Adobe Acrobat')) {
       Test-IsProtectedApp -Name $name -Patterns $seed | Should -BeFalse
+    }
+  }
+}
+
+# Diese Faelle pruefen die AUSGELIEFERTE Liste, nicht die Rechnung darueber.
+Describe 'Die ausgelieferte Werksliste' {
+
+  It 'traegt an jedem Eintrag einen Platzhalter' {
+    # Ohne '*' trifft ein Eintrag den Anzeigenamen exakt - und genau diese Produkte treten in
+    # mehreren Fassungen auf ("ConnectWise Control", "ConnectWise Automate").
+    foreach ($p in $script:realFactory) { $p | Should -BeLike '*`**' }
+  }
+
+  It 'enthaelt keinen Eintrag doppelt' {
+    $distinct = @($script:realFactory | Sort-Object -Unique)
+    @($distinct).Count | Should -Be @($script:realFactory).Count
+  }
+
+  # Fernwartung und RMM: der Installer traegt die Zuordnung zum Betreuer in sich. Ein aus WinGet
+  # gebautes Paket installiert dasselbe Produkt "leer" - danach meldet sich der Rechner bei
+  # niemandem mehr, und ausgerechnet der Zugang zum Reparieren ist weg.
+  It 'schuetzt die Fernwartungs- und RMM-Produkte in ihren gaengigen Fassungen' {
+    foreach ($name in @(
+      'TeamViewer', 'TeamViewer Host', 'Jamf Connect', 'Splashtop Streamer',
+      'AnyDesk', 'AnyDesk Custom Client',
+      'ScreenConnect Client (a1b2c3)', 'ConnectWise Control', 'ConnectWise Automate',
+      'N-able Take Control', 'N-central Agent', 'Datto RMM', 'Datto Windows Agent')) {
+      Test-IsProtectedApp -Name $name -Patterns $script:realFactory |
+        Should -BeTrue -Because "$name traegt die Kundenzuordnung im Installer"
+    }
+  }
+
+  # Passwortmanager: ausgerollt mit Richtliniendatei, SSO-Anbindung oder festem Server. Der Ersatz
+  # durch die nackte Herstellerfassung nimmt nicht die Passwoerter, aber die Anmeldung am Tresor.
+  It 'schuetzt die gaengigen Passwortmanager' {
+    foreach ($name in @('Keeper Password Manager', '1Password', 'Bitwarden', 'LastPass', 'KeePass')) {
+      Test-IsProtectedApp -Name $name -Patterns $script:realFactory |
+        Should -BeTrue -Because "$name wird mit kundeneigener Konfiguration ausgerollt"
+    }
+  }
+
+  # Die Gegenrichtung, und der eigentliche Preis der Liste: jedes Muster hier kostet bei einer
+  # falsch getroffenen App eine Rueckfrage, die sich auch mit abgeschalteten Rueckfragen nicht
+  # wegdruecken laesst. Diese Namen muessen ohne Frage durchlaufen.
+  It 'laesst alles durch, was aus WinGet aktualisiert werden soll' {
+    foreach ($name in @(
+      'Google Chrome', 'Microsoft Edge WebView2', 'Mozilla Firefox', '7-Zip', 'Notepad++',
+      'Adobe Acrobat Reader DC', 'Visual Studio Code', 'Microsoft Teams', 'Zoom', 'VLC media player',
+      'Java 8 Update 421', 'PDF24 Creator', 'Greenshot', 'FileZilla')) {
+      Test-IsProtectedApp -Name $name -Patterns $script:realFactory |
+        Should -BeFalse -Because "$name wird nicht selbst paketiert und soll ohne Rueckfrage laufen"
     }
   }
 }

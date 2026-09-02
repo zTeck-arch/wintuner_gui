@@ -687,6 +687,10 @@ function Request-RunCancel {
     # Bleibt sichtbar (der Lauf laeuft ja noch), aber ein zweiter Klick aendert nichts mehr.
     $script:cancelRunButton.Enabled = $false
   }
+  # Der Vorab-Bau haelt sich an keinen "sicheren Punkt" - er muss keinen abwarten, weil er nur
+  # lokale Dateien schreibt. Ohne dieses Stop liefe er nach einem Abbruch, einem "Trennen" oder
+  # einem "Abmelden" weiter und baute ein Paket fuer einen Lauf, den es nicht mehr gibt.
+  Stop-PackagePrebuild -Reason $Reason
   Write-Log ("Run cancel requested ({0}); stopping at the next safe point." -f $Reason)
 }
 
@@ -952,10 +956,11 @@ function Update-CardWidths {
         if ($child.Width -ne $available) { $child.Width = $available }
       }
     }
-    # A wider card gives its explanations more room, so they need fewer lines - without re-stacking,
-    # the rows keep the spacing of the narrow layout and the cards end up with a block of empty
-    # space at the bottom.
-    if (Get-Command Update-SettingsLayout -ErrorAction SilentlyContinue) { Update-SettingsLayout }
+    # Das Nachstapeln - eine breitere Karte braucht weniger Zeilen fuer ihre Erklaerungen, ohne
+    # Neuanordnung behaelt sie die Abstaende des schmalen Layouts - macht jetzt der AUFRUFER ueber
+    # Update-SectionLayout, und zwar fuer den Bereich, den man gerade sieht. Hier stand stattdessen
+    # ein festes Update-SettingsLayout: das lief bei jedem Resize-Ereignis, auch wenn die
+    # Einstellungsseite gar nicht offen war, und die uebrigen zehn Bereiche brauchen dasselbe.
     # Cards clip themselves to a rounded region that is rebuilt on every resize. Without
     # invalidating the container, the previous outline can stay on screen and the card looks
     # like two overlapping frames.
@@ -963,20 +968,61 @@ function Update-CardWidths {
   } catch { }   # class 3: a layout hiccup must never break the window
 }
 
+# Welcher Bereich rechnet seine Anordnung mit welcher Funktion. EINE Tabelle, drei Aufrufer:
+# Show-Section (Betreten), $form.Add_Resize (Fenstergroesse) und Set-ActiveTheme (Schriftwechsel).
+#
+# Vorher stand diese Zuordnung drei Mal da - und die drei Fassungen waren nachweislich verschieden:
+# Show-Section rief zehn Layouts nach Key auf (ohne 'settings'), der Resize-Handler neun ohne
+# Ruecksicht auf den Key (ohne 'settings' und 'ownpackage', dafuer alle uebrigen auch fuer
+# UNSICHTBARE Bereiche), Set-ActiveTheme elf, und die Layout-Probe eine vierte Liste aus sechs
+# Namen unter dem Kommentar "dieselben Aufrufe, die ein Fenster-Resize ausloest". Zwei Bereiche
+# ordneten sich beim Ziehen am Fensterrand also gar nicht neu an, und jedes Resize-Ereignis rechnete
+# zehn unsichtbare Bereiche mit - jeder davon vermisst Text ueber TextRenderer::MeasureText, und
+# WinForms feuert das Ereignis waehrend eines Ziehvorgangs dutzende Mal je Sekunde.
+#
+# Kein Get-Command-Gatter mehr: in einem Ein-Datei-Skript sind diese Funktionen immer definiert, das
+# Gatter schuetzte vor nichts und haette einen Tippfehler in dieser Tabelle lautlos verschluckt.
+# Dass die Tabelle vollstaendig ist und nur echte Funktionen nennt, haelt eine StaticCheck-Regel.
+$script:sectionLayoutFunctions = @{
+  updates       = 'Update-UpdatesLayout'
+  tenant        = 'Update-TenantAppsLayout'
+  store         = 'Update-StoreLayout'
+  winget        = 'Update-WingetLayout'
+  discovered    = 'Update-DiscoveredLayout'
+  ownpackage    = 'Update-OwnPackageLayout'
+  localpackages = 'Update-LocalPackagesLayout'
+  appsettings   = 'Update-AppSettingsLayout'
+  workrecord    = 'Update-WorkRecordSectionLayout'
+  customerdata  = 'Update-CustomerDataLayout'
+  settings      = 'Update-SettingsLayout'
+}
+
+# Ordnet EINEN Bereich neu an. 'dashboard' hat keine eigene Funktion (seine Kacheln haengen an
+# Update-CardWidths) und faellt hier bewusst durch.
+function Update-SectionLayout {
+  param([string]$Key)
+  if ([string]::IsNullOrWhiteSpace($Key)) { return }
+  $fn = $script:sectionLayoutFunctions[$Key]
+  if (-not $fn) { return }
+  try { & $fn } catch { Write-LogDebug ("section layout {0}: {1}" -f $fn, $_.Exception.Message) }
+}
+
+# Alle Bereiche. Nur fuer den Designwechsel: eine andere Schriftart aendert die Zeilenhoehe in
+# JEDEM Bereich, auch in den gerade unsichtbaren, und wer einen davon spaeter betritt, soll nicht
+# erst die Geometrie der vorigen Schrift sehen. Ein Designwechsel kostet einen Klick, kein
+# Ziehen am Fensterrand - hier ist die Vollstaendigkeit wichtiger als die Rechenzeit.
+function Update-AllSectionLayouts {
+  foreach ($key in @($script:sectionLayoutFunctions.Keys)) { Update-SectionLayout -Key $key }
+}
+
 $form.Add_Resize({
   try { if ($script:logExpanded -ne $null) { Update-BottomLayout } } catch {}
   try { Update-HeaderLayout } catch {}
   try { Update-CardWidths } catch {}
-  # Re-flow the updates section so its list keeps filling the available height.
-  try { if (Get-Command Update-UpdatesLayout -ErrorAction SilentlyContinue) { Update-UpdatesLayout } } catch {}
-  try { if (Get-Command Update-TenantAppsLayout -ErrorAction SilentlyContinue) { Update-TenantAppsLayout } } catch {}
-  try { if (Get-Command Update-StoreLayout -ErrorAction SilentlyContinue) { Update-StoreLayout } } catch {}
-  try { if (Get-Command Update-LocalPackagesLayout -ErrorAction SilentlyContinue) { Update-LocalPackagesLayout } } catch {}
-  try { if (Get-Command Update-AppSettingsLayout -ErrorAction SilentlyContinue) { Update-AppSettingsLayout } } catch {}
-  try { if (Get-Command Update-WorkRecordSectionLayout -ErrorAction SilentlyContinue) { Update-WorkRecordSectionLayout } } catch {}
-  try { if (Get-Command Update-WingetLayout -ErrorAction SilentlyContinue) { Update-WingetLayout } } catch {}
-  try { if (Get-Command Update-DiscoveredLayout -ErrorAction SilentlyContinue) { Update-DiscoveredLayout } } catch {}
-  try { if (Get-Command Update-CustomerDataLayout -ErrorAction SilentlyContinue) { Update-CustomerDataLayout } } catch {}
+  # Nur der sichtbare Bereich. Die uebrigen bekommen ihre Anordnung beim Betreten (Show-Section),
+  # und genau deshalb ist das hier kein Verlust: eine Karte kann gar nicht mit alter Geometrie
+  # sichtbar werden.
+  Update-SectionLayout -Key $script:activeSection
 })
 
 # Disconnect button – quick session end, keeps the cached sign-in for a fast reconnect
@@ -1300,40 +1346,18 @@ function Show-Section {
       try { Update-DashboardFreshness } catch {}
     }
   }
-  # Size the updates list to the panel the moment the section becomes visible (its ClientSize is
-  # only meaningful once shown).
-  if ($Key -eq 'updates' -and (Get-Command Update-UpdatesLayout -ErrorAction SilentlyContinue)) {
-    try { Update-UpdatesLayout } catch {}
-  }
-  if ($Key -eq 'tenant' -and (Get-Command Update-TenantAppsLayout -ErrorAction SilentlyContinue)) {
-    try { Update-TenantAppsLayout } catch {}
-  }
-  if ($Key -eq 'ownpackage' -and (Get-Command Update-OwnPackageLayout -ErrorAction SilentlyContinue)) {
-    try { Update-OwnPackageLayout } catch {}
-  }
-  if ($Key -eq 'localpackages' -and (Get-Command Update-LocalPackagesLayout -ErrorAction SilentlyContinue)) {
-    try { Update-LocalPackagesLayout } catch {}
-  }
-  if ($Key -eq 'store' -and (Get-Command Update-StoreLayout -ErrorAction SilentlyContinue)) {
-    try { Update-StoreLayout } catch {}
-  }
+  # Die Anordnung DIESES Bereichs. Eine Karte, deren Hoehe vom Inhalt abhaengt, kann erst gerechnet
+  # werden, wenn der Bereich wirklich sichtbar ist: ein verstecktes Panel meldet eine veraltete
+  # ClientSize, und fuer jedes Kind einer versteckten Sektion ist .Visible gleich $false.
+  #
+  # Vorher standen hier zehn if-Bloecke nach $Key - dieselbe Zuordnung, die der Resize-Handler und
+  # Set-ActiveTheme jeweils in eigener Fassung noch einmal hatten. 'settings' fehlte hier ganz.
+  Update-SectionLayout -Key $Key
   # Der Bereich zeigt beim Betreten den STAND: Kundennamen und Favoriten werden woanders
   # geaendert (Dialog bzw. Knopf am Zuweisungsziel), und ein Bereich, der den Aufbau-Stand zeigt,
   # ist schlimmer als keiner - er behauptet etwas Falsches ueber Kundendaten.
-  if ($Key -eq 'customerdata') {
-    if (Get-Command Update-CustomerDataLists -ErrorAction SilentlyContinue) { try { Update-CustomerDataLists } catch {} }
-    if (Get-Command Update-CustomerDataLayout -ErrorAction SilentlyContinue) { try { Update-CustomerDataLayout } catch {} }
-  }
-  if ($Key -eq 'winget' -and (Get-Command Update-WingetLayout -ErrorAction SilentlyContinue)) {
-    try { Update-WingetLayout } catch {}
-  }
-  if ($Key -eq 'discovered' -and (Get-Command Update-DiscoveredLayout -ErrorAction SilentlyContinue)) {
-    try { Update-DiscoveredLayout } catch {}
-  }
-  # Der Editor laedt die App-Liste beim OEFFNEN, nicht beim Aufbau des Fensters - vorher ist niemand
-  # angemeldet. Nur einmal je Sitzung; der Knopf "Neu laden" im Bereich holt den Rest.
-  if ($Key -eq 'workrecord' -and (Get-Command Update-WorkRecordSectionLayout -ErrorAction SilentlyContinue)) {
-    try { Update-WorkRecordSectionLayout } catch {}
+  if ($Key -eq 'customerdata' -and (Get-Command Update-CustomerDataLists -ErrorAction SilentlyContinue)) {
+    try { Update-CustomerDataLists } catch {}
   }
   # Der Nachweis wird beim OEFFNEN neu erzeugt, nicht beim Aufbau des Fensters: gebaut wird der
   # Bereich vor der Anmeldung, und was dann darin steht, ist der Anmelde-Hinweis - auch nach einem
@@ -1347,9 +1371,9 @@ function Show-Section {
   if ($Key -eq 'settings' -and (Get-Command Update-ProtectedAppsList -ErrorAction SilentlyContinue)) {
     try { Update-ProtectedAppsList } catch {}
   }
-  if ($Key -eq 'appsettings' -and (Get-Command Update-AppSettingsLayout -ErrorAction SilentlyContinue)) {
-    try { Update-AppSettingsLayout } catch {}
-  }
+  # Der Editor laedt die App-Liste beim OEFFNEN, nicht beim Aufbau des Fensters - vorher ist niemand
+  # angemeldet. Nur einmal je Sitzung; der Knopf "Neu laden" im Bereich holt den Rest. (Die
+  # Anordnung des Bereichs kommt oben aus Update-SectionLayout; Layout und Inhalt sind zwei Dinge.)
   if ($Key -eq 'appsettings' -and $script:isConnected -and $script:appSettingsLoad -and -not $script:appSettingsLoaded) {
     $script:appSettingsLoaded = $true
     try { & $script:appSettingsLoad } catch { Write-Log ("App settings load failed: {0}" -f $_.Exception.Message) }

@@ -132,11 +132,15 @@ if ($env:WINTUNER_LAYOUT -eq '1') {
     $panel.AutoScrollPosition = New-Object System.Drawing.Point(0, 300)
     [System.Windows.Forms.Application]::DoEvents()
     if ($panel.AutoScrollPosition.Y -eq 0) { return 0 }   # passt ohnehin ohne Bildlaufleiste
-    # Dieselben Aufrufe, die ein Fenster-Resize ausloest.
-    foreach ($fn in @('Update-CardWidths', 'Update-SettingsLayout', 'Update-StoreLayout',
-                      'Update-LocalPackagesLayout', 'Update-OwnPackageLayout', 'Update-TenantAppsLayout')) {
-      if (Get-Command $fn -ErrorAction SilentlyContinue) { try { & $fn } catch { } }
-    }
+    # Genau die Aufrufe, die ein Fenster-Resize ausloest - nicht mehr eine eigene Namensliste.
+    #
+    # Hier standen sechs fest genannte Funktionen unter derselben Behauptung, und die Liste war
+    # nachweislich eine andere als die des Resize-Handlers: zwei Namen kamen dort gar nicht vor,
+    # sechs andere fehlten hier. Eine Probe, die einen Nachbau des Produktionspfads misst, findet
+    # Fehler des Nachbaus (genau so ist es beim Dialog "Geschuetzte Apps" passiert). Jetzt wird
+    # dieselbe Funktion gerufen, die das Fenster ruft, fuer denselben Bereich.
+    try { Update-CardWidths } catch { }
+    try { Update-SectionLayout -Key $Section.Key } catch { }
     [System.Windows.Forms.Application]::DoEvents()
     $panel.AutoScrollPosition = New-Object System.Drawing.Point(0, 0)
     [System.Windows.Forms.Application]::DoEvents()

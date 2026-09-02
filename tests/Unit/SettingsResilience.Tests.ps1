@@ -1,7 +1,8 @@
 BeforeAll {
   . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
   Initialize-TestAmbient
-  . ([scriptblock]::Create((Get-SourceFunctionText -Part '10-Settings.ps1' -Name 'Backup-CorruptSettingsFile')))
+  . ([scriptblock]::Create((Get-SourceFunctionText -Part '10-Settings.ps1' -Name @(
+    'Backup-CorruptSettingsFile', 'Get-SettingValue'))))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '25-WinGetData.ps1' -Name @(
     'Resolve-AssignmentTargetFromIndex', 'Select-LiveVersionCacheEntries'))))
 
@@ -165,5 +166,36 @@ Describe 'Select-LiveVersionCacheEntries' {
 
   It 'handles an empty cache' {
     (Select-LiveVersionCacheEntries -Cache @{} -Now $script:now).Count | Should -Be 0
+  }
+}
+
+Describe 'Get-SettingValue: Zahlengrenzen' {
+  # Die settings.json ist ausdruecklich von Hand bearbeitbar (der Kommentar an MaxRecentLogins sagt
+  # es), also ist ein absurder Wert ein zu erwartender Eingabefall und kein Ausnahmezustand.
+  It 'nimmt einen Wert innerhalb der Grenzen' {
+    $src = [pscustomobject]@{ MaxRecentLogins = 20 }
+    Get-SettingValue -Source $src -Name 'MaxRecentLogins' -Type Int -Default 15 -Minimum 1 -Maximum 50 | Should -Be 20
+  }
+  It 'faellt bei einem Wert ueber der Obergrenze auf die Vorgabe zurueck' {
+    $src = [pscustomobject]@{ MaxRecentLogins = 1500 }
+    Get-SettingValue -Source $src -Name 'MaxRecentLogins' -Type Int -Default 15 -Minimum 1 -Maximum 50 | Should -Be 15
+  }
+  It 'faellt bei einem Wert unter der Untergrenze auf die Vorgabe zurueck' {
+    $src = [pscustomobject]@{ MaxRecentLogins = 0 }
+    Get-SettingValue -Source $src -Name 'MaxRecentLogins' -Type Int -Default 15 -Minimum 1 -Maximum 50 | Should -Be 15
+  }
+  It 'nimmt genau die Grenzwerte noch an' {
+    $low = [pscustomobject]@{ MaxRecentLogins = 1 }
+    $high = [pscustomobject]@{ MaxRecentLogins = 50 }
+    Get-SettingValue -Source $low -Name 'MaxRecentLogins' -Type Int -Default 15 -Minimum 1 -Maximum 50 | Should -Be 1
+    Get-SettingValue -Source $high -Name 'MaxRecentLogins' -Type Int -Default 15 -Minimum 1 -Maximum 50 | Should -Be 50
+  }
+  # Der Grund, warum KeepVersionCount bewusst KEINE Obergrenze hat: ein hoher Wert bewahrt dort nur
+  # mehr Versionen (harmlose Richtung), ein Rueckfall auf die Vorgabe 2 wuerde die Versionen LOESCHEN,
+  # die jemand behalten wollte. Diese Pruefung haelt fest, dass eine solche Grenze nicht nachtraeglich
+  # eingebaut wird, ohne dass jemand darueber nachdenkt.
+  It 'laesst einen hohen KeepVersionCount stehen, weil die Vorgabe hier loeschen wuerde' {
+    $src = [pscustomobject]@{ KeepVersionCount = 500 }
+    Get-SettingValue -Source $src -Name 'KeepVersionCount' -Type Int -Default 2 -Minimum 1 | Should -Be 500
   }
 }

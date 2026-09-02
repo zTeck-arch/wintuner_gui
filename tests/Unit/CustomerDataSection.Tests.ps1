@@ -98,6 +98,42 @@ Describe 'Datenschutz: Kundendaten gehoeren nicht ins Protokoll' {
   }
 }
 
+# Der Bereich brauchte bei 1146x854 mehr Platz, als er hatte, und scrollte deshalb: gemessen 761 px
+# Bedarf bei 639 px Sicht. Die 122 px steckten in der Knopfreihe UNTER jeder Liste (8 + 32 px je
+# Karte) und in einer festen Untergrenze von 120 px je Liste. Nach dem Umbau: 627 px, also kein
+# Bildlauf mehr - und auf 1920x1080 wuchsen die Listen von 148 auf 188 px.
+Describe 'Anordnung des Kundendaten-Bereichs' {
+
+  BeforeAll {
+    $script:layoutFn = Get-SourceFunctionText -Part '85-Rows.ps1' -Name 'Update-CustomerDataLayout'
+  }
+
+  It 'rechnet unter der Liste keinen Platz mehr fuer die Knopfreihe ein' {
+    $script:layoutFn | Should -Match '\$belowList = 0'
+    $script:layoutFn | Should -Not -Match '\$belowList = 8 \+ 32'
+  }
+
+  It 'setzt die Knoepfe in die Titelzeile und nicht unter die Liste' {
+    $script:layoutFn | Should -Not -Match '\$sibling\.Top = \$l\.Bottom'
+    $script:layoutFn | Should -Match '\$b\.Top = 12'
+  }
+
+  # Sieben Designs bringen verschiedene Schriftgroessen mit. Eine feste Zahl, die in einem davon
+  # sechs Zeilen ergibt, ergibt in einem anderen vier.
+  It 'leitet die Untergrenze aus der Schrifthoehe ab statt sie festzuschreiben' {
+    $script:layoutFn | Should -Match '\$rowHeight'
+    $script:layoutFn | Should -Match '\$minList = 7 \* \$rowHeight'
+    $script:layoutFn | Should -Not -Match 'if \(\$perList -lt 120\)'
+  }
+
+  # Ohne das laeuft das Rechteck der Hinweiszeile unter die Knoepfe. Sichtbar faellt es nicht auf,
+  # weil der Text kuerzer ist als sein Feld - bei einem laengeren deutschen Text waere es echt.
+  It 'kuerzt die Hinweiszeile vor dem linken Knopf' {
+    $script:layoutFn | Should -Match "Tag -eq 'hint'"
+    $script:layoutFn | Should -Match '\$hint\.Width'
+  }
+}
+
 Describe 'UI-Texte in beiden Sprachen' {
 
   It 'definiert jeden neuen Schluessel genau zweimal - EN und DE' {

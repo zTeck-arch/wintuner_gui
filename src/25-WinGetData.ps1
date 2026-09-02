@@ -37,7 +37,12 @@ function Get-TenantStoreApps {
   do {
     $page++
     if ($page -gt $maxPages) { throw "Graph pagination exceeded $maxPages pages while listing Store apps." }
-    $response = Invoke-RestMethod -Method GET -Uri $uri -Headers $headers -ErrorAction Stop
+    # -MaxRetries 0: die Aufrufer dieser Inventarwege haben ihre EIGENE Wiederholungsschleife
+    # (Get-Win32AppsResilient, Get-CachedWin32Apps). Zwei Ebenen Wiederholung multiplizieren sich -
+    # drei aeussere Versuche mal drei innere mal bis zu 30 s Pause waeren Minuten Wartezeit fuer
+    # eine Liste. Geholt wird hier der Zeitablauf, und der war das Loch.
+    $response = Invoke-GraphRest -Method GET -Uri $uri -Headers $headers -MaxRetries 0 `
+      -Context ("Store app inventory (page {0})" -f $page)
     foreach ($app in @($response.value)) {
       if (-not $app -or -not $app.id) { continue }
       $odataType = [string]$app.'@odata.type'
@@ -84,7 +89,9 @@ function Get-TenantWin32Apps {
   do {
     $page++
     if ($page -gt $maxPages) { throw "Graph pagination exceeded $maxPages pages while listing Win32 apps." }
-    $response = Invoke-RestMethod -Method GET -Uri $uri -Headers $headers -ErrorAction Stop
+    # -MaxRetries 0: siehe oben, der Aufrufer wiederholt selbst.
+    $response = Invoke-GraphRest -Method GET -Uri $uri -Headers $headers -MaxRetries 0 `
+      -Context ("Win32 app inventory (page {0})" -f $page)
     foreach ($app in @($response.value)) {
       if (-not $app -or -not $app.id) { continue }
       $odataType = [string]$app.'@odata.type'
@@ -314,6 +321,11 @@ function Update-AssignTargetCombo {
 $script:versionCacheMaxAgeDays = 7
 $script:versionCacheMaxEntries = 2000
 
+# Steht auf $true, sobald ein Paket neue Versionen geliefert hat und die Datei noch nicht
+# nachgezogen wurde. Geschrieben wird erst, wenn eine Schleife fertig ist - siehe
+# Save-PendingVersionDiskCache.
+$script:diskCacheDirty = $false
+
 # Pure so the pruning rules can be tested without touching the disk or the clock.
 function Select-LiveVersionCacheEntries {
   param(
@@ -344,6 +356,19 @@ function Select-LiveVersionCacheEntries {
   }
   foreach ($c in $ordered) { $kept[$c.Key] = $c.Entry }
   return $kept
+}
+
+# Schreibt den Plattencache, wenn seit dem letzten Schreiben etwas dazugekommen ist.
+#
+# Der Gegenpart zu $script:diskCacheDirty: Get-WingetVersions sammelt nur noch, das Schreiben macht
+# der Aufrufer EINMAL, wenn seine Schleife durch ist. Aufgerufen am Ende der Update-Suche, nach dem
+# Dashboard-Vollscan und beim Schliessen des Fensters. Zusaetzliche Aufrufstellen sind unschaedlich -
+# ohne Aenderung tut die Funktion nichts.
+function Save-PendingVersionDiskCache {
+  if (-not $script:diskCacheDirty) { return $false }
+  Save-VersionDiskCache -Cache $script:diskCache
+  $script:diskCacheDirty = $false
+  return $true
 }
 
 function Get-VersionDiskCache {
@@ -485,12 +510,22 @@ function Get-WingetVersions {
   # 4) Store in RAM cache
   $script:wingetVersionCache[$PackageId] = $result
 
-  # 5) Store in disk cache (update script-level cache variable and persist to disk)
+  # 5) In den Plattencache legen - aber NICHT sofort schreiben.
+  #
+  # Hier stand ein Save-VersionDiskCache je Paket, und das war die einzige Aufrufstelle. Eine
+  # Update-Suche ueber 100 Apps schrieb damit 100 Mal die GANZE Tabelle: jedes Mal ein
+  # Select-LiveVersionCacheEntries ueber alle Eintraege (Deckel 2000), ein ConvertTo-Json darueber
+  # und eine vollstaendige Datei. Und das auf dem UI-Faden, zwischen zwei Netzabfragen.
+  #
+  # Der Inhalt liegt ohnehin in $script:diskCache; geschrieben wird jetzt, wenn eine Schleife fertig
+  # ist und beim Schliessen (Save-PendingVersionDiskCache). Schlimmster Fall bei einem Abschuss der
+  # Anwendung: die Zugewinne dieser Sitzung fehlen und eine Suche ist einmal langsamer - dieselbe
+  # Risikoklasse wie bei den Einstellungen, die auch erst beim Beenden geschrieben werden.
   $script:diskCache[$PackageId] = @{
     versions  = $result
     timestamp = [datetime]::UtcNow
   }
-  Save-VersionDiskCache -Cache $script:diskCache
+  $script:diskCacheDirty = $true
 
   return $result
 }
@@ -934,7 +969,9 @@ function Get-RawWin32AppsFromGraph {
   do {
     $page++
     if ($page -gt $maxPages) { throw "Graph pagination exceeded $maxPages pages while reading the app inventory." }
-    $response = Invoke-RestMethod -Method GET -Uri $uri -Headers $headers -ErrorAction Stop
+    # -MaxRetries 0: siehe oben, der Aufrufer wiederholt selbst.
+    $response = Invoke-GraphRest -Method GET -Uri $uri -Headers $headers -MaxRetries 0 `
+      -Context ("app inventory over Graph (page {0})" -f $page)
     foreach ($app in @($response.value)) { $raw.Add($app) }
     $uri = [string]$response.'@odata.nextLink'
   } while (-not [string]::IsNullOrWhiteSpace($uri))

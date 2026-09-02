@@ -62,6 +62,54 @@ einer Schleife holen.
 - Fensterlage immer aus `Screen.PrimaryScreen.WorkingArea` rechnen, nie `CenterScreen` — das
   zentriert über die Taskleiste hinweg.
 
+### Ohne `-TimeoutSec` wartet PowerShell 7 für immer
+`Invoke-RestMethod` ohne Zeitablauf hat keine Obergrenze. Gemessen am 31.08.2026: von 22
+Aufrufstellen trugen **sieben** eine Angabe, **fünfzehn** nicht — und alle laufen auf dem UI-Faden.
+Eine Antwort, die nie kommt, war ein eingefrorenes Fenster ohne Abbruchweg; nur das Beenden half.
+
+Graph läuft deshalb über `Invoke-GraphRest` (40-Graph): Zeitablauf (100 s), Wiederholung bei 429 und
+5xx mit `Retry-After` (begrenzt auf 45 s), Abbruchprüfung über `$script:cancelBatch`, und eine
+Protokollzeile, die sagt **was** gewartet hat. Eine StaticCheck-Regel weist jeden neuen Aufruf ab,
+der weder darüber läuft noch `-TimeoutSec` nennt.
+
+Zwei Entscheidungen darin sind Sicherheits- und keine Bequemlichkeitsfragen:
+
+- **Wiederholt wird nur bei einem gelesenen HTTP-Status.** Status 0 heißt „kein Status lesbar":
+  Zeitablauf, abgerissene Verbindung, DNS. Genau dann ist unbekannt, ob der Dienst die Anfrage schon
+  ausgeführt hat — ein zweiter `POST /mobileApps` legte eine zweite App an. Deshalb `-MaxRetries 0`
+  bei allem, was nicht idempotent ist. `POST …/assign` **ist** idempotent (es ersetzt die ganze
+  Zuweisungsliste), dort wird wiederholt.
+- **Zwei Ebenen Wiederholung multiplizieren sich.** Inventar (`Get-Win32AppsResilient`) und Paketbau
+  (`Invoke-PackageBuildWithThrottleRetry`) haben ihre eigene, abgestimmte Schleife; ihre Aufrufe
+  gehen mit `-MaxRetries 0` durch den Transport. Sonst wären drei äußere × drei innere Versuche mit
+  bis zu 30 s Pause Minuten Wartezeit für eine Liste.
+
+Der eigentliche Anlass: die Zuweisungs-Übergabe schreibt **zwei** Mal (neue App bekommt die
+Zuweisungen, dann wird die alte geleert). Scheitert der zweite Schreibvorgang, sind beide Versionen
+zugewiesen — der Zustand, den `Move-AppAssignments` als `PARTIALLY applied` protokolliert und den
+jemand von Hand aufräumen muss. Die wahrscheinlichste Ursache ist die Drosselung, die zwei schnelle
+Schreibvorgänge auslösen, und dagegen half dort vorher nichts.
+Tests: `GraphTransport.Tests.ps1` (rein, ohne Netz und ohne Uhr).
+
+### `if (Get-Command X …)` vor einem Aufruf im eigenen Skript schützt vor nichts
+Es ist ein Ein-Datei-Skript: die Funktion ist immer definiert. Das Gatter kann also nur eines tun —
+eine Umbenennung oder einen Tippfehler in ein stilles „wird übersprungen" verwandeln.
+
+Wo das teuer wird: `Clear-TenantViews` (85-Rows) ist der **eine** Riegel, der beim Anmelden, Trennen
+und Abmelden alles wegwirft, was einem bestimmten Kunden gehört — Inventar, Gruppennamen,
+Installationsquelle. Jeder dieser vier Aufrufe stand hinter so einem Gatter. Ein übersprungener
+Aufruf heißt: Kunde A steht im Fenster von Kunde B. Bei einem MSP-Werkzeug ist das der Unterschied
+zwischen „Pilot-Gruppe von Kunde A" und „falsche Organisation".
+
+Die Gatter sind dort weg; dass die Liste vollständig **bleibt**, hält eine StaticCheck-Regel: jede
+Funktion, die einen Zwischenspeicher leert, muss im Riegel gerufen werden oder in der Regel
+ausdrücklich als nicht-tenantbezogen eingetragen sein. Berechtigt bleibt das Gatter nur bei einem
+echten Vorwärtsbezug über Teilgrenzen (`Set-ActiveTheme` in Teil 65 ruft eine Funktion aus Teil 75).
+
+Nebenbei gelernt, als die Gegenprüfung zu dieser Regel zuschlug: die erste Fassung suchte den
+Funktionsnamen als **Text** im Rumpf des Riegels — und blieb grün, als die Gegenprüfung den Aufruf
+auskommentierte. Eine auskommentierte Zeile ist kein Aufruf. Solche Regeln über den Parser stellen.
+
 ## Zustand und Sperren
 
 ### Die Fortschrittsanzeige IST die Busy-Sperre
@@ -172,6 +220,19 @@ Tenants antworten auf die ersten zwei mit HTTP 400, also kostete jede Sonde drei
 Regeln bleiben: eine Null muss von einer zweiten Quelle bestätigt sein, unbekannt blockiert jedes
 Löschen. Beim Tenant-Wechsel wieder offen (`Clear-InstallProbeSource`).
 
+### Einen Zwischenspeicher einmal je Schleife schreiben, nicht einmal je Element
+`Save-VersionDiskCache` stand **in** `Get-WingetVersions` und war dort die einzige Aufrufstelle. Eine
+Update-Suche über 100 Apps schrieb damit 100 Mal die ganze Tabelle: je Paket ein
+`Select-LiveVersionCacheEntries` über bis zu 2000 Einträge, ein `ConvertTo-Json` darüber und eine
+vollständige Datei — auf dem UI-Faden, zwischen zwei Netzabfragen.
+
+Jetzt setzt `Get-WingetVersions` nur `$script:diskCacheDirty`, und `Save-PendingVersionDiskCache`
+schreibt einmal: am Ende der Update-Suche (im `finally`, damit auch ein Abbruch behält was er schon
+weiß), nach dem Dashboard-Vollscan und beim Schließen. Schlimmster Fall bei einem Abschuss der
+Anwendung: eine Suche ist einmal langsamer — dieselbe Risikoklasse wie die Einstellungen, die auch
+erst beim Beenden geschrieben werden. Eine StaticCheck-Regel hält den Schreibvorgang aus der
+Schleife heraus; Test: `VersionCacheFlush.Tests.ps1`.
+
 ### Dieselbe Frage nicht zweimal stellen
 `Get-FreshLatestPackageVersion` kostet zwei Netzabfragen und 1–3 s. Dashboard-Kachel und
 automatische Update-Suche stellten sie beim Anmelden beide, Sekunden auseinander. Fünf Minuten
@@ -251,9 +312,27 @@ Arbeitsfläche > Entwurfsgröße, begrenzt auf [Minimum .. Arbeitsfläche − 8]
 schon einmal falsch (Fenster unter der Taskleiste, vierte Kachel abgeschnitten, gespeicherte Größe
 unter dem Minimum). Deshalb rein und getestet, nicht inline im Startcode.
 
-### Eine Layout-Funktion muss an drei Stellen aufgerufen werden
-`Show-Section`, `$form.Add_Resize`, `Set-ActiveTheme`. Fehlt die dritte, behält der Bereich nach
-einem Designwechsel die Geometrie der alten Schriftart, bis man ihn verlässt und neu öffnet.
+### Die Zuordnung Bereich → Layout-Funktion steht an EINER Stelle
+`$script:sectionLayoutFunctions` (75-UiState). `Update-SectionLayout -Key x` ordnet einen Bereich neu
+an, `Update-AllSectionLayouts` alle.
+
+Vorher stand dieselbe Zuordnung vier Mal da, und die vier Fassungen waren **nachweislich
+verschieden**: `Show-Section` kannte zehn Bereiche (ohne `settings`), `$form.Add_Resize` neun
+(ohne `settings` und `ownpackage`) und rief sie **ohne Rücksicht auf den sichtbaren Bereich**,
+`Set-ActiveTheme` elf, und die Layout-Probe eine vierte Liste aus sechs Namen — unter dem Kommentar
+„dieselben Aufrufe, die ein Fenster-Resize auslöst". Zwei Folgen, beide erst durch das Zusammenlegen
+sichtbar geworden:
+
+- **Zwei Bereiche ordneten sich beim Ziehen am Fensterrand gar nicht neu an** („Einstellungen",
+  „Eigene Installer"). Aufgefallen war das nie, weil `Show-Section` sie beim Betreten anordnet.
+- **Jedes Resize-Ereignis rechnete zehn unsichtbare Bereiche mit.** Gemessen am 31.08.2026 im
+  laufenden Fenster: 15–19 ms je Ereignis vorher, 1,1–6,0 ms nachher. WinForms feuert das Ereignis
+  während eines Ziehvorgangs dutzende Mal je Sekunde, und jede Layout-Funktion vermisst Text über
+  `TextRenderer::MeasureText`.
+
+Die Probe ruft jetzt dieselbe Funktion wie das Fenster — ein Nachbau des Produktionspfads findet
+Fehler des Nachbaus (so geschehen beim Dialog „Geschützte Apps").
+Tests: `SectionLayoutTable.Tests.ps1`, dazu eine StaticCheck-Regel gegen Tippfehler in der Tabelle.
 
 ### Ein neuer Bereich braucht zwei Einträge, die niemand vermisst
 `Add-Section` allein genügt nicht: `$navKeyOrder` (90-Main) bestimmt die Reihenfolge, `$navGlyphs`
@@ -359,7 +438,9 @@ Profil.
 
 ## Form
 
-- **CRLF** überall, **BOM** in allen `src/*.ps1` außer `65-Theme.ps1`.
+- **CRLF** überall, **BOM** in allen `src/*.ps1` außer `45-Assignments.ps1` (bis zum 31.08.2026 stand
+  hier `65-Theme.ps1`; nachgemessen ist es `45-Assignments.ps1`). In `tests/` ist beides gemischter
+  Bestand und wird von nichts erzwungen — der Build prüft nur `src/`.
 - Einzeilige UI-Strings vertragen keine deutschen Anführungszeichen; Here-Strings schon.
 - Backticks (`` `r`n ``) nie über eine Bash-Heredoc setzen — Write-/Edit-Werkzeug benutzen.
 - Kommentare erklären **warum** und nennen den Fehler, den sie verhindern.

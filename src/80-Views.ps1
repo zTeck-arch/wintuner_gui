@@ -287,6 +287,9 @@ function Refresh-Dashboard {
       Update-Status (Get-UiString 'DashUpdatesScanning')
       [System.Windows.Forms.Application]::DoEvents()
       $measured = Measure-AvailableUpdates -Apps $scanScope
+      # Der Vollscan fragt je Paket eine Version ab und legt sie in den Plattencache. Geschrieben
+      # wird die Datei einmal hier, nicht bei jedem Paket - siehe Get-WingetVersions.
+      Save-PendingVersionDiskCache | Out-Null
       $updateCount = [int]$measured.Outdated
       $tileTooltipKey = 'TtDashUpdatesScan'
       Write-Log ("Dashboard tile (full scan): {0} outdated, {1} up to date, {2} newer version already in the tenant, {3} without a WinGet id, {4} lookup failed, of {5} checked." -f
