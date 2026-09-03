@@ -221,6 +221,33 @@ $s | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $p -Encoding utf8
 > [!NOTE]
 > License and permission requirements always refer to the **target tenant** you select. What counts is the account you sign in with and its permissions in exactly the tenant whose Intune apps you want to manage.
 
+### The WinTuner module: keep it current, and what the start checks
+
+Everything this interface does — packaging, uploading, superseding, deleting, signing in — runs through the third-party **`WinTuner`** PowerShell module (the `*-Wt*` cmdlets). Its version therefore matters as much as this application's own.
+
+**Keep it current.** The module renames parameters between versions, and a rename shows up as a failure in exactly the feature that uses it:
+
+```powershell
+Install-Module WinTuner -Scope CurrentUser -Force    # or: Update-Module WinTuner -Scope CurrentUser
+Get-Module WinTuner -ListAvailable | Select-Object Version, ModuleBase
+```
+
+**What the start checks, and what it tells you:**
+
+| Check | Message |
+|---|---|
+| Module installed? | Offers to install it, and names the command |
+| All required commands present? | Names the missing ones and stops |
+| Do those commands carry the **parameters** this application binds? | Names each missing parameter, says from which module version it exists, and gives you the update command |
+| Module version 2.x or newer? | Warns that this interface is written against the 1.x line and has not been tested with it |
+
+The parameter check exists because of a real report: a click on **Search** in *WinGet Apps* ended in an error dialog with a stack trace, `A parameter cannot be found that matches parameter name 'SearchQuery'`. That machine ran module **1.0.4**, where the search parameter was still called `-PackageId`; it is `-SearchQuery` from **1.1.0** on. The command existed, so the old check saw nothing — the failure surfaced at the click instead of at the start. Now it is named at the start, and a failed search is a status line rather than a crash.
+
+> [!TIP]
+> If several module versions are installed, the newest one wins. A version installed for **all users** under `C:\Program Files\WindowsPowerShell\Modules` can be old and still be found; `Get-Module WinTuner -ListAvailable` shows every copy with its path, and installing the current version for your own user is enough to take precedence.
+
+The application's **own** update check is separate from this: it looks at the GitHub releases of WinTuner GUI at start (switchable off in Settings) and offers to replace the script. It says nothing about the module.
+
 ---
 
 ## Account and permissions

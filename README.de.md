@@ -221,6 +221,33 @@ $s | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $p -Encoding utf8
 > [!NOTE]
 > Lizenz- und Berechtigungsanforderungen beziehen sich immer auf den gewählten **Ziel-Tenant**. Maßgeblich ist das Konto, mit dem angemeldet wird, und dessen Berechtigungen in genau dem Tenant, dessen Intune-Apps verwaltet werden sollen.
 
+### Das WinTuner-Modul: aktuell halten, und was der Start prüft
+
+Alles, was diese Oberfläche tut — paketieren, hochladen, ablösen, löschen, anmelden —, läuft über das fremde PowerShell-Modul **`WinTuner`** (die `*-Wt*`-Cmdlets). Dessen Version ist damit genauso wichtig wie die dieser Anwendung.
+
+**Aktuell halten.** Das Modul benennt zwischen Versionen Parameter um, und eine Umbenennung zeigt sich als Fehler genau in der Funktion, die ihn benutzt:
+
+```powershell
+Install-Module WinTuner -Scope CurrentUser -Force    # oder: Update-Module WinTuner -Scope CurrentUser
+Get-Module WinTuner -ListAvailable | Select-Object Version, ModuleBase
+```
+
+**Was der Start prüft, und was er sagt:**
+
+| Prüfung | Meldung |
+|---|---|
+| Modul installiert? | Bietet die Installation an und nennt den Befehl |
+| Alle benötigten Befehle vorhanden? | Nennt die fehlenden und bricht ab |
+| Tragen diese Befehle die **Parameter**, die die Anwendung benutzt? | Nennt jeden fehlenden Parameter, sagt ab welcher Modulversion es ihn gibt, und nennt den Aktualisierungsbefehl |
+| Modulversion 2.x oder neuer? | Warnt, dass diese Oberfläche gegen die 1.x-Reihe geschrieben und damit nicht getestet ist |
+
+Die Parameterprüfung gibt es wegen einer echten Rückmeldung: ein Klick auf **Suchen** im Bereich *WinGet Apps* endete in einem Fehlerdialog mit Stapelabbild, `A parameter cannot be found that matches parameter name 'SearchQuery'`. Dort lief Modul **1.0.4**, in dem der Suchparameter noch `-PackageId` hieß; `-SearchQuery` gibt es erst ab **1.1.0**. Der Befehl war vorhanden, also sah die alte Prüfung nichts — der Fehler kam beim Klick statt beim Start. Jetzt wird er beim Start benannt, und eine gescheiterte Suche ist eine Statuszeile statt eines Absturzbilds.
+
+> [!TIP]
+> Sind mehrere Modulversionen installiert, gewinnt die neueste. Eine **für alle Benutzer** installierte Fassung unter `C:\Program Files\WindowsPowerShell\Modules` kann alt sein und trotzdem gefunden werden; `Get-Module WinTuner -ListAvailable` zeigt jede Kopie mit ihrem Pfad, und die aktuelle Version für den eigenen Benutzer zu installieren genügt, damit sie Vorrang hat.
+
+Die **eigene** Aktualisierungsprüfung der Anwendung ist davon getrennt: sie sieht beim Start bei den GitHub-Releases von WinTuner GUI nach (in den Einstellungen abschaltbar) und bietet an, das Skript zu ersetzen. Über das Modul sagt sie nichts.
+
 ---
 
 ## Konto und Berechtigungen

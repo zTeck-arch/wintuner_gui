@@ -191,8 +191,15 @@ function Invoke-UiAction {
 }
 
 # Status update function
+# -NoLog ist fuer Zeilen, die sich SEKUENDLICH aendern.
+#
+# Gemessen an einem Protokoll vom 03.09.2026: eine einzige 429-Wartezeit (5 s + 15 s + 30 s)
+# hinterliess ueber 50 Zeilen "The package source is throttling requests ... Retrying 3 in 29
+# seconds...". Das Protokoll wandert in Tickets, und dort verdeckt so ein Countdown alles andere -
+# der GRUND steht ohnehin schon in der Zeile davor ("Package source throttled ...; retry 1/3 after
+# 5s"). Die Statuszeile soll weiterzaehlen, das Protokoll nicht.
 function Update-Status {
-  param([string]$status)
+  param([string]$status, [switch]$NoLog)
   $statusText = if ([string]::IsNullOrWhiteSpace($status)) { "" } else { $status }
   try {
     Invoke-UiAction -Control $script:statusLabel -Action {
@@ -201,6 +208,7 @@ function Update-Status {
   } catch {
     # Keep status updates non-fatal even on cross-thread/disposed-control races
   }
+  if ($NoLog) { return }
   try {
     $safeLogger = Get-Command -Name Write-LogSafe -CommandType Function -ErrorAction SilentlyContinue
     if ($safeLogger) {

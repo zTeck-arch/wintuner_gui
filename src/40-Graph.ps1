@@ -189,7 +189,8 @@ function Invoke-GraphRest {
       # Nachrichtenschleife - sonst friert das Fenster fuer die Dauer der Pause ein.
       for ($remaining = $plan.WaitSeconds; $remaining -gt 0; $remaining--) {
         if ($script:cancelBatch) { throw $err }
-        try { Update-Status ((Get-UiString 'RateLimitRetryStatus') -f $attempt, $remaining) } catch { }
+        # -NoLog: sekuendlich, siehe Update-Status. Der Grund steht in der Zeile darueber.
+        try { Update-Status ((Get-UiString 'RateLimitRetryStatus') -f $attempt, $remaining) -NoLog } catch { }
         try { [System.Windows.Forms.Application]::DoEvents() } catch { }
         Start-Sleep -Seconds 1
       }

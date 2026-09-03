@@ -178,7 +178,8 @@ function Invoke-PackageBuildWithThrottleRetry {
       }
       for ($remaining = $delay; $remaining -gt 0; $remaining--) {
         if ($script:cancelBatch) { throw 'Cancelled by user while waiting for a rate-limit retry.' }
-        Update-Status ((Get-UiString 'RateLimitRetryStatus') -f $retry, $remaining)
+        # -NoLog: die Statuszeile zaehlt, das Protokoll bekommt nur die Zeile mit dem Grund.
+        Update-Status ((Get-UiString 'RateLimitRetryStatus') -f $retry, $remaining) -NoLog
         [System.Windows.Forms.Application]::DoEvents()
         Start-Sleep -Seconds 1
       }
