@@ -654,6 +654,31 @@ Until then the affected functions fail at the moment you use them - for example 
 "@
     ModParametersMissingTitle = "WinTuner module too old"
     SearchFailedStatus = "Search failed: {0}"
+    TenantAppDeleteButton = "Delete selected..."
+    TtTenantAppDelete = "Deletes the selected apps from Intune - permanently, and not only for this view. Multiple rows can be selected with Ctrl or Shift. Before the question, every app is checked for assignments and successful installations, and the answer is shown to you. Apps on the protected list are never deleted here, and an app whose state Intune does not report is not deleted either. This question is always asked, even with confirmations switched off."
+    TenantAppDeleteNoSelectionStatus = "Select one or more apps in the list first."
+    TenantAppDeleteProbingStatus = "Checking {0} ({1}/{2})..."
+    TenantAppDeleteConfirmTitle = "Delete apps from Intune"
+    TenantAppDeleteConfirmDialog = @"
+{0} app(s) will be PERMANENTLY deleted from Intune:
+
+{1}
+
+Deleting removes the app object and its assignments. Devices keep the software that is already installed, but they stop receiving it and stop receiving updates for it. This cannot be undone from here - the app has to be built and uploaded again.
+
+Delete now?
+"@
+    TenantAppDeleteInUseWarning = @"
+ATTENTION - not all of them are unused:
+{0}
+"@
+    TenantAppDeleteExcludedNote = @"
+NOT deleted, and left in the list:
+{0}
+"@
+    TenantAppDeleteDoneStatus = "{0} app(s) deleted, {1} not deleted, {2} failed."
+    TenantAppDeleteNothingStatus = "Nothing was deleted - every selected app is protected or its state could not be established."
+    TenantAppDeleteCanceledStatus = "Deletion canceled - nothing was changed."
     ModImportedStatus = "Module imported."
     # --- Runtime: login / connect / logout ---
     LoginInvalidUpnDialog = "Please enter a valid M365 UPN."
@@ -1826,6 +1851,31 @@ Bis dahin scheitern die betroffenen Funktionen erst in dem Moment, in dem Sie si
 "@
     ModParametersMissingTitle = "WinTuner-Modul zu alt"
     SearchFailedStatus = "Suche fehlgeschlagen: {0}"
+    TenantAppDeleteButton = "Ausgewählte löschen..."
+    TtTenantAppDelete = "Löscht die ausgewählten Apps aus Intune - endgültig, und nicht nur für diese Ansicht. Mehrere Zeilen lassen sich mit Strg oder Umschalt auswählen. Vor der Rückfrage wird jede App auf Zuweisungen und erfolgreiche Installationen geprüft, und die Antwort wird Ihnen gezeigt. Apps auf der Schutzliste werden hier nie gelöscht, und eine App, deren Zustand Intune nicht meldet, ebenfalls nicht. Diese Rückfrage kommt immer, auch bei abgeschalteten Bestätigungen."
+    TenantAppDeleteNoSelectionStatus = "Bitte zuerst eine oder mehrere Apps in der Liste auswählen."
+    TenantAppDeleteProbingStatus = "Prüfe {0} ({1}/{2})..."
+    TenantAppDeleteConfirmTitle = "Apps aus Intune löschen"
+    TenantAppDeleteConfirmDialog = @"
+{0} App(s) werden ENDGÜLTIG aus Intune gelöscht:
+
+{1}
+
+Das Löschen entfernt das App-Objekt und seine Zuweisungen. Auf den Geräten bleibt die bereits installierte Software, aber sie bekommen sie nicht mehr zugeteilt und erhalten keine Updates mehr dafür. Von hier aus ist das nicht rückholbar - die App müsste neu gebaut und hochgeladen werden.
+
+Jetzt löschen?
+"@
+    TenantAppDeleteInUseWarning = @"
+ACHTUNG - nicht alle davon sind unbenutzt:
+{0}
+"@
+    TenantAppDeleteExcludedNote = @"
+Wird NICHT gelöscht und bleibt in der Liste:
+{0}
+"@
+    TenantAppDeleteDoneStatus = "{0} App(s) gelöscht, {1} nicht gelöscht, {2} fehlgeschlagen."
+    TenantAppDeleteNothingStatus = "Es wurde nichts gelöscht - jede ausgewählte App ist geschützt oder ihr Zustand war nicht feststellbar."
+    TenantAppDeleteCanceledStatus = "Löschen abgebrochen - es wurde nichts geändert."
     ModImportedStatus = "Modul importiert."
     # --- Runtime: login / connect / logout ---
     LoginInvalidUpnDialog = "Bitte einen gültigen M365-Benutzernamen eingeben."
