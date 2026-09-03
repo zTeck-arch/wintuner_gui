@@ -15,7 +15,7 @@ BeforeAll {
       [string]$Type = '#microsoft.graph.win32LobApp',
       [string]$Notes = '',
       [string]$Version = '1.0',
-      [int]$SupersededAppCount = 0
+      [int]$SupersedingAppCount = 0
     )
     [pscustomobject]@{
       'id'                 = $Id
@@ -24,7 +24,7 @@ BeforeAll {
       'displayVersion'     = $Version
       'notes'              = $Notes
       'isAssigned'         = $true
-      'supersededAppCount' = $SupersededAppCount
+      'supersedingAppCount' = $SupersedingAppCount
     }
   }
 }
@@ -161,19 +161,19 @@ Describe 'Select-UnmanagedWin32Apps - Marke, App-Typ und Zustand' {
   }
 
   It 'returns only active apps by default' {
-    # supersededAppCount > 0 heisst "wird von etwas Neuerem abgeloest", also die ALTE Version. Sie in
+    # supersedingAppCount > 0 heisst "wird von etwas Neuerem abgeloest", also die ALTE Version. Sie in
     # die Update-Suche zu ziehen hiesse, eine bereits erledigte Ablösung noch einmal zu bauen.
     $result = @(Select-UnmanagedWin32Apps -RawApps @(
-      (New-RawApp -Id 'a1' -Name 'Aktuell' -SupersededAppCount 0),
-      (New-RawApp -Id 'a2' -Name 'Alt'     -SupersededAppCount 1)))
+      (New-RawApp -Id 'a1' -Name 'Aktuell' -SupersedingAppCount 0),
+      (New-RawApp -Id 'a2' -Name 'Alt'     -SupersedingAppCount 1)))
     $result.Count | Should -Be 1
     $result[0].Name | Should -Be 'Aktuell'
   }
 
   It 'returns only superseded apps when asked for them' {
     $result = @(Select-UnmanagedWin32Apps -Superseded -RawApps @(
-      (New-RawApp -Id 'a1' -Name 'Aktuell' -SupersededAppCount 0),
-      (New-RawApp -Id 'a2' -Name 'Alt'     -SupersededAppCount 2)))
+      (New-RawApp -Id 'a1' -Name 'Aktuell' -SupersedingAppCount 0),
+      (New-RawApp -Id 'a2' -Name 'Alt'     -SupersedingAppCount 2)))
     $result.Count | Should -Be 1
     $result[0].Name | Should -Be 'Alt'
   }

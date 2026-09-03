@@ -735,7 +735,7 @@ $updateSearchButton.Add_Click({
       $all = @(Remove-SupersededInventoryOverlap -ActiveApps $activeInventory -SupersededApps $supersededInventory)
       Write-Log ("Loaded {0} active app object(s) from Intune after excluding {1} superseded overlap(s)." -f $all.Count, ($activeInventory.Count - $all.Count))
       # Nach der Ueberlappungspruefung, nicht davor: die unmarkierten Apps werden in
-      # Select-UnmanagedWin32Apps schon nach supersededAppCount getrennt, sie duerfen also nicht
+      # Select-UnmanagedWin32Apps schon nach supersedingAppCount getrennt, sie duerfen also nicht
       # noch einmal gegen das Modul-Inventar der abgeloesten Apps gerechnet werden.
       $all = @(Get-ScanInventory -ManagedApps $all)
     } catch {

@@ -45,23 +45,42 @@ Describe 'Get-PackageIdFromNotes' {
 }
 
 Describe 'Test-IsSupersededApp' {
-  # The two Graph counters are the easiest thing in this whole area to get backwards, and getting them
-  # backwards would swap the active and the superseded list - which decides what gets DELETED.
-  # Per the Graph docs for mobileApp: supersededAppCount is "the total number of apps this app is
-  # directly or indirectly superseded by", so it is greater than zero on the OLD app.
-  It 'calls an app superseded when something supersedes it' {
-    Test-IsSupersededApp -SupersededAppCount 1 | Should -BeTrue
-    Test-IsSupersededApp -SupersededAppCount 3 | Should -BeTrue
+  # Die zwei Graph-Zaehler sind das Vertauschbarste in diesem ganzen Bereich - und sie WAREN hier
+  # vertauscht, bis 0.18.0. Vertauscht heisst: aktive und abgeloeste Liste tauschen die Plaetze, und
+  # die abgeloeste Liste entscheidet, was GELOESCHT wird.
+  #
+  # Nicht mehr aus der Dokumentation begruendet, sondern am Protokoll eines echten Laufs vom
+  # 03.09.2026 (10:36:14): der Filter "supersededAppCount == 0" lieferte genau die ALTEN Versionen
+  # als aktiv (Adobe 26.001.21771, Airtame 4.15.1, Chrome 151.0.7922.72, WebView2 151.0.4129.78,
+  # Zoom 7.1.43453) und liess genau die NEUEN weg - also die, die je eine App abloesen. Richtig ist
+  # deshalb: abgeloest = supersedingAppCount > 0.
+  It 'nennt eine App abgeloest, wenn sie von etwas abgeloest wird' {
+    Test-IsSupersededApp -SupersedingAppCount 1 | Should -BeTrue
+    Test-IsSupersededApp -SupersedingAppCount 3 | Should -BeTrue
   }
 
-  It 'calls an app active when nothing supersedes it' {
-    Test-IsSupersededApp -SupersededAppCount 0 | Should -BeFalse
+  It 'nennt eine App aktiv, wenn sie von nichts abgeloest wird' {
+    Test-IsSupersededApp -SupersedingAppCount 0 | Should -BeFalse
+  }
+
+  # Der Fall, der den Fehler festnagelt: eine NEUE Version loest eine alte ab. Sie hat damit
+  # supersededAppCount > 0 und muss trotzdem AKTIV sein. Genau hier lag der Fehler.
+  It 'nennt die neue Version aktiv, obwohl sie selbst eine alte abloest' {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+      (Get-SourcePartPath -Part '25-WinGetData.ps1'), [ref]$null, [ref]$null)
+    $fn = $ast.Find({
+      param($n)
+      $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-IsSupersededApp'
+    }, $true)
+    # Der Rumpf darf den anderen Zaehler nicht mehr anfassen - sonst ist der Fehler zurueck.
+    $fn.Extent.Text | Should -Not -Match '\$SupersededAppCount'
+    $fn.Extent.Text | Should -Match '\$SupersedingAppCount'
   }
 
   It 'treats a missing counter as not superseded' {
     # An app the tenant did not report a counter for must not land in the superseded list, because
     # that list feeds the deletion paths.
-    Test-IsSupersededApp -SupersededAppCount $null | Should -BeFalse
+    Test-IsSupersededApp -SupersedingAppCount $null | Should -BeFalse
   }
 }
 

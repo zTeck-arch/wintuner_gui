@@ -170,6 +170,22 @@ Parser finden kann. Ein abgebrochener Paketbau lässt lokale Dateien zurück, ei
 Upload eine halb angelegte App und eine abgebrochene Löschung eine App, an der Intune noch
 Ablösebeziehungen führt. Der Abbruchknopf wirkt deshalb **zwischen** den Apps.
 
+### Die zwei Ablöse-Zähler von Graph, und warum sie vertauscht waren
+`supersededAppCount` = wie viele Apps **diese App ablöst** (> 0 auf der **neuen**).
+`supersedingAppCount` = von wie vielen Apps sie **abgelöst wird** (> 0 auf der **alten**).
+
+„Abgelöst" im Sinne der Oberfläche ist also `supersedingAppCount > 0`. Bis 0.18.0 stand hier das
+Gegenteil — mit einer Begründung, die sich auf die Dokumentation berief, und mit Unit-Tests, die
+denselben Irrtum festschrieben. Widerlegt hat es ein Protokoll aus dem Betrieb: der paginierte
+Graph-Weg lieferte mit `supersededAppCount == 0` genau die **alten** Versionen als aktiv, und es
+fehlten genau die neuen — also die, die je eine App ablösen. Die einzige Ausnahme in der Liste war
+eine App, die ohne Ablösung bereitgestellt worden war.
+
+Zwei Lehren: eine Zählerbedeutung gehört an einem echten Tenant nachgemessen, nicht aus der
+Dokumentation abgeschrieben — und ein Test, der eine Annahme wiederholt, prüft sie nicht. Der Fall,
+der den Fehler festnagelt, ist deshalb jetzt ausdrücklich als Test formuliert: **die neue Version
+ist aktiv, obwohl sie selbst eine alte ablöst.**
+
 ### Ein Schreibvorgang, der Erfolg meldet, hat nicht unbedingt etwas geändert
 Am 03.09.2026 entfernte `updateRelationships` eine Ablösebeziehung, antwortete mit Erfolg — und im
 nächsten Durchlauf war die Beziehung wieder da, dreimal hintereinander. Die anschließende Löschung
