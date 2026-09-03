@@ -143,6 +143,29 @@ Nachrichtenschleife, also kann ein Klick eine zweite Nutzung auslösen → „a 
 running". Wer den Runspace besetzt findet (`$script:pkgRunspaceInUse` / `$script:packagingBusy`),
 arbeitet **inline** weiter statt zu warten oder zu scheitern.
 
+Es sind inzwischen **drei** Runspaces mit je einem Zweck: Paketbau (`$script:pkgRunspace`, geteilt
+mit dem Inventar), Vorab-Bau (`$script:prebuildRunspace`) und Upload (`$script:deployRunspace`).
+Geteilt werden dürfen sie nicht — während des Uploads baut der Vorab-Bau schon die nächste App, und
+genau dieses Nebeneinander ist ihr Sinn. Erzeugt werden alle über `New-PackagingRunspace -Purpose`,
+geschlossen werden alle drei beim Beenden (ein offener Runspace hält mit seinem Thread das Beenden
+auf).
+
+### Ein Modulaufruf auf dem UI-Faden hat zwei Symptome, nicht eins
+Gemeldet am 02.09.2026: das Fenster friert beim Upload ein, **und** die Konsole füllt sich mit
+„[ERROR] Write log to PowerShell failed: The WriteObject and WriteError methods cannot be called
+from outside … the same thread". Das sieht nach zwei Fehlern aus und ist einer. `Deploy-WtWin32App`
+lief auf dem UI-Faden; dann pumpt niemand die Nachrichtenschleife (das Fenster steht), und der
+.NET-Logger des Moduls schreibt in den Host **seines** Runspace — auf dem UI-Faden ist das unsere
+Konsole, und weil das Modul aus fortgesetzten Aufgaben protokolliert, scheitert jede einzelne Zeile
+mit genau dieser Meldung. Beim Paketbau war beides längst weg, aus demselben Grund: eigener
+Runspace. Wer also eine Logger-Flut aus dem Modul sieht, sucht nicht nach einem Protokollfehler,
+sondern nach einem Modulaufruf auf dem falschen Faden.
+
+Der Upload hat dabei eine Sonderregel, die der Paketbau nicht hat: **kein Abbruch, kein
+Zeitablauf, kein `$ps.Stop()`** (`Invoke-WtDeployOffThread`). Ein abgebrochener Paketbau lässt
+lokale Dateien zurück, ein abgebrochener Upload eine halb angelegte App im Kundentenant. Der
+Abbruchknopf wirkt deshalb **zwischen** den Apps.
+
 ### Das Protokoll muss sagen, WIE die Anwendung eingestellt ist
 `Get-SettingsSnapshotLines` (10-Settings) liefert die Zeilen, `90-Main` schreibt sie beim Start und
 `85-Rows` nach dem Speichern. Rein und getestet, weil die eigentliche Regel eine inhaltliche ist:

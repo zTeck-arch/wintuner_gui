@@ -190,7 +190,9 @@ Describe 'Verdrahtung im Quelltext' {
     $fn | Should -Match 'Start-PendingPackagePrebuild'
     # Vor dem Upload, nach dem Paketbau: die Reihenfolge im Text belegt die Stelle.
     $idxPrebuild = $fn.IndexOf('Start-PendingPackagePrebuild')
-    $idxDeploy   = $fn.IndexOf('Deploy-WtWin32App')
+    # Seit 0.18.0 geht der Upload durch Invoke-WtDeployOffThread; der Modulaufruf selbst steht nur
+    # noch dort. Die Reihenfolge bleibt dieselbe Aussage: anstossen, dann hochladen.
+    $idxDeploy   = $fn.IndexOf('Invoke-WtDeployOffThread')
     $idxPackage  = $fn.IndexOf('New-WingetPackageWithFallback')
     $idxPrebuild | Should -BeGreaterThan $idxPackage
     $idxPrebuild | Should -BeLessThan $idxDeploy

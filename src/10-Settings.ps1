@@ -443,6 +443,19 @@ $script:defaultProtectedApps = @(
   'N-able*'
   'N-central*'
   'Datto*'
+  # Nachtrag 03.09.2026, dieselbe Klasse: der Agent traegt die Mandanten- oder Organisations-Id im
+  # Installer. Bewusst 'NinjaOne*'/'NinjaRMM*' statt 'Ninja*' - 'NinjaTrader' ist ein voellig
+  # fremdes Produkt, das aus WinGet aktualisiert werden soll, und ein zu breites Muster kostet
+  # genau dort eine Rueckfrage, die sich nicht wegdruecken laesst.
+  'NinjaOne*'
+  'NinjaRMM*'
+  'Atera*'
+  'Action1*'
+  # BeyondTrust breit, und das mit Absicht: Remote Support, Privileged Remote Access und
+  # Privilege Management binden alle an die Appliance beziehungsweise an eine Richtlinie des
+  # Kunden (Jump-Client mit Site-Schluessel, Konsole mit Appliance-Adresse). Ein aus WinGet
+  # gebautes Paket kennt beides nicht.
+  'BeyondTrust*'
   # Passwortmanager
   'Keeper*'
   '1Password*'

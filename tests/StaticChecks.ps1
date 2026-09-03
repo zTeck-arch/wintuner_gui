@@ -511,4 +511,26 @@ Assert-True ($eagerCacheWrites.Count -eq 0) (
   "Save-VersionDiskCache is called outside Save-PendingVersionDiskCache ({0} site(s)); writing the whole cache per package cost one full file write per app during a scan:`r`n  {1}" -f
     $eagerCacheWrites.Count, ($eagerCacheWrites -join "`r`n  "))
 
+# Der Upload laeuft nie auf dem UI-Faden.
+#
+# Gemeldet am 02.09.2026 aus dem Betrieb: waehrend eines Uploads steht das Fenster auf "Keine
+# Rueckmeldung" (der Klick auf "Aktivitaetsprotokoll" tut nichts, gemeldet als Einfrieren), und die
+# Konsole fuellt sich mit "[ERROR] Write log to PowerShell failed: ... same thread". Beides kommt
+# davon, dass Deploy-WtWin32App auf dem UI-Faden lief. Es gibt drei Aufrufstellen (Update-Lauf,
+# "App hinzufuegen", erkannte Apps) - eine zurueckgelassene reicht, um das Bild wieder herzustellen,
+# und zwar genau auf dem Weg, den der Melder benutzt hat.
+$uiThreadDeploys = [Collections.Generic.List[string]]::new()
+foreach ($call in $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+    $node.GetCommandName() -eq 'Deploy-WtWin32App'
+  }, $true)) {
+  $scope = Get-EnclosingFunctionName -Node $call
+  if ($scope -eq 'Invoke-WtDeployOffThread') { continue }
+  $uiThreadDeploys.Add(('line {0}: called from {1}' -f $call.Extent.StartLineNumber, $(if ($scope) { $scope } else { 'the script body' })))
+}
+Assert-True ($uiThreadDeploys.Count -eq 0) (
+  "Deploy-WtWin32App is called outside Invoke-WtDeployOffThread ({0} site(s)); on the UI thread the upload freezes the window and the module's logger floods the console:`r`n  {1}" -f
+    $uiThreadDeploys.Count, ($uiThreadDeploys -join "`r`n  "))
+
 Write-Host "Static checks passed for WinTuner GUI $($version.Groups['v'].Value): $($functionNames.Count) functions, $($enKeys.Count) UI keys per language."

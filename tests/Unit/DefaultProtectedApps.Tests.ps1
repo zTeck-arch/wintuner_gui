@@ -123,7 +123,11 @@ Describe 'Die ausgelieferte Werksliste' {
       'TeamViewer', 'TeamViewer Host', 'Jamf Connect', 'Splashtop Streamer',
       'AnyDesk', 'AnyDesk Custom Client',
       'ScreenConnect Client (a1b2c3)', 'ConnectWise Control', 'ConnectWise Automate',
-      'N-able Take Control', 'N-central Agent', 'Datto RMM', 'Datto Windows Agent')) {
+      'N-able Take Control', 'N-central Agent', 'Datto RMM', 'Datto Windows Agent',
+      # Nachtrag 03.09.2026
+      'NinjaOne Agent', 'NinjaRMMAgent', 'Atera Agent', 'AteraAgent', 'Action1 Agent',
+      'BeyondTrust Remote Support Jump Client', 'BeyondTrust Privileged Remote Access',
+      'BeyondTrust Privilege Management for Windows')) {
       Test-IsProtectedApp -Name $name -Patterns $script:realFactory |
         Should -BeTrue -Because "$name traegt die Kundenzuordnung im Installer"
     }
@@ -145,7 +149,10 @@ Describe 'Die ausgelieferte Werksliste' {
     foreach ($name in @(
       'Google Chrome', 'Microsoft Edge WebView2', 'Mozilla Firefox', '7-Zip', 'Notepad++',
       'Adobe Acrobat Reader DC', 'Visual Studio Code', 'Microsoft Teams', 'Zoom', 'VLC media player',
-      'Java 8 Update 421', 'PDF24 Creator', 'Greenshot', 'FileZilla')) {
+      'Java 8 Update 421', 'PDF24 Creator', 'Greenshot', 'FileZilla',
+      # Der Grund, aus dem 'NinjaOne*'/'NinjaRMM*' dort steht und nicht 'Ninja*': ein fremdes
+      # Produkt, dessen Name genauso anfaengt. Faellt das Muster je zusammen, schlaegt dieser Fall an.
+      'NinjaTrader')) {
       Test-IsProtectedApp -Name $name -Patterns $script:realFactory |
         Should -BeFalse -Because "$name wird nicht selbst paketiert und soll ohne Rueckfrage laufen"
     }

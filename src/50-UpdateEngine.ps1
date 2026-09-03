@@ -415,9 +415,10 @@ function Update-SingleApp {
 
     # 3) Deploy with best available identifier
     Write-Log "Deploying $AppName version $effectiveVersion..."
-    # Phase switch: the upload runs blocking on the UI thread (the Graph session is per-runspace),
-    # so the window cannot animate during it. The text at least records that the phase changed from
-    # packaging to uploading before the thread goes quiet.
+    # Phase switch: the upload runs in the background upload runspace (Invoke-WtDeployOffThread), so
+    # the window keeps drawing while it works. Until 0.18.0 this ran on the UI thread and the window
+    # went "Not responding" - the sentence "the Graph session is per-runspace" that used to stand
+    # here was wrong: GraphSession::Instance is a static singleton (GraphSessionSharing.Tests.ps1).
     Update-Status ((Get-UiString 'PhaseUploadingStatus') -f $script:batchProgressPrefix, $AppName, $effectiveVersion)
     $deploySplat = @{
       RootPackageFolder = $RootPackageFolder
@@ -464,7 +465,7 @@ function Update-SingleApp {
     # upload, while a slow RESOLVE would mean Intune is late listing the new app - two different
     # problems with two different answers.
     $deployStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    $deployedApp = Deploy-WtWin32App @deploySplat
+    $deployedApp = Invoke-WtDeployOffThread -Arguments $deploySplat -Label ("{0} {1}" -f $wingetId, $effectiveVersion)
     $deployStopwatch.Stop()
     Write-Log ("Upload finished in {0:n1}s for {1} {2}." -f $deployStopwatch.Elapsed.TotalSeconds, $wingetId, $effectiveVersion)
     $returnedId = $null

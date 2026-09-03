@@ -321,6 +321,109 @@ function Close-PrebuildRunspace {
   }
 }
 
+# ---------------------------------------------------------------------------------------------
+# Upload im Hintergrund-Runspace
+#
+# Gemeldet am 02.09.2026 aus dem Betrieb: waehrend eines Uploads steht das Fenster auf "Keine
+# Rueckmeldung" - ein Klick auf "Aktivitaetsprotokoll" tut sichtbar nichts, gemeldet wurde es als
+# Einfrieren. Dazu eine Flut aus
+#   "[ERROR] Write log to PowerShell failed: The WriteObject and WriteError methods cannot be
+#    called from outside the overridden ... same thread"
+# Beides hat EINE Ursache: Deploy-WtWin32App lief auf dem UI-Faden. Dann pumpt niemand die
+# Nachrichtenschleife, und der .NET-Logger des Moduls schreibt in den Host SEINES Runspace - auf dem
+# UI-Faden ist das unsere Konsole, und weil das Modul aus fortgesetzten Aufgaben (anderer Thread)
+# protokolliert, scheitert jede einzelne Zeile mit genau dieser Meldung.
+#
+# Beim Paketbau ist beides seit 0.15.x weg, aus demselben Grund: eigener Runspace (siehe den
+# Kommentar in 30-UpdateTargets bei $script:pkgRunspace). Der Upload zieht das jetzt nach.
+#
+# Ein EIGENER Runspace, nicht pkgRunspace und nicht prebuildRunspace: ein Runspace fuehrt genau eine
+# Pipeline, und waehrend des Uploads baut der Vorab-Bau schon die naechste App - das Nebeneinander
+# ist der ganze Zweck der Sache.
+$script:deployRunspace = $null
+$script:deployRunspaceInUse = $false
+
+function Get-DeployRunspace {
+  if ($script:deployRunspace -and $script:deployRunspace.RunspaceStateInfo.State -eq 'Opened') {
+    return $script:deployRunspace
+  }
+  if ($script:deployRunspace) { try { $script:deployRunspace.Dispose() } catch { } }   # class 3: teardown
+  $script:deployRunspace = New-PackagingRunspace -Purpose 'upload'
+  return $script:deployRunspace
+}
+
+function Close-DeployRunspace {
+  if ($script:deployRunspace) {
+    try { $script:deployRunspace.Close(); $script:deployRunspace.Dispose() } catch { }   # class 3: teardown
+    $script:deployRunspace = $null
+    Write-Log 'Background upload runspace closed.'
+  }
+}
+
+# Fuehrt Deploy-WtWin32App im Upload-Runspace aus und haelt das Fenster dabei lebendig.
+#
+# Gibt zurueck, was das Modul zurueckgibt; wirft den Fehler AUS dem Upload unveraendert auf dem
+# UI-Faden. Beides absichtlich: die Aufrufer pruefen den Rueckgabewert auf .Id und ihre bestehenden
+# try/catch samt Textpruefungen (403, Duplikat) sollen denselben Fehler sehen wie bei einem
+# Inline-Aufruf. Eine Auslagerung, die den Fehler umformt, waere eine stille Verhaltensaenderung an
+# der Stelle, an der Apps im Kundentenant angelegt werden.
+#
+# KEIN Zeitablauf, KEIN Abbruch, KEIN $ps.Stop(): ein halber Upload laesst eine halb angelegte App
+# im Tenant. Der Abbruchknopf wirkt weiterhin ZWISCHEN den Apps - anders als beim Paketbau, der nur
+# lokale Dateien schreibt und deshalb unterbrochen werden darf.
+#
+# Dass die Anmeldung in den zweiten Runspace traegt, ist gemessen und nicht angenommen:
+# GraphSession::Instance ist ein statisches Singleton (tests/Unit/GraphSessionSharing.Tests.ps1),
+# und das Inventar wird laengst so gelesen.
+function Invoke-WtDeployOffThread {
+  param(
+    [Parameter(Mandatory)][hashtable]$Arguments,
+    [string]$Label = 'upload'
+  )
+  $rs = $null
+  # Besetzt heisst hier nicht "warten": zwei Uploads gleichzeitig gibt es nicht (die Busy-Sperre
+  # haelt sie auseinander), aber wenn doch, ist inline richtig und nicht eine zweite Pipeline im
+  # selben Runspace - die liefe in "Pipelines cannot be run concurrently".
+  if (-not $script:deployRunspaceInUse) {
+    try { $rs = Get-DeployRunspace } catch { $rs = $null }
+  }
+  if (-not $rs) {
+    Write-Log ("Uploading {0} on the UI thread (no background runspace); the window will not respond until it finishes." -f $Label)
+    return Deploy-WtWin32App @Arguments
+  }
+
+  $ps = [powershell]::Create()
+  $ps.Runspace = $rs
+  [void]$ps.AddCommand('Deploy-WtWin32App').AddParameters($Arguments)
+  $script:deployRunspaceInUse = $true
+  try {
+    $async = $ps.BeginInvoke()
+    # Das ist der ganze Gewinn: der UI-Faden pumpt seine Nachrichtenschleife, waehrend der Upload
+    # auf dem anderen Thread laeuft. Das Fenster zeichnet, das Protokoll laesst sich aufklappen.
+    while (-not $async.AsyncWaitHandle.WaitOne(50)) {
+      [System.Windows.Forms.Application]::DoEvents()
+    }
+    $out = $ps.EndInvoke($async)
+    if ($ps.Streams.Error.Count -gt 0) {
+      # Deploy-WtWin32App wird mit ErrorAction Stop gerufen, ein abbrechender Fehler kommt also aus
+      # EndInvoke als Ausnahme. Was im Strom liegenbleibt, wird unveraendert weitergeworfen.
+      throw (($ps.Streams.Error | ForEach-Object { $_.ToString() }) -join '; ')
+    }
+    if ($out -and $out.Count -gt 0) { return $out[$out.Count - 1] }
+    return $null
+  } catch {
+    # BeginInvoke/EndInvoke verpacken den Modulfehler. Ausgepackt, damit die Textpruefungen der
+    # Aufrufer weiter greifen.
+    if ($_.Exception.InnerException -and $_.Exception.InnerException.Message) {
+      throw $_.Exception.InnerException.Message
+    }
+    throw
+  } finally {
+    $script:deployRunspaceInUse = $false
+    try { $ps.Dispose() } catch { }   # class 3: teardown
+  }
+}
+
 # Uebernimmt das Ergebnis des Vorab-Baus - aber NUR bei exakt gleichem Argumentsatz.
 #
 # Das ist die Stelle, an der ein Fehler teuer waere: uebernaehme sie ein Paket, das mit anderen

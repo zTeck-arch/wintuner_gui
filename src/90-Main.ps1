@@ -533,7 +533,7 @@ $uploadButton.Add_Click({
           $scopeTags = @($script:roleScopeTagsBox.Text -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
           if ($scopeTags.Count -gt 0) { $deploySplat.RoleScopeTags = $scopeTags }
         }
-        $deployedApp = Deploy-WtWin32App @deploySplat
+        $deployedApp = Invoke-WtDeployOffThread -Arguments $deploySplat -Label ("{0} {1}" -f $packageID, $version)
 
         $returnedId = $null
         try { if ($deployedApp -and $deployedApp.Id) { $returnedId = [string]$deployedApp.Id } } catch {}
@@ -2034,11 +2034,14 @@ $deployDiscoveredButton.Add_Click({
                 }
 
                 Write-Log "Uploading new app to tenant without a temporary assignment: $packageId v$effVersion"
-                $discoveredDeployResult = Deploy-WtWin32App `
-                    -PackageId $packageId `
-                    -Version $effVersion `
-                    -RootPackageFolder $rootFolder `
-                    -ErrorAction Stop
+                $discoveredDeploySplat = @{
+                    PackageId         = $packageId
+                    Version           = $effVersion
+                    RootPackageFolder = $rootFolder
+                    ErrorAction       = 'Stop'
+                }
+                $discoveredDeployResult = Invoke-WtDeployOffThread -Arguments $discoveredDeploySplat `
+                    -Label ("{0} {1}" -f $packageId, $effVersion)
                 $returnedDiscoveredId = $null
                 try { if ($discoveredDeployResult -and $discoveredDeployResult.Id) { $returnedDiscoveredId = [string]$discoveredDeployResult.Id } } catch {}
                 $resolvedDiscovered = Resolve-DeployedUpdateTarget -PackageId $packageId -Version $effVersion -PreferredName ([string]$wingetApp.Name) -ReturnedId $returnedDiscoveredId
@@ -2323,6 +2326,8 @@ $form.Add_FormClosing({
     # Seit dem Vorab-Bau gibt es einen zweiten Runspace. Wird er nicht geschlossen, haelt sein
     # Thread das Beenden auf - genau der Grund, aus dem der erste hier steht.
     try { Close-PrebuildRunspace } catch { }   # class 3: teardown
+    # Seit 0.18.0 gibt es einen dritten: den fuer den Upload. Gleicher Grund.
+    try { Close-DeployRunspace } catch { }   # class 3: teardown
 
     # 3. Falls verbunden, regulär abmelden
     if ($script:isConnected) {
