@@ -1,5 +1,11 @@
 ﻿# Changelog
 
+## 0.18.1 – Ein zu altes WinTuner-Modul sagt es jetzt beim Start
+
+**Aus dem Betrieb (03.09.2026)**
+
+- **Die WinGet-Paketsuche stürzt nicht mehr ab, wenn das WinTuner-Modul zu alt ist — und der Start sagt vorher, dass es zu alt ist.** Gemeldet wurde: ein Klick auf **Suchen** im Bereich *WinGet Apps* endete in einem „FATAL UI ERROR" mit Stapelabbild, `A parameter cannot be found that matches parameter name 'SearchQuery'`. Ursache ist das fremde PowerShell-Modul **WinTuner**, auf dem diese Oberfläche aufsetzt: dort heißt der Suchparameter erst ab Modulversion **1.1.0** `-SearchQuery`, vorher hieß er `-PackageId`. Der bisherige Startcheck prüfte nur, ob die **Befehle** vorhanden sind — und der Befehl war vorhanden. Jetzt wird beim Start auch geprüft, ob sie die **Parameter** tragen, die diese Anwendung benutzt; fehlt einer, nennt eine Meldung ihn beim Namen, sagt ab welcher Modulversion es ihn gibt, und nennt den Befehl zum Aktualisieren (`Update-Module WinTuner -Scope CurrentUser`). Bewusst keine feste Mindestversion, sondern die tatsächlich installierte Oberfläche: das ist die Auskunft, die weiterhilft, statt eine geratene Zahl. Und unabhängig davon: eine gescheiterte Suche ist jetzt eine Statuszeile („Suche fehlgeschlagen: …") statt eines Absturzbilds — eine Suche ohne Treffer war schon vorher ein Ergebnis, eine Suche mit Fehler war ein Schrecken.
+
 ## 0.18.0 – Was ab Werk geschützt ist, und was nebenher schon gebaut wird
 
 **Aus einer Durchsicht der Architektur (31.08.2026)**

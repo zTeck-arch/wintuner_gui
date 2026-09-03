@@ -641,6 +641,19 @@ Switching them off is meant for repetitive work you have already validated. Two 
     ModImportFailedTitle = "Module Import Failed"
     ModVersionUntestedDialog = "The installed WinTuner module has version {0}. WinTuner GUI is written against the 1.x line and has not been tested with this version.`r`n`r`nCommands may exist but behave differently, which can affect packaging, deployment and cleanup.`r`n`r`nVerify results in a test tenant before using this combination in production."
     ModVersionUntestedTitle = "Untested WinTuner version"
+    ModParametersMissingDialog = @"
+The installed WinTuner module does not offer everything this application uses. The commands are there, but these parameters are missing:
+
+{0}
+
+That is almost always an outdated module. Please update it and restart:
+
+    Update-Module WinTuner -Scope CurrentUser
+
+Until then the affected functions fail at the moment you use them - for example the WinGet package search.
+"@
+    ModParametersMissingTitle = "WinTuner module too old"
+    SearchFailedStatus = "Search failed: {0}"
     ModImportedStatus = "Module imported."
     # --- Runtime: login / connect / logout ---
     LoginInvalidUpnDialog = "Please enter a valid M365 UPN."
@@ -1800,6 +1813,19 @@ Sie abzuschalten ist für wiederkehrende, bereits geprüfte Arbeit gedacht. Zwei
     ModImportFailedTitle = "Modul-Import fehlgeschlagen"
     ModVersionUntestedDialog = "Das installierte WinTuner-Modul hat die Version {0}. WinTuner GUI ist auf die 1.x-Reihe ausgelegt und wurde mit dieser Version nicht getestet.`r`n`r`nBefehle können vorhanden sein, sich aber anders verhalten – das kann Paketierung, Bereitstellung und Bereinigung betreffen.`r`n`r`nErgebnisse vor dem produktiven Einsatz in einem Test-Tenant prüfen."
     ModVersionUntestedTitle = "Ungetestete WinTuner-Version"
+    ModParametersMissingDialog = @"
+Das installierte WinTuner-Modul bietet nicht alles, was diese Anwendung benutzt. Die Befehle sind vorhanden, aber diese Parameter fehlen:
+
+{0}
+
+Das ist fast immer ein veraltetes Modul. Bitte aktualisieren und neu starten:
+
+    Update-Module WinTuner -Scope CurrentUser
+
+Bis dahin scheitern die betroffenen Funktionen erst in dem Moment, in dem Sie sie benutzen - zum Beispiel die WinGet-Paketsuche.
+"@
+    ModParametersMissingTitle = "WinTuner-Modul zu alt"
+    SearchFailedStatus = "Suche fehlgeschlagen: {0}"
     ModImportedStatus = "Modul importiert."
     # --- Runtime: login / connect / logout ---
     LoginInvalidUpnDialog = "Bitte einen gültigen M365-Benutzernamen eingeben."

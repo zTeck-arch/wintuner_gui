@@ -170,6 +170,24 @@ Parser finden kann. Ein abgebrochener Paketbau lässt lokale Dateien zurück, ei
 Upload eine halb angelegte App und eine abgebrochene Löschung eine App, an der Intune noch
 Ablösebeziehungen führt. Der Abbruchknopf wirkt deshalb **zwischen** den Apps.
 
+### „Der Befehl ist da" heißt nicht „der Parameter ist da"
+Der Startcheck prüfte seit langem, ob die `*-Wt*`-Befehle existieren. Am 03.09.2026 endete ein Klick
+auf *Suchen* trotzdem in einem FATAL UI ERROR: `Search-WtWinGetPackage` war vorhanden, hieß der
+Suchparameter in der dort installierten Modulfassung aber `-PackageId` statt `-SearchQuery` (Umbenennung
+in Modulversion 1.1.0). Ein Bruch dieser Art gehört an den **Start**, wo er einmal steht und den Namen
+nennt — nicht in einen Klick, wo er wie ein Absturz aussieht.
+
+Umgesetzt als `$script:requiredModuleParameters` (05-Config) plus `Get-MissingModuleParameters`, und
+gehalten von einer StaticCheck-Regel: **jeder Modulparameter, den der Code namentlich bindet, muss in
+dieser Liste stehen.** Bewusst keine Mindestversion — die wäre geraten; die installierte Oberfläche
+ist gemessen. Zwei Dinge liegen daneben und bleiben bewusst so: `Remove-WtWin32App` wird zur Laufzeit
+auf `-AppId`/`-GraphId` geprüft (echte Umbenennung, beide Fassungen im Umlauf), und
+`Deploy-WtWin32App -OverrideAppName` ist optional und wird über `Get-Command` erfragt.
+
+Dazu die allgemeinere Lehre: **jeder Modulaufruf in einem Ereignishandler braucht ein `catch`.** Ohne
+es wird jede Modulstörung zum Absturzbild. Eine Suche ohne Treffer ist ein Ergebnis, eine Suche mit
+Fehler eine Meldung — keins von beidem ist ein Absturz.
+
 ### Die zwei Ablöse-Zähler von Graph, und warum sie vertauscht waren
 `supersededAppCount` = wie viele Apps **diese App ablöst** (> 0 auf der **neuen**).
 `supersedingAppCount` = von wie vielen Apps sie **abgelöst wird** (> 0 auf der **alten**).

@@ -67,6 +67,23 @@ try {
     throw ("The installed WinTuner module is missing required commands: {0}. Update the module and restart the GUI." -f ($missingCommands -join ', '))
   }
 
+  # Die Befehle sind da - tragen sie auch die Parameter, die diese Anwendung bindet?
+  #
+  # Gemeldet am 03.09.2026: auf einem Rechner mit deutlich aelterem Modul endete der Klick auf
+  # "Suchen" in "A parameter cannot be found that matches parameter name 'SearchQuery'" - als FATAL
+  # UI ERROR mit Stapelabbild. Der Befehl existierte, nur der Parameter hiess dort noch anders
+  # (bis Modul 1.0.6: -PackageId). Ein solcher Bruch gehoert an den Start, wo er einmal steht und
+  # den Namen nennt, nicht in einen Klick, wo er wie ein Absturz aussieht.
+  $missingParameters = @(Get-MissingModuleParameters -Required $script:requiredModuleParameters `
+    -CommandLookup { param($name) Get-Command $name -ErrorAction SilentlyContinue })
+  if ($missingParameters.Count -gt 0) {
+    Write-Log ("The installed WinTuner module is missing {0} parameter(s) this application binds: {1}" -f
+      $missingParameters.Count, ($missingParameters -join '; '))
+    Show-StartupDialog -Text ((Get-UiString 'ModParametersMissingDialog') -f ($missingParameters -join "`r`n")) `
+      -Title (Get-UiString 'ModParametersMissingTitle') `
+      -Icon ([System.Windows.Forms.MessageBoxIcon]::Warning)
+  }
+
   # The command check above proves the cmdlets exist, not that they still behave the same way.
   # This GUI is written against the WinTuner 1.x surface and deliberately tolerates older 1.x
   # deployments, so no minimum version is enforced. A future 2.x could keep every command name
@@ -309,6 +326,13 @@ $searchButton.Add_Click({
     } else {
       Update-Status (Get-UiString 'SearchCompletedStatus')
     }
+  } catch {
+    # Ohne diesen Zweig war eine gescheiterte Suche ein FATAL UI ERROR samt Stapelabbild - genau so
+    # am 03.09.2026 gemeldet, als ein zu altes Modul den Parameter -SearchQuery nicht kannte. Eine
+    # Suche, die nichts findet, ist ein Ergebnis; eine Suche, die scheitert, ist eine Meldung -
+    # keins von beidem ist ein Absturz.
+    Write-Log ("WinGet package search for '{0}' failed: {1}" -f $appSearchBox.Text, (Format-ErrorDetail -ErrorRecord $_))
+    Update-Status ((Get-UiString 'SearchFailedStatus') -f $_.Exception.Message)
   } finally {
     $searchButton.Enabled = $true
   }

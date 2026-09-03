@@ -12,6 +12,62 @@ $script:updateAssetName = 'WinTuner_GUI_ntg.ps1'
 $script:updateHashAssetName = 'WinTuner_GUI_ntg.ps1.sha256'
 $script:skipLowValueWingetCandidates = $false  # keep all apps by default; set $true for faster scans with possible omissions
 
+# --- Was das WinTuner-Modul mitbringen muss ------------------------------------------------------
+#
+# Gemeldet am 03.09.2026 vom Rechner eines Kollegen: der Klick auf "Suchen" endete in
+#   "A parameter cannot be found that matches parameter name 'SearchQuery'"
+# als FATAL UI ERROR samt Stapelabbild. Nachgesehen in der Modulquelle: `Search-WtWinGetPackage`
+# heisst der Parameter erst ab Modulversion 1.1.0 `-SearchQuery`; bis 1.0.6 hiess er `-PackageId`.
+# Dort lief also ein deutlich aelteres Modul, und der bestehende Startcheck sah das nicht - er prueft
+# nur, ob die BEFEHLE existieren, und der Befehl existiert ja.
+#
+# Bewusst KEINE Mindestversion, sondern die tatsaechlich installierte Oberflaeche: eine Zahl waere
+# geraten (die Dateipfade der Modulquelle wandern zwischen Versionen, ein belastbares Minimum ist
+# daraus nicht ablesbar), diese Liste ist gemessen. Sie nennt beim Start genau, was fehlt - statt
+# den Fehler dem Anwender mitten in einem Klick zu zeigen.
+#
+# Nur Parameter, die die Anwendung wirklich BINDET. Was optional geprueft wird (OverrideAppName
+# ueber Get-Command in Update-SingleApp), gehoert nicht hierher.
+$script:requiredModuleParameters = @(
+  @{ Command = 'Search-WtWinGetPackage'; Parameter = 'SearchQuery'; Since = '1.1.0' }
+  @{ Command = 'Get-WtWin32Apps';        Parameter = 'Superseded';  Since = '' }
+  @{ Command = 'Get-WtWin32Apps';        Parameter = 'Update';      Since = '' }
+  @{ Command = 'Deploy-WtWin32App';      Parameter = 'GraphId';     Since = '' }
+  @{ Command = 'Deploy-WtWin32App';      Parameter = 'KeepAssignments'; Since = '' }
+  @{ Command = 'Update-WtIntuneApp';     Parameter = 'AppId';       Since = '' }
+  @{ Command = 'Update-WtIntuneApp';     Parameter = 'EnableAutoUpdate'; Since = '' }
+  @{ Command = 'Connect-WtWinTuner';     Parameter = 'Username';    Since = '' }
+  @{ Command = 'Connect-WtWinTuner';     Parameter = 'NoBroker';    Since = '' }
+)
+
+# Die reine Rechnung dazu: welche der geforderten Parameter fehlen im installierten Modul?
+#
+# Getrennt vom Start, damit sie ohne Modul und ohne Fenster pruefbar ist. `Get-Command` wird
+# hereingegeben, nicht selbst gerufen - so kann ein Test eine Attrappe stellen.
+function Get-MissingModuleParameters {
+  param(
+    [AllowNull()][object[]]$Required,
+    [Parameter(Mandatory)][scriptblock]$CommandLookup
+  )
+  $missing = [System.Collections.Generic.List[string]]::new()
+  foreach ($entry in @($Required)) {
+    if (-not $entry -or -not $entry.Command -or -not $entry.Parameter) { continue }
+    $command = $null
+    try { $command = & $CommandLookup $entry.Command } catch { $command = $null }
+    # Fehlt der BEFEHL, ist das nicht unsere Baustelle - dafuer gibt es den Check darueber, und ihn
+    # hier zu wiederholen wuerde dieselbe Sache zweimal melden.
+    if (-not $command) { continue }
+    $has = $false
+    try { $has = [bool]$command.Parameters.ContainsKey([string]$entry.Parameter) } catch { $has = $false }
+    if (-not $has) {
+      $text = "{0} -{1}" -f $entry.Command, $entry.Parameter
+      if ($entry.Since) { $text += (" (needs module {0} or newer)" -f $entry.Since) }
+      $missing.Add($text)
+    }
+  }
+  return @($missing.ToArray())
+}
+
 # --- Graph-Transport ------------------------------------------------------------------------------
 #
 # Zeitablauf fuer jeden Graph-Aufruf dieser Anwendung.

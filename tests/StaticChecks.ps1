@@ -533,4 +533,56 @@ Assert-True ($uiThreadDeploys.Count -eq 0) (
   "Deploy-WtWin32App is called outside Invoke-WtDeployOffThread ({0} site(s)); on the UI thread the upload freezes the window and the module's logger floods the console:`r`n  {1}" -f
     $uiThreadDeploys.Count, ($uiThreadDeploys -join "`r`n  "))
 
+# Jeder Modulparameter, den der Code namentlich bindet, muss im Startvertrag stehen.
+#
+# Gemeldet am 03.09.2026 vom Rechner eines Kollegen: der Klick auf "Suchen" endete in "A parameter
+# cannot be found that matches parameter name 'SearchQuery'" - als FATAL UI ERROR mit Stapelabbild.
+# Der BEFEHL existierte (das prueft der Start seit langem), nur hiess der Parameter in seiner
+# aelteren Modulfassung noch -PackageId. Ein Bruch dieser Art gehoert an den Start, wo er einmal
+# steht und den Namen nennt.
+#
+# Die Regel haelt die Liste vollstaendig: wer eine neue Modulparameter-Bindung schreibt und den
+# Eintrag in $script:requiredModuleParameters vergisst, erfaehrt es hier - und nicht ein Anwender
+# mit einem aelteren Modul mitten in einem Klick.
+$moduleCmdlets = 'Search-WtWinGetPackage', 'Get-WtWin32Apps', 'Deploy-WtWin32App', 'New-WtWingetPackage',
+                 'Remove-WtWin32App', 'Update-WtIntuneApp', 'Connect-WtWinTuner', 'Disconnect-WtWinTuner',
+                 'Get-WtToken', 'Deploy-WtMsStoreApp'
+# Gemeinsame Parameter binden wir an jeder Ecke; sie sind Teil von PowerShell und nicht des Moduls.
+$commonParameters = [System.Management.Automation.PSCmdlet]::CommonParameters + @('ErrorAction', 'ErrorVariable', 'WarningVariable', 'InformationVariable', 'OutVariable', 'OutBuffer', 'PipelineVariable')
+# Die Tabelle kommt aus dem PARSER, nicht aus einer laufenden Variablen: diese Prüfung liest das
+# gebaute Skript, sie führt es nicht aus.
+$requiredAssignment = $ast.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+    $node.Left.Extent.Text -eq '$script:requiredModuleParameters'
+  }, $true)
+Assert-True ($null -ne $requiredAssignment) '$script:requiredModuleParameters not found - renamed? The module-contract check cannot run.'
+# Unveraendert einlesen: die Zuweisung ist ein reines Literal, und $script: landet hier im
+# Skript-Bereich DIESER Pruefung.
+. ([scriptblock]::Create($requiredAssignment.Extent.Text))
+$contractPairs = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($entry in @($script:requiredModuleParameters)) {
+  if ($entry -and $entry.Command -and $entry.Parameter) { [void]$contractPairs.Add(('{0} -{1}' -f $entry.Command, $entry.Parameter)) }
+}
+Assert-True ($contractPairs.Count -gt 0) '$script:requiredModuleParameters is empty or was not found; the module-contract check cannot run.'
+$uncoveredBindings = [Collections.Generic.List[string]]::new()
+foreach ($call in $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+    $node.GetCommandName() -in $moduleCmdlets
+  }, $true)) {
+  foreach ($element in $call.CommandElements) {
+    if ($element -isnot [System.Management.Automation.Language.CommandParameterAst]) { continue }
+    $parameterName = [string]$element.ParameterName
+    if ($parameterName -in $commonParameters) { continue }
+    $pair = '{0} -{1}' -f $call.GetCommandName(), $parameterName
+    if (-not $contractPairs.Contains($pair)) {
+      $uncoveredBindings.Add(('line {0}: {1}' -f $call.Extent.StartLineNumber, $pair))
+    }
+  }
+}
+Assert-True ($uncoveredBindings.Count -eq 0) (
+  "Module parameter(s) bound by name but missing from `$script:requiredModuleParameters ({0}); an older module that renamed one of them fails at the moment the user clicks, instead of being reported at startup:`r`n  {1}" -f
+    $uncoveredBindings.Count, (($uncoveredBindings | Sort-Object -Unique) -join "`r`n  "))
+
 Write-Host "Static checks passed for WinTuner GUI $($version.Groups['v'].Value): $($functionNames.Count) functions, $($enKeys.Count) UI keys per language."
