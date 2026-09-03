@@ -185,6 +185,27 @@ For a tool that manages customer tenants, a cache left behind on a shared techni
 - The cache belongs to the `Microsoft.Graph` module and is **shared**, not private to this application. Signing out therefore also ends the cached session of **other** PowerShell tools used by the same Windows user.
 - Signing out only deletes the **local** copy. The refresh token stays valid at Entra ID and is **not revoked**. If you genuinely suspect an account or device is compromised, signing out is not enough: revoke the sessions centrally in the Entra portal as well.
 
+### How many sign-in addresses are remembered
+
+The dropdown next to the address field offers the addresses used before, most recent first. It keeps **15** of them by default; beyond that the oldest drops off the end. The list is pure convenience — it suggests an address, it holds no session open.
+
+If you look after more customers than that, raise `MaxRecentLogins` in the settings file (1 to 50, anything outside falls back to 15):
+
+```text
+%APPDATA%\WinTunerGUI\settings.json
+```
+
+```powershell
+# close the application first - it writes this file when it exits
+$p = "$env:APPDATA\WinTunerGUI\settings.json"
+$s = Get-Content -Raw -LiteralPath $p | ConvertFrom-Json
+$s.MaxRecentLogins = 20
+$s | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $p -Encoding utf8
+```
+
+> [!NOTE]
+> An installation that has been in use for a while may still carry `MaxRecentLogins = 8`. That was the default in earlier versions, and an existing settings file keeps its value — a raised default only applies to new installations. If your list stops growing at eight, this is why.
+
 ---
 
 ## Requirements

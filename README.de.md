@@ -185,6 +185,27 @@ Bei einem Werkzeug, das Kundentenants verwaltet, ist ein liegengebliebener Zwisc
 - Der Zwischenspeicher gehört dem Modul `Microsoft.Graph` und ist **gemeinsam**, nicht privat für diese Anwendung. Abmelden beendet deshalb auch die zwischengespeicherte Sitzung **anderer** PowerShell-Werkzeuge desselben Windows-Benutzers.
 - Abmelden löscht nur die **lokale** Kopie. Das Aktualisierungstoken bleibt bei Entra ID gültig und ist damit **nicht widerrufen**. Bei echtem Verdacht auf ein kompromittiertes Konto oder Gerät reicht Abmelden nicht: Dann müssen die Sitzungen zusätzlich zentral im Entra-Portal widerrufen werden.
 
+### Wie viele Anmeldeadressen gemerkt werden
+
+Das Auswahlfeld neben dem Adressfeld bietet die zuletzt benutzten Adressen an, die neueste zuerst. Gemerkt werden standardmäßig **15**; alles darüber fällt hinten heraus. Die Liste ist reine Bequemlichkeit — sie schlägt eine Adresse vor, sie hält keine Sitzung offen.
+
+Wer mehr Kunden betreut, setzt `MaxRecentLogins` in der Einstellungsdatei hoch (1 bis 50, alles außerhalb fällt auf 15 zurück):
+
+```text
+%APPDATA%\WinTunerGUI\settings.json
+```
+
+```powershell
+# vorher die Anwendung schliessen - sie schreibt diese Datei beim Beenden
+$p = "$env:APPDATA\WinTunerGUI\settings.json"
+$s = Get-Content -Raw -LiteralPath $p | ConvertFrom-Json
+$s.MaxRecentLogins = 20
+$s | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $p -Encoding utf8
+```
+
+> [!NOTE]
+> In einer länger genutzten Installation kann dort noch `MaxRecentLogins = 8` stehen. Das war in früheren Versionen die Vorgabe, und eine bestehende Einstellungsdatei behält ihren Wert — eine erhöhte Vorgabe gilt nur für neue Installationen. Wenn die Liste bei acht Einträgen stehenbleibt, ist das der Grund.
+
 ---
 
 ## Voraussetzungen
