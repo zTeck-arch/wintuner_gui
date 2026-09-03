@@ -12,6 +12,24 @@ $script:updateAssetName = 'WinTuner_GUI_ntg.ps1'
 $script:updateHashAssetName = 'WinTuner_GUI_ntg.ps1.sha256'
 $script:skipLowValueWingetCandidates = $false  # keep all apps by default; set $true for faster scans with possible omissions
 
+# --- Graph-Transport ------------------------------------------------------------------------------
+#
+# Zeitablauf fuer jeden Graph-Aufruf dieser Anwendung.
+#
+# Ohne -TimeoutSec wartet Invoke-RestMethod in PowerShell 7 UNBEGRENZT. Gemessen am 31.08.2026: von
+# 22 Aufrufstellen trugen sieben eine Angabe, fuenfzehn nicht - und alle laufen auf dem UI-Faden.
+# Eine Antwort, die nie kommt, war damit ein eingefrorenes Fenster ohne Abbruchweg; nur das Beenden
+# der Anwendung half. 100 s ist bewusst grosszuegig (der Store-Katalog antwortet nachweislich
+# langsam), aber endlich: ein Graph-Aufruf, der laenger braucht, ist kein langsamer, sondern ein
+# verlorener. Hier und nicht in 40-Graph, damit auch die Teile 25-35 den Wert ohne Vorwaertsbezug
+# lesen koennen.
+$script:graphTimeoutSeconds = 100
+
+# Welche Antworten einen zweiten Versuch verdienen. 429 ist im Betrieb aufgetreten (Intune drosselt
+# mehrere Zuweisungsschreibvorgaenge kurz hintereinander); 5xx sind Zustaende des Dienstes, nicht der
+# Anfrage. Ausgewertet in Get-GraphRetryPlan (40-Graph).
+$script:graphRetryStatuses = @(429, 500, 502, 503, 504)
+
 # --- Runtime state (set during execution) ---
 # $script:isConnected      – whether the user is logged in to a tenant
 # $script:currentUserUpn   – UPN of the currently logged-in user

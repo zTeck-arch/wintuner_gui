@@ -9,7 +9,15 @@ $dropdown.Add_SelectedIndexChanged({ Update-SelectedPackageVersionLabel })
 # One banner per start makes support diagnosis (and bug reports) far easier.
 try {
   $psVer  = $PSVersionTable.PSVersion.ToString()
-  $osVer  = try { (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Caption } catch { [Environment]::OSVersion.VersionString }
+  # Gemessen am 31.08.2026: `Get-CimInstance Win32_OperatingSystem` kostete hier 398-425 ms - fuer
+  # EINE Protokollzeile, und es war der teuerste Einzelposten des gesamten Startpfads (~5 % von
+  # 7,4 s). `[Environment]::OSVersion.VersionString` kostet 0 ms und nennt die Build-Nummer, die
+  # einen Support-Fall ohnehin genauer eingrenzt als der Marketingname ("10.0.26200" ist Windows 11,
+  # eindeutig). Der naheliegende dritte Weg ist die Registry - und der ist FALSCH: ProductName
+  # meldete auf diesem Windows 11 "Windows 10 Enterprise" (bekannte Eigenheit) und kostete trotzdem
+  # 78 ms. Ein falscher Betriebssystemname in einem Protokoll, das in Tickets wandert, ist schlimmer
+  # als ein unhandlicher richtiger.
+  $osVer  = [Environment]::OSVersion.VersionString
   $wtVer  = try { (Get-Module -ListAvailable -Name WinTuner | Sort-Object Version -Descending | Select-Object -First 1).Version.ToString() } catch { 'n/a' }
   Write-Log ("=" * 78)
   Write-Log ("Session start | WinTuner GUI {0} | PowerShell {1} | WinTuner module {2}" -f $script:appVersion, $psVer, $wtVer)
@@ -39,37 +47,6 @@ Update-Status (Get-UiString 'ModCheckingStatus')
 try {
   if (Get-Module -ListAvailable -Name WinTuner) {
     Update-Status (Get-UiString 'ModFoundStatus')
-
-    # Check if update is available (optional - don't force update every time)
-    # Uncomment the following block if you want automatic updates:
-    <#
-    try {
-      $installedVersion = (Get-Module -ListAvailable -Name WinTuner | Sort-Object Version -Descending | Select-Object -First 1).Version
-      $onlineVersion = (Find-Module -Name WinTuner -ErrorAction SilentlyContinue).Version
-
-      if ($onlineVersion -and $onlineVersion -gt $installedVersion) {
-        Update-Status "Module update available ($installedVersion → $onlineVersion). Updating..."
-
-        # Temporarily disable PSDefaultParameterValues for Update-Module
-        $savedDefaults = $PSDefaultParameterValues.Clone()
-        $PSDefaultParameterValues.Clear()
-
-        Update-Module -Name WinTuner -ErrorAction Stop
-
-        # Restore defaults
-        foreach ($key in $savedDefaults.Keys) {
-          $PSDefaultParameterValues[$key] = $savedDefaults[$key]
-        }
-
-        Update-Status "Module updated to $onlineVersion"
-      } else {
-        Update-Status "Module is up to date (v$installedVersion)"
-      }
-    } catch {
-      Write-Log "Module update check failed: $($_.Exception.Message)"
-      Update-Status "Module update skipped (using existing version)"
-    }
-    #>
   } else {
     Update-Status (Get-UiString 'ModNotFoundStatus')
     Write-Log 'WinTuner module is not installed; the startup installation offer was declined or failed.'
@@ -556,7 +533,7 @@ $uploadButton.Add_Click({
           $scopeTags = @($script:roleScopeTagsBox.Text -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
           if ($scopeTags.Count -gt 0) { $deploySplat.RoleScopeTags = $scopeTags }
         }
-        $deployedApp = Deploy-WtWin32App @deploySplat
+        $deployedApp = Invoke-WtDeployOffThread -Arguments $deploySplat -Label ("{0} {1}" -f $packageID, $version)
 
         $returnedId = $null
         try { if ($deployedApp -and $deployedApp.Id) { $returnedId = [string]$deployedApp.Id } } catch {}
@@ -758,7 +735,7 @@ $updateSearchButton.Add_Click({
       $all = @(Remove-SupersededInventoryOverlap -ActiveApps $activeInventory -SupersededApps $supersededInventory)
       Write-Log ("Loaded {0} active app object(s) from Intune after excluding {1} superseded overlap(s)." -f $all.Count, ($activeInventory.Count - $all.Count))
       # Nach der Ueberlappungspruefung, nicht davor: die unmarkierten Apps werden in
-      # Select-UnmanagedWin32Apps schon nach supersededAppCount getrennt, sie duerfen also nicht
+      # Select-UnmanagedWin32Apps schon nach supersedingAppCount getrennt, sie duerfen also nicht
       # noch einmal gegen das Modul-Inventar der abgeloesten Apps gerechnet werden.
       $all = @(Get-ScanInventory -ManagedApps $all)
     } catch {
@@ -1049,6 +1026,10 @@ $updateSearchButton.Add_Click({
     $script:cancelBatch = $false
     Hide-Progress
     if (Get-Command Update-UpdatesEmptyState -ErrorAction SilentlyContinue) { Update-UpdatesEmptyState }
+    # Der Versionscache wird EINMAL geschrieben, nicht je Paket (siehe Get-WingetVersions). Im
+    # finally, damit auch eine abgebrochene oder gescheiterte Suche das behaelt, was sie schon
+    # ermittelt hat - sonst kostet der naechste Lauf dieselben Abfragen noch einmal.
+    Save-PendingVersionDiskCache | Out-Null
   }
 })
 
@@ -1097,8 +1078,17 @@ $updateSelectedButton.Add_Click({
 
     # VOR der allgemeinen Rueckfrage: die hier ist die ernstere, und sie ist die einzige, die auch
     # bei abgeschalteten Bestaetigungen kommt. Ohne geschuetzte App kostet sie keinen Klick.
-    if (-not (Confirm-ProtectedAppsInRun -Apps @($checkedApps))) {
-        Update-Status (Get-UiString 'MassUpdateCanceledStatus'); return
+    # Drei moegliche Antworten, nicht zwei: die geschuetzten koennen AUSGELASSEN werden, dann laeuft
+    # der Rest. Weitergerechnet wird mit der Liste AUS DEM ERGEBNIS - wer hier weiter $checkedApps
+    # nimmt, baut genau die App, die der Benutzer gerade abgewaehlt hat.
+    $protectedChoice = Confirm-ProtectedAppsInRun -Apps @($checkedApps)
+    if (-not $protectedChoice.Proceed) {
+        Update-Status (Get-UiString $(if ($protectedChoice.Reason -eq 'empty') { 'ProtectedRunNothingLeftStatus' } else { 'MassUpdateCanceledStatus' }))
+        return
+    }
+    $checkedApps = @($protectedChoice.Apps)
+    if (@($protectedChoice.Skipped).Count -gt 0) {
+        Update-Status ((Get-UiString 'ProtectedRunSkippedStatus') -f @($protectedChoice.Skipped).Count, $checkedApps.Count)
     }
 
     # Confirm before touching the tenant – the selection can be larger than expected (filters,
@@ -1162,8 +1152,14 @@ $updateAllButton.Add_Click({
 
     # Derselbe Riegel wie im Lauf ueber die markierten Zeilen: "Alle aktualisieren" ist genau der
     # Weg, auf dem eine geschuetzte App ungesehen mitlaeuft.
-    if (-not (Confirm-ProtectedAppsInRun -Apps @($updatedApps))) {
-        Update-Status (Get-UiString 'MassUpdateCanceledStatus'); return
+    $protectedChoice = Confirm-ProtectedAppsInRun -Apps @($updatedApps)
+    if (-not $protectedChoice.Proceed) {
+        Update-Status (Get-UiString $(if ($protectedChoice.Reason -eq 'empty') { 'ProtectedRunNothingLeftStatus' } else { 'MassUpdateCanceledStatus' }))
+        return
+    }
+    $updatedApps = @($protectedChoice.Apps)
+    if (@($protectedChoice.Skipped).Count -gt 0) {
+        Update-Status ((Get-UiString 'ProtectedRunSkippedStatus') -f @($protectedChoice.Skipped).Count, $updatedApps.Count)
     }
 
     $rootPackageFolder = try { [System.IO.Path]::GetFullPath($pathBox.Text.Trim()) } catch {
@@ -2038,11 +2034,14 @@ $deployDiscoveredButton.Add_Click({
                 }
 
                 Write-Log "Uploading new app to tenant without a temporary assignment: $packageId v$effVersion"
-                $discoveredDeployResult = Deploy-WtWin32App `
-                    -PackageId $packageId `
-                    -Version $effVersion `
-                    -RootPackageFolder $rootFolder `
-                    -ErrorAction Stop
+                $discoveredDeploySplat = @{
+                    PackageId         = $packageId
+                    Version           = $effVersion
+                    RootPackageFolder = $rootFolder
+                    ErrorAction       = 'Stop'
+                }
+                $discoveredDeployResult = Invoke-WtDeployOffThread -Arguments $discoveredDeploySplat `
+                    -Label ("{0} {1}" -f $packageId, $effVersion)
                 $returnedDiscoveredId = $null
                 try { if ($discoveredDeployResult -and $discoveredDeployResult.Id) { $returnedDiscoveredId = [string]$discoveredDeployResult.Id } } catch {}
                 $resolvedDiscovered = Resolve-DeployedUpdateTarget -PackageId $packageId -Version $effVersion -PreferredName ([string]$wingetApp.Name) -ReturnedId $returnedDiscoveredId
@@ -2166,7 +2165,7 @@ $navGroupOrder = @('start', 'deploy', 'manage', 'local')
 $navKeyOrder = @('dashboard',
                  'winget', 'store', 'ownpackage',
                  'updates', 'discovered', 'tenant', 'appsettings',
-                 'localpackages', 'workrecord', 'settings')
+                 'localpackages', 'workrecord', 'customerdata', 'settings')
 $navOrdered = @($script:sections | Sort-Object -Stable `
   @{ Expression = {
       $idx = $navGroupOrder.IndexOf([string]$_.Group)
@@ -2304,6 +2303,11 @@ $form.Add_FormClosing({
         }
     } catch {}
 
+    # 1a. Den Versionscache nachziehen, falls diese Sitzung etwas ermittelt hat. Er wird waehrend
+    #     eines Laufs nur im Speicher gefuehrt (siehe Get-WingetVersions); ohne diese Zeile waere
+    #     jede Abfrage, die nach der letzten Schleife dazukam, beim naechsten Start wieder faellig.
+    try { Save-PendingVersionDiskCache | Out-Null } catch {}   # class 3: teardown
+
     # 2. Wenn bereits geschlossen wird, ignorieren
     if ($script:_closingInProgress) { return }
     $script:_closingInProgress = $true
@@ -2319,6 +2323,11 @@ $form.Add_FormClosing({
             Write-FileLog 'Shutdown: background packaging runspace closed.'
         }
     } catch { }   # class 3: teardown
+    # Seit dem Vorab-Bau gibt es einen zweiten Runspace. Wird er nicht geschlossen, haelt sein
+    # Thread das Beenden auf - genau der Grund, aus dem der erste hier steht.
+    try { Close-PrebuildRunspace } catch { }   # class 3: teardown
+    # Seit 0.18.0 gibt es einen dritten: den fuer den Upload. Gleicher Grund.
+    try { Close-DeployRunspace } catch { }   # class 3: teardown
 
     # 3. Falls verbunden, regulär abmelden
     if ($script:isConnected) {
@@ -2439,6 +2448,22 @@ $form.Add_Shown({
 # "Verteilwerk" ist zurueckgenommen, das Repository hiess und heisst zTeck-arch/wintuner_gui. Ein
 # Hinweis auf einen Umzug, den es nicht gibt, waere schlimmer als keiner. Der Merker
 # RepoMoveNoticeShown bleibt in den Einstellungen liegen und stoert dort nicht.
+
+# Die werksseitig geschuetzten Namen einmal festschreiben. Bewusst OHNE Dialog: das ist kein
+# Konflikt, den jemand entscheiden muesste, sondern eine Voreinstellung - und sie steht sichtbar
+# unter "Geschuetzte Apps...". Ein Dialog hier waere zudem der vierte im Startpfad.
+#
+# Ohne Test-UnattendedRun-Ausstieg, weil hier nichts Modales passiert: auch ein Pruef-Lauf darf
+# den Merker schreiben, und ohne das Speichern kaeme die Ergaenzung bei jedem Start erneut.
+$form.Add_Shown({
+  if (@($script:protectedAppsSeeded).Count -eq 0) { return }
+  $added = @($script:protectedAppsSeeded)
+  $script:protectedAppsSeeded = @()
+  Save-Settings
+  Write-Log ("Protected apps: {0} factory pattern(s) added ({1}); the app list now holds {2} entr(y/ies). They can be removed under 'Protected apps...' and will not come back." -f `
+    $added.Count, ($added -join ', '), @($script:settings.ProtectedApps).Count)
+  try { if (Get-Command Update-ProtectedAppsList -ErrorAction SilentlyContinue) { Update-ProtectedAppsList } } catch { Write-LogDebug 'protected apps list after seeding' }
+})
 
 $form.Add_Shown({
   # Unbeaufsichtigt: nichts von hier - siehe der erste Add_Shown-Handler oben.
@@ -2562,6 +2587,11 @@ if ($keepVersionCountLabel) { $toolTip.SetToolTip($keepVersionCountLabel, (Get-U
 if ($languageSelectorCombo) { $toolTip.SetToolTip($languageSelectorCombo, (Get-UiString 'TtLanguageSelector')) }
 if ($saveSettingsButton)       { $toolTip.SetToolTip($saveSettingsButton,       (Get-UiString 'TtSaveSettings')) }
 if ($clearCacheButton)         { $toolTip.SetToolTip($clearCacheButton,         (Get-UiString 'TtClearCache')) }
+# Der Nachbarknopf in derselben Reihe hatte seinen Text seit jeher, aber niemand haengte ihn an -
+# gefunden bei der Durchsicht der "toten" Sprachschluessel: TtPrunePackages galt als unbenutzt,
+# weil der Knopf ihn nie las. Von den 38 gemeldeten Schluesseln war genau dieser kein toter Text,
+# sondern eine fehlende Verdrahtung. Und gerade hier zaehlt der Hinweis: der Knopf loescht Dateien.
+if ($prunePackagesButton)      { $toolTip.SetToolTip($prunePackagesButton,      (Get-UiString 'TtPrunePackages')) }
 if ($checkUpdateButton)        { $toolTip.SetToolTip($checkUpdateButton,        (Get-UiString 'TtCheckUpdate')) }
 if ($moveAssignmentsCheckbox)  { $toolTip.SetToolTip($moveAssignmentsCheckbox,  (Get-UiString 'TtMoveAssignments')) }
 if ($openLogButton)            { $toolTip.SetToolTip($openLogButton,            (Get-UiString 'TtOpenLogFile')) }

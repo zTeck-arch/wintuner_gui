@@ -1,0 +1,32 @@
+# Haelt die Actions in .github/workflows aktuell.
+#
+# Ohne diese Datei macht Dependabot nur Security-Updates (Schalter in den Repository-Settings) -
+# "es gibt eine neuere Fassung" meldet es erst, wenn hier steht wo es nachsehen soll.
+#
+# Der Anlass: die Workflows zeigen mit actions/checkout@v5 auf einen beweglichen Zeiger innerhalb
+# von v5, nicht auf v6. Wird die Node-Fassung auf den Laeufern abgekuendigt, warnt die alte Action
+# erst und bricht dann. Commit 8ebd834 (checkout v4 -> v5) war genau diese Arbeit von Hand,
+# nachdem jemand die Warnung im Protokoll gelesen hatte. Jetzt kommt stattdessen ein Pull Request,
+# der durch dieselbe Pruefkette laeuft wie jede andere Aenderung.
+#
+# Die PowerShell-Module (Pester, PSScriptAnalyzer, WinTuner) stehen hier absichtlich nicht: die
+# Workflows holen sie per Install-Module ohne festgeschriebene Version, es gibt also keine Zeile,
+# die Dependabot anheben koennte.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    # "/" ist die Repository-Wurzel; die Workflows unter .github/workflows findet Dependabot selbst.
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    # Passt zum Bestand: Commit 8ebd834 heisst "CI: actions/checkout auf v5".
+    commit-message:
+      prefix: "CI"
+    open-pull-requests-limit: 3
+    groups:
+      # Ein Pull Request fuer alle Actions statt einer pro Action - die Pruefkette laeuft dann
+      # einmal statt viermal, und der Stand ist in einem Merge wieder einheitlich.
+      actions:
+        patterns:
+          - "*"

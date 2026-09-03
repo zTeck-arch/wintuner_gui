@@ -8,7 +8,7 @@ function Get-GraphCollectionItems {
   while (-not [string]::IsNullOrWhiteSpace($next)) {
     $page++
     if ($page -gt $MaxPages) { throw "Graph pagination exceeded $MaxPages pages for $Uri" }
-    $response = Invoke-RestMethod -Method GET -Uri $next -Headers $Headers -ErrorAction Stop
+    $response = Invoke-GraphRest -Method GET -Uri $next -Headers $Headers -Context ("collection page {0}" -f $page)
     foreach ($item in @($response.value)) { if ($null -ne $item) { $items.Add($item) } }
     $next = [string]$response.'@odata.nextLink'
   }
@@ -36,6 +36,165 @@ function Get-ErrorHttpStatus {
     $ex = $ex.InnerException
   }
   return 0
+}
+
+# Der ANTWORTKOERPER eines fehlgeschlagenen Graph-Aufrufs, einzeilig und gekuerzt.
+#
+# Gebraucht, weil "Response status code does not indicate success: 400 (Bad Request)" nichts sagt.
+# Am 03.09.2026 stand genau diese Zeile im Protokoll, als das Zurueckschreiben einer
+# Abloesebeziehung scheiterte (CRITICAL in Remove-SupersededByUnlinking) - und der Grund war damit
+# nicht feststellbar. Der Grund steht immer im Koerper: Graph schickt bei 400 ein
+# { "error": { "code": ..., "message": ... } }.
+#
+# PowerShell 7 legt ihn in $_.ErrorDetails.Message; die Antwort selbst ist danach nicht mehr lesbar
+# (der Inhalt ist ein bereits verbrauchter Stream), deshalb wird nur diese Quelle benutzt.
+#
+# Einzeilig und gekuerzt, weil die Zeile in ein Protokoll geht, das jemand liest: ein
+# mehrzeiliger JSON-Block darin ist nicht greppbar - genau das Problem, das der Modulfehler in
+# demselben Protokoll schon macht.
+function Get-GraphErrorBody {
+  param([Parameter(Mandatory)]$ErrorRecord, [int]$MaxLength = 1200)
+  $text = ''
+  try {
+    if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) {
+      $text = [string]$ErrorRecord.ErrorDetails.Message
+    }
+  } catch { }   # class 3: ein nicht lesbarer Koerper ist einfach keiner
+  if ([string]::IsNullOrWhiteSpace($text)) { return '' }
+  $flat = ($text -replace '\s+', ' ').Trim()
+  if ($MaxLength -gt 0 -and $flat.Length -gt $MaxLength) {
+    return $flat.Substring(0, $MaxLength) + ('… (+{0} Zeichen)' -f ($flat.Length - $MaxLength))
+  }
+  return $flat
+}
+
+# Fehlertext plus Antwortkoerper in einer Zeile - das, was in ein Protokoll gehoert.
+function Get-GraphErrorText {
+  param([Parameter(Mandatory)]$ErrorRecord)
+  $message = [string]$ErrorRecord.Exception.Message
+  $body = Get-GraphErrorBody -ErrorRecord $ErrorRecord
+  if ([string]::IsNullOrWhiteSpace($body)) { return $message }
+  return ("{0} | response: {1}" -f $message, $body)
+}
+
+# Entscheidet, ob und wie lange ein zweiter Versuch wartet. Rein, damit die Regel ohne Netz und ohne
+# Uhr geprueft werden kann (Get-GraphRetryPlan in tests/Unit/GraphTransport.Tests.ps1).
+#
+# Zwei Festlegungen stecken darin, und beide sind Sicherheits- und keine Bequemlichkeitsfragen:
+#
+# 1. Wiederholt wird NUR bei einem gelesenen Status aus $script:graphRetryStatuses. Status 0 heisst
+#    "kein Status lesbar": Zeitablauf, abgerissene Verbindung, DNS. Genau dann weiss der Aufrufer
+#    NICHT, ob der Dienst die Anfrage schon ausgefuehrt hat - ein zweiter POST auf /mobileApps legte
+#    eine zweite App an. Ein Zeitablauf ist deshalb ein Fehler und kein Wiederholungsgrund.
+# 2. Retry-After des Dienstes gewinnt, wird aber begrenzt: unter einer Sekunde ist es keine Pause,
+#    ueber 45 s wartet niemand mehr auf eine Zuweisung. Ohne Angabe 5/15/30 s - dieselbe Treppe,
+#    die Invoke-PackageBuildWithThrottleRetry (35-Packaging) beim Paketbau schon benutzt.
+function Get-GraphRetryPlan {
+  param(
+    [Parameter(Mandatory)][int]$Status,
+    [Parameter(Mandatory)][int]$Attempt,
+    [Parameter(Mandatory)][int]$MaxRetries,
+    [int]$RetryAfterSeconds = 0
+  )
+  if ($Attempt -ge $MaxRetries) {
+    return [pscustomobject]@{ Retry = $false; WaitSeconds = 0; Reason = 'retries exhausted' }
+  }
+  if ($Status -notin $script:graphRetryStatuses) {
+    $reason = if ($Status -le 0) { 'no HTTP status - the request may already have been applied' } else { "HTTP $Status is not transient" }
+    return [pscustomobject]@{ Retry = $false; WaitSeconds = 0; Reason = $reason }
+  }
+  $wait = if ($RetryAfterSeconds -gt 0) {
+    [Math]::Max(1, [Math]::Min(45, $RetryAfterSeconds))
+  } else {
+    switch ($Attempt) { 0 { 5 } 1 { 15 } default { 30 } }
+  }
+  return [pscustomobject]@{ Retry = $true; WaitSeconds = $wait; Reason = "HTTP $Status" }
+}
+
+# Liest Retry-After aus einem Fehler, in welcher Form der Dienst es auch mitschickt. 0 = keine
+# Angabe. Getrennt von Get-GraphRetryPlan, damit die Regel rein bleibt.
+function Get-ErrorRetryAfterSeconds {
+  param([Parameter(Mandatory)]$ErrorRecord)
+  try {
+    $delta = $ErrorRecord.Exception.Response.Headers.RetryAfter.Delta
+    if ($null -ne $delta -and $delta.TotalSeconds -gt 0) { return [int][Math]::Ceiling($delta.TotalSeconds) }
+  } catch { }   # class 3: eine nicht lesbare Kopfzeile ist einfach "keine Angabe"
+  try {
+    $raw = $ErrorRecord.Exception.Response.Headers['Retry-After']
+    if ($raw) {
+      $first = @($raw)[0]
+      $parsed = 0
+      if ([int]::TryParse([string]$first, [ref]$parsed) -and $parsed -gt 0) { return $parsed }
+    }
+  } catch { }
+  $m = [regex]::Match([string]$ErrorRecord.Exception.Message, '(?i)Retry-After\s*[:=]\s*(?<s>\d+)')
+  if ($m.Success) { return [int]$m.Groups['s'].Value }
+  return 0
+}
+
+# Der eine Weg fuer einen Graph-Aufruf: Zeitablauf, Drosselung, Abbruch und eine Protokollzeile.
+#
+# Warum es das gibt: die Zuweisungs-Uebergabe schreibt ZWEI Mal (neue App bekommt die Zuweisungen,
+# danach wird die alte geleert). Scheitert der zweite Schreibvorgang, sind beide Versionen zugewiesen
+# - der Zustand, den Move-AppAssignments als "PARTIALLY applied" protokolliert und den jemand von
+# Hand aufraeumen muss. Die wahrscheinlichste Ursache dafuer ist genau die Drosselung, die zwei
+# schnelle Schreibvorgaenge ausloesen, und dagegen half hier nichts: die assign-POSTs hatten weder
+# Zeitablauf noch Wiederholung.
+#
+# Wiederholen ist hier gefahrlos, und das ist keine Annahme: POST .../assign ERSETZT die gesamte
+# Zuweisungsliste durch die mitgeschickte. Zwei identische Aufrufe hinterlassen denselben Zustand wie
+# einer. Fuer die nicht-idempotenten Wege (POST /mobileApps legt eine App AN) ruft der Aufrufer mit
+# -MaxRetries 0 - der Zeitablauf gilt trotzdem.
+#
+# Der Fehler wird UNVERAENDERT weitergeworfen (throw $ErrorRecord, nicht throw $_.Exception.Message):
+# Get-ErrorHttpStatus, Test-IsNotFoundError und Get-AssignmentWriteErrorText lesen den Status aus dem
+# Ausnahmeobjekt, und eine in Text verwandelte Ausnahme haette ihnen den Status genommen.
+function Invoke-GraphRest {
+  param(
+    [Parameter(Mandatory)][string]$Uri,
+    [ValidateSet('GET', 'POST', 'PATCH', 'PUT', 'DELETE')][string]$Method = 'GET',
+    [hashtable]$Headers,
+    $Body,
+    # 0 = $script:graphTimeoutSeconds. Eigener Wert nur, wo eine Antwort erwiesen laenger braucht.
+    [int]$TimeoutSeconds = 0,
+    # Standard 2, also bis zu drei Versuche. 0 fuer alles, was nicht idempotent ist.
+    [int]$MaxRetries = 2,
+    # Fuer die Protokollzeile: WAS hat gewartet. "assign 3 group(s) to app 1234" liest sich in einem
+    # Ticket, "POST https://graph..." nicht.
+    [string]$Context = ''
+  )
+  $timeout = if ($TimeoutSeconds -gt 0) { $TimeoutSeconds } else { $script:graphTimeoutSeconds }
+  $label = if ([string]::IsNullOrWhiteSpace($Context)) { "$Method $Uri" } else { $Context }
+  $attempt = 0
+  while ($true) {
+    try {
+      $splat = @{ Method = $Method; Uri = $Uri; TimeoutSec = $timeout; ErrorAction = 'Stop' }
+      if ($Headers) { $splat.Headers = $Headers }
+      if ($PSBoundParameters.ContainsKey('Body') -and $null -ne $Body) { $splat.Body = $Body }
+      return (Invoke-RestMethod @splat)
+    } catch {
+      $err = $_
+      $status = Get-ErrorHttpStatus -ErrorRecord $err
+      $plan = Get-GraphRetryPlan -Status $status -Attempt $attempt -MaxRetries $MaxRetries `
+        -RetryAfterSeconds (Get-ErrorRetryAfterSeconds -ErrorRecord $err)
+      if (-not $plan.Retry) {
+        if ($status -gt 0 -and $attempt -gt 0) {
+          Write-Log ("Graph: {0} still failing after {1} retry/retries ({2})." -f $label, $attempt, $plan.Reason)
+        }
+        throw $err
+      }
+      $attempt++
+      Write-Log ("Graph: {0} answered {1}; retry {2}/{3} in {4}s." -f $label, $plan.Reason, $attempt, $MaxRetries, $plan.WaitSeconds)
+      # Dieselbe Warteschleife wie beim Paketbau: sekundenweise, abbrechbar, und sie pumpt die
+      # Nachrichtenschleife - sonst friert das Fenster fuer die Dauer der Pause ein.
+      for ($remaining = $plan.WaitSeconds; $remaining -gt 0; $remaining--) {
+        if ($script:cancelBatch) { throw $err }
+        try { Update-Status ((Get-UiString 'RateLimitRetryStatus') -f $attempt, $remaining) } catch { }
+        try { [System.Windows.Forms.Application]::DoEvents() } catch { }
+        Start-Sleep -Seconds 1
+      }
+    }
+  }
 }
 
 # "Was this a 404, i.e. the object is already gone?"
@@ -311,7 +470,7 @@ function Confirm-UpdateScopeConsolidation {
 function Get-AppInstallSummaryCount {
   param([Parameter(Mandatory)][string]$Base, [Parameter(Mandatory)][hashtable]$Headers)
   try {
-    $summary = Invoke-RestMethod -Method GET -Uri "$Base/installSummary" -Headers $Headers -ErrorAction Stop
+    $summary = Invoke-GraphRest -Method GET -Uri "$Base/installSummary" -Headers $Headers -Context 'installSummary'
     return ([int]$summary.installedDeviceCount + [int]$summary.installedUserCount)
   } catch {
     return $null
@@ -374,7 +533,7 @@ function Get-AppInstallationProbe {
     do {
       $statusPages++
       if ($statusPages -gt 100) { throw "Device status pagination exceeded 100 pages for app $AppId." }
-      $response = Invoke-RestMethod -Method GET -Uri $uri -Headers $headers -ErrorAction Stop
+      $response = Invoke-GraphRest -Method GET -Uri $uri -Headers $headers -Context ("deviceStatuses for {0} (page {1})" -f $AppId, $statusPages)
       foreach ($status in @($response.value)) {
         if ([string]::Equals([string]$status.installState, 'installed', [System.StringComparison]::OrdinalIgnoreCase) -or
             [string]::Equals([string]$status.mobileAppInstallStatusValue, 'installed', [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -476,7 +635,11 @@ function Get-AppInstallCountsFromReport {
     [Parameter(Mandatory)][hashtable]$Headers
   )
   $body = @{ filter = ("(ApplicationId eq '{0}')" -f $AppId); skip = 0; top = 50 } | ConvertTo-Json -Depth 4
-  $response = Invoke-RestMethod -Method POST -Headers $Headers -Body $body -ErrorAction Stop `
+  # POST, aber eine reine ABFRAGE (ein Statusbericht wird angefordert, nichts geaendert) - also
+  # gefahrlos wiederholbar. Und die dritte Quelle der Installationssonde ist genau die, deren Antwort
+  # darueber entscheidet, ob eine App-Version geloescht werden darf: hier ist ein zweiter Versuch
+  # nach einer Drosselung wertvoller als ein "unbekannt", das jedes Aufraeumen blockiert.
+  $response = Invoke-GraphRest -Method POST -Headers $Headers -Body $body -Context ("app status report for {0}" -f $AppId) `
     -Uri 'https://graph.microsoft.com/beta/deviceManagement/reports/getAppStatusOverviewReport'
 
   $schema = @($response.Schema)

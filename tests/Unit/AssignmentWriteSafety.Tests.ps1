@@ -1,6 +1,10 @@
 BeforeAll {
   . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
   Initialize-TestAmbient
+  # Die echte Stringtabelle samt Get-UiString: die Fehlertexte liegen seit 0.18.0 dort und nicht
+  # mehr als Literale in der Funktion.
+  . ([scriptblock]::Create((Get-UiStringsText)))
+  $script:uiLanguage = 'en'
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '40-Graph.ps1' -Name 'Get-ErrorHttpStatus')))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '45-Assignments.ps1' -Name 'Get-AssignmentWriteErrorText')))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '82-TenantApps.ps1' -Name 'Get-ExclusionsWithoutInclude')))
@@ -53,6 +57,40 @@ Describe 'Get-AssignmentWriteErrorText' {
 
   It 'names an unmapped status rather than staying silent about it' {
     Get-AssignmentWriteErrorText -ErrorRecord (New-HttpError -Status 500) | Should -Match 'HTTP 500'
+  }
+
+  # Regression 0.18.0: der Satz war fest englisch, obwohl er in der Statuszeile eines deutschen
+  # Fensters steht. Und die Gegenrichtung ist genauso wichtig: das Protokoll wandert in Tickets und
+  # bleibt englisch, egal welche Sprache der Anwender eingestellt hat.
+  Context 'language' {
+    AfterEach { $script:uiLanguage = 'en' }
+
+    It 'speaks German in the UI when the interface is German' {
+      $script:uiLanguage = 'de'
+      $text = Get-AssignmentWriteErrorText -ErrorRecord (New-HttpError -Status 403)
+      $text | Should -Match 'keine Berechtigung'
+      $text | Should -Match 'Graph meldet'
+      $text | Should -Not -Match 'no permission'
+    }
+
+    It 'keeps the log line English even with a German interface' {
+      $script:uiLanguage = 'de'
+      $text = Get-AssignmentWriteErrorText -ErrorRecord (New-HttpError -Status 403) -ForLog
+      $text | Should -Match 'no permission to change assignments'
+      $text | Should -Not -Match 'keine Berechtigung'
+    }
+
+    It 'keeps an unmapped status English for the log as well' {
+      $script:uiLanguage = 'de'
+      Get-AssignmentWriteErrorText -ErrorRecord (New-HttpError -Status 500) -ForLog | Should -Match 'Graph said'
+    }
+
+    It 'localizes every mapped status, not just the 403' {
+      $script:uiLanguage = 'de'
+      Get-AssignmentWriteErrorText -ErrorRecord (New-HttpError -Status 401) | Should -Match 'neu anmelden'
+      Get-AssignmentWriteErrorText -ErrorRecord (New-HttpError -Status 404) | Should -Match 'nicht mehr vorhanden'
+      Get-AssignmentWriteErrorText -ErrorRecord (New-HttpError -Status 429) | Should -Match 'drosselt'
+    }
   }
 }
 

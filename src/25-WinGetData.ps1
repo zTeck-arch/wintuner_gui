@@ -37,7 +37,12 @@ function Get-TenantStoreApps {
   do {
     $page++
     if ($page -gt $maxPages) { throw "Graph pagination exceeded $maxPages pages while listing Store apps." }
-    $response = Invoke-RestMethod -Method GET -Uri $uri -Headers $headers -ErrorAction Stop
+    # -MaxRetries 0: die Aufrufer dieser Inventarwege haben ihre EIGENE Wiederholungsschleife
+    # (Get-Win32AppsResilient, Get-CachedWin32Apps). Zwei Ebenen Wiederholung multiplizieren sich -
+    # drei aeussere Versuche mal drei innere mal bis zu 30 s Pause waeren Minuten Wartezeit fuer
+    # eine Liste. Geholt wird hier der Zeitablauf, und der war das Loch.
+    $response = Invoke-GraphRest -Method GET -Uri $uri -Headers $headers -MaxRetries 0 `
+      -Context ("Store app inventory (page {0})" -f $page)
     foreach ($app in @($response.value)) {
       if (-not $app -or -not $app.id) { continue }
       $odataType = [string]$app.'@odata.type'
@@ -84,7 +89,9 @@ function Get-TenantWin32Apps {
   do {
     $page++
     if ($page -gt $maxPages) { throw "Graph pagination exceeded $maxPages pages while listing Win32 apps." }
-    $response = Invoke-RestMethod -Method GET -Uri $uri -Headers $headers -ErrorAction Stop
+    # -MaxRetries 0: siehe oben, der Aufrufer wiederholt selbst.
+    $response = Invoke-GraphRest -Method GET -Uri $uri -Headers $headers -MaxRetries 0 `
+      -Context ("Win32 app inventory (page {0})" -f $page)
     foreach ($app in @($response.value)) {
       if (-not $app -or -not $app.id) { continue }
       $odataType = [string]$app.'@odata.type'
@@ -314,6 +321,11 @@ function Update-AssignTargetCombo {
 $script:versionCacheMaxAgeDays = 7
 $script:versionCacheMaxEntries = 2000
 
+# Steht auf $true, sobald ein Paket neue Versionen geliefert hat und die Datei noch nicht
+# nachgezogen wurde. Geschrieben wird erst, wenn eine Schleife fertig ist - siehe
+# Save-PendingVersionDiskCache.
+$script:diskCacheDirty = $false
+
 # Pure so the pruning rules can be tested without touching the disk or the clock.
 function Select-LiveVersionCacheEntries {
   param(
@@ -344,6 +356,19 @@ function Select-LiveVersionCacheEntries {
   }
   foreach ($c in $ordered) { $kept[$c.Key] = $c.Entry }
   return $kept
+}
+
+# Schreibt den Plattencache, wenn seit dem letzten Schreiben etwas dazugekommen ist.
+#
+# Der Gegenpart zu $script:diskCacheDirty: Get-WingetVersions sammelt nur noch, das Schreiben macht
+# der Aufrufer EINMAL, wenn seine Schleife durch ist. Aufgerufen am Ende der Update-Suche, nach dem
+# Dashboard-Vollscan und beim Schliessen des Fensters. Zusaetzliche Aufrufstellen sind unschaedlich -
+# ohne Aenderung tut die Funktion nichts.
+function Save-PendingVersionDiskCache {
+  if (-not $script:diskCacheDirty) { return $false }
+  Save-VersionDiskCache -Cache $script:diskCache
+  $script:diskCacheDirty = $false
+  return $true
 }
 
 function Get-VersionDiskCache {
@@ -485,12 +510,22 @@ function Get-WingetVersions {
   # 4) Store in RAM cache
   $script:wingetVersionCache[$PackageId] = $result
 
-  # 5) Store in disk cache (update script-level cache variable and persist to disk)
+  # 5) In den Plattencache legen - aber NICHT sofort schreiben.
+  #
+  # Hier stand ein Save-VersionDiskCache je Paket, und das war die einzige Aufrufstelle. Eine
+  # Update-Suche ueber 100 Apps schrieb damit 100 Mal die GANZE Tabelle: jedes Mal ein
+  # Select-LiveVersionCacheEntries ueber alle Eintraege (Deckel 2000), ein ConvertTo-Json darueber
+  # und eine vollstaendige Datei. Und das auf dem UI-Faden, zwischen zwei Netzabfragen.
+  #
+  # Der Inhalt liegt ohnehin in $script:diskCache; geschrieben wird jetzt, wenn eine Schleife fertig
+  # ist und beim Schliessen (Save-PendingVersionDiskCache). Schlimmster Fall bei einem Abschuss der
+  # Anwendung: die Zugewinne dieser Sitzung fehlen und eine Suche ist einmal langsamer - dieselbe
+  # Risikoklasse wie bei den Einstellungen, die auch erst beim Beenden geschrieben werden.
   $script:diskCache[$PackageId] = @{
     versions  = $result
     timestamp = [datetime]::UtcNow
   }
-  Save-VersionDiskCache -Cache $script:diskCache
+  $script:diskCacheDirty = $true
 
   return $result
 }
@@ -872,19 +907,35 @@ function Get-LoosePackageIdFromNotes {
   return ''
 }
 
-# Decides whether an app counts as superseded, from the Graph counters.
+# Decides whether an app counts as superseded (= an OLD version), from the Graph counters.
 #
-# The two counters are easy to mix up, so this is written down rather than remembered. Per the Graph
-# documentation for mobileApp:
-#   supersedingAppCount = "the total number of apps this app directly or indirectly SUPERSEDES"
-#                         -> greater than zero on the NEW app
-#   supersededAppCount  = "the total number of apps this app is directly or indirectly SUPERSEDED BY"
-#                         -> greater than zero on the OLD app
-# So "superseded", the state the GUI calls an old version, is supersededAppCount > 0.
+# ACHTUNG, die beiden Zaehler sind vertauschbar - und sie WAREN hier vertauscht. Richtig ist:
+#   supersededAppCount  = wie viele Apps diese App SELBST abloest   -> > 0 auf der NEUEN App
+#   supersedingAppCount = von wie vielen Apps sie ABGELOEST WIRD    -> > 0 auf der ALTEN App
+# "Abgeloest", also das, was die Oberflaeche eine alte Version nennt, ist demnach
+# supersedingAppCount > 0.
+#
+# Bis 0.18.0 stand hier das Gegenteil, mit einer Begruendung, die sich auf die Graph-Dokumentation
+# berief. Widerlegt am Protokoll eines echten Laufs vom 03.09.2026 (10:36:14), in dem der paginierte
+# Graph-Weg mit dem Filter "supersededAppCount == 0" genau diese sechs Apps als AKTIV lieferte:
+#   Adobe Acrobat 26.001.21771, Airtame 4.15.1, Chrome 151.0.7922.72,
+#   WebView2 151.0.4129.78, VS Code 1.136.0, Zoom 7.1.43453
+# Fuenf davon sind die ALTEN Versionen, die derselbe Lauf 30 Minuten vorher abgeloest hatte. Und
+# es fehlten genau die sechs NEUEN (7-Zip 26.02, Adobe .21789, Airtame 4.16.0, WebView2
+# 152.0.4191.53, WatchGuard 2026.2.2, Zoom 7.1.46825) - also genau die, die je eine App abloesen.
+# Die einzige Ausnahme in der Liste, VS Code 1.136.0, war im selben Lauf OHNE Abloesung
+# bereitgestellt ("deploying without supersedence") und loest deshalb wirklich nichts ab.
+#
+# Das Muster ist eindeutig: der Filter hat "loest nichts ab" ausgewaehlt, nicht "wird nicht
+# abgeloest". Wirkung des Fehlers: auf jedem Tenant, auf dem der paginierte Weg zum Zuge kommt
+# (mehr als 999 App-Objekte, oder das Modul antwortet leer), waren aktiv und abgeloest VERTAUSCHT -
+# die Update-Suche haette alte Versionen verglichen, und die Versionsbereinigung haette die NEUEN
+# fuer die alten gehalten. Gehalten hat sie dort nur, dass jede Loeschung zusaetzlich Zuweisung und
+# erfolgreiche Installationen prueft.
 function Test-IsSupersededApp {
-  param([Parameter(Mandatory)][AllowNull()]$SupersededAppCount)
-  if ($null -eq $SupersededAppCount) { return $false }
-  return ([int]$SupersededAppCount -gt 0)
+  param([Parameter(Mandatory)][AllowNull()]$SupersedingAppCount)
+  if ($null -eq $SupersedingAppCount) { return $false }
+  return ([int]$SupersedingAppCount -gt 0)
 }
 
 # The full WinTuner-managed inventory, read straight from Graph WITH pagination.
@@ -934,7 +985,9 @@ function Get-RawWin32AppsFromGraph {
   do {
     $page++
     if ($page -gt $maxPages) { throw "Graph pagination exceeded $maxPages pages while reading the app inventory." }
-    $response = Invoke-RestMethod -Method GET -Uri $uri -Headers $headers -ErrorAction Stop
+    # -MaxRetries 0: siehe oben, der Aufrufer wiederholt selbst.
+    $response = Invoke-GraphRest -Method GET -Uri $uri -Headers $headers -MaxRetries 0 `
+      -Context ("app inventory over Graph (page {0})" -f $page)
     foreach ($app in @($response.value)) { $raw.Add($app) }
     $uri = [string]$response.'@odata.nextLink'
   } while (-not [string]::IsNullOrWhiteSpace($uri))
@@ -956,7 +1009,7 @@ function Get-Win32AppInventoryViaGraph {
       # matters more than being more complete: every consumer downstream expects a resolvable
       # PackageId, and the deletion paths in particular must not suddenly see hand-built apps.
       if (-not $packageId) { continue }
-      $isSuperseded = Test-IsSupersededApp -SupersededAppCount $app.supersededAppCount
+      $isSuperseded = Test-IsSupersededApp -SupersedingAppCount $app.supersedingAppCount
       if ($isSuperseded -ne [bool]$Superseded) { continue }
       $result.Add([pscustomobject]@{
         Name           = [string]$app.displayName
@@ -997,7 +1050,7 @@ function Select-UnmanagedWin32Apps {
     # Mit Marke gehoert die App dem Modul. Sie kommt ueber das regulaere Inventar - MIT belastbarer
     # PackageId - und wuerde hier nur ein zweites Mal auftauchen.
     if (Get-PackageIdFromNotes -Notes ([string]$app.notes)) { continue }
-    $isSuperseded = Test-IsSupersededApp -SupersededAppCount $app.supersededAppCount
+    $isSuperseded = Test-IsSupersededApp -SupersedingAppCount $app.supersedingAppCount
     if ($isSuperseded -ne [bool]$Superseded) { continue }
     # Steht im Notizfeld eine Paket-Id ohne die geklammerte Marke ("WinGet: Google.Chrome"), wird sie
     # genommen. Sie ist AUFGESCHRIEBEN und nicht geraten und deshalb belastbarer als jeder
@@ -1235,10 +1288,23 @@ function Get-Win32AppsResilient {
       # ebenfalls null, ist "leer" belastbar und keine Vermutung mehr - genau diese Auskunft braucht
       # die Meldung darueber, ob der Tenant leer ist oder die Abfrage kaputt war.
       try {
-        $viaGraph = @(Get-Win32AppInventoryViaGraph -Superseded:$Superseded)
+        # Der Graph-Weg kennt den Update-Filter NICHT. Wurde nach "nur Apps mit Update" gefragt,
+        # darf seine Antwort die leere Modulantwort nicht ersetzen - sie beantwortet eine andere
+        # Frage, und zwar eine weiter gefasste.
+        #
+        # Gesehen am 03.09.2026 (10:36:14): die Kachel fragte nach Apps MIT Update, das Modul
+        # antwortete leer, der Graph-Weg lieferte alle 6 aktiven - und das Protokoll meldete
+        # daraufhin "Intune flags an update for" fuer alle sechs, darunter Visual Studio Code
+        # 1.136.0, die 36 Minuten vorher selbst als neueste Version hochgeladen worden war.
+        $viaGraph = if ($null -ne $UpdateAvailable) { @() } else { @(Get-Win32AppInventoryViaGraph -Superseded:$Superseded) }
+        if ($null -ne $UpdateAvailable) {
+          Write-Log ("Inventory read '{0}': the module returned nothing. The direct Graph cross-check is SKIPPED here because this read asks for apps with an update available and the Graph path cannot reproduce that filter - it would answer a wider question and every app would be reported as having an update." -f $Label)
+        }
         if ($viaGraph.Count -gt 0) {
           Write-Log ("Inventory read '{0}': the module returned nothing, but a direct paged Graph read found {1} app(s) - using the Graph result." -f $Label, $viaGraph.Count)
           $apps = $viaGraph
+        } elseif ($null -ne $UpdateAvailable) {
+          # Schon oben begruendet; hier nur nicht als "Tenant ist leer" verbuchen.
         } elseif (-not $script:emptyInventoryExplained) {
           # Die ausfuehrliche Fassung EINMAL pro Sitzung. Bei einem Tenant ohne WinTuner-Apps stand
           # dieser Absatz sonst dreimal hintereinander im Protokoll (aktiv, abgeloest, Kachel) und
@@ -1265,6 +1331,13 @@ function Get-Win32AppsResilient {
     # Swap in the complete list. Deliberately only in this branch: a normal tenant never reaches it,
     # so the code path everyone else runs on is untouched, while the one case that is provably wrong
     # gets a correct answer instead of only a warning.
+    # Auch hier gilt: der Graph-Weg kennt den Update-Filter nicht. Eine abgeschnittene Liste ist
+    # schlecht, eine vollstaendige Liste zur falschen Frage ist schlechter - sie wuerde jede aktive
+    # App als "hat ein Update" ausgeben.
+    if ($null -ne $UpdateAvailable) {
+      Write-Log ("Inventory read '{0}': the list looks truncated, but the paged Graph substitution is SKIPPED because this read asks for apps with an update available and the Graph path cannot reproduce that filter. The count may be incomplete; the full version comparison in Settings answers this question without the flag." -f $Label)
+      return $apps
+    }
     try {
       $paged = @(Get-Win32AppInventoryViaGraph -Superseded:$Superseded)
       if ($paged.Count -ge $apps.Count) {

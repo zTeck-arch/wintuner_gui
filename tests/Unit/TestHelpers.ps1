@@ -80,6 +80,28 @@ function Initialize-TestAmbient {
   $rootFns = Get-SourceFunctionText -Part '05-Config.ps1' -Name 'Get-AppDataRoot', 'Get-LocalAppDataRoot'
   . ([scriptblock]::Create(($rootFns -replace 'function Get-', 'function global:Get-')))
 
+  # Der Graph-Transport als durchreichende Attrappe.
+  #
+  # Seit dem 31.08.2026 rufen die Graph-Wege nicht mehr Invoke-RestMethod direkt, sondern
+  # Invoke-GraphRest (40-Graph) - dort sitzen Zeitablauf, 429-Wiederholung und Abbruchpruefung.
+  # Die Tests, die einen Graph-Weg pruefen, stellen aber weiter Invoke-RestMethod: sie fragen, WELCHE
+  # Anfrage gestellt und wie die Antwort verarbeitet wird, und das ist unabhaengig davon, wer die
+  # Anfrage absendet. Diese Weiterleitung haelt genau diese Naht offen.
+  #
+  # Bewusst NICHT der echte Rumpf: der wuerde bei einer simulierten 429-Antwort wirklich 5 bis 30
+  # Sekunden schlafen. Die Regeln des Transports pruefen Get-GraphRetryPlan und
+  # Get-ErrorRetryAfterSeconds in GraphTransport.Tests.ps1 - rein, ohne Uhr und ohne Netz.
+  #
+  # Weitergegeben werden nur die Parameter, die auch ankamen: manche Attrappe kennt kein -Body, und
+  # ein mitgeschicktes leeres -Body wuerde bei ihr die Parameterbindung sprengen.
+  Set-Item -Path function:global:Invoke-GraphRest -Value {
+    param($Uri, $Method = 'GET', $Headers, $Body, $TimeoutSeconds, $MaxRetries, $Context)
+    $splat = @{ Uri = $Uri; Method = $Method }
+    if ($PSBoundParameters.ContainsKey('Headers')) { $splat.Headers = $Headers }
+    if ($PSBoundParameters.ContainsKey('Body')) { $splat.Body = $Body }
+    Invoke-RestMethod @splat
+  }
+
   $global:TestLog = [System.Collections.Generic.List[string]]::new()
   $global:TestStatus = $null
   Set-Item -Path function:global:Write-Log      -Value { param([string]$message) $global:TestLog.Add($message) }

@@ -23,19 +23,25 @@ function New-AssignmentBaseTarget {
 # the three shapes these exceptions arrive in; it was simply never used here.
 #
 # Returns the enriched text; the raw message is always kept on the end so nothing is hidden.
+#
+# -ForLog liefert denselben Satz erzwungen auf Englisch. Der Text geht an zwei Stellen: in die
+# Statuszeile (Sprache des Benutzers) und ins Protokoll (englisch, weil es in Tickets wandert).
+# Bis 0.17.0 war er an beiden Stellen fest englisch - ein deutschsprachiger Anwender bekam die
+# Anweisung, was zu tun ist, in einer Sprache, die er im Rest des Fensters nirgends sieht.
 function Get-AssignmentWriteErrorText {
-  param([Parameter(Mandatory)]$ErrorRecord)
+  param([Parameter(Mandatory)]$ErrorRecord, [switch]$ForLog)
   $raw = try { [string]$ErrorRecord.Exception.Message } catch { [string]$ErrorRecord }
   $status = try { Get-ErrorHttpStatus -ErrorRecord $ErrorRecord } catch { 0 }
-  $hint = switch ($status) {
-    401 { 'not signed in to Intune any more (HTTP 401) - the session expired; sign in again' }
-    403 { 'no permission to change assignments (HTTP 403) - the signed-in account needs an Intune role that may write app assignments; retrying will not help' }
-    404 { 'the app no longer exists in Intune (HTTP 404) - it was probably deleted in the portal meanwhile' }
-    429 { 'Intune is throttling the request (HTTP 429) - too many changes at once; it is worth retrying shortly' }
+  $lang = if ($ForLog) { 'en' } else { '' }
+  $key = switch ($status) {
+    401 { 'AssignWriteErr401' }
+    403 { 'AssignWriteErr403' }
+    404 { 'AssignWriteErr404' }
+    429 { 'AssignWriteErr429' }
     default { '' }
   }
-  if ($hint) { return ('{0}. Graph said: {1}' -f $hint, $raw) }
-  if ($status -gt 0) { return ('HTTP {0}. Graph said: {1}' -f $status, $raw) }
+  if ($key) { return ((Get-UiString -Key 'AssignWriteErrHint' -Language $lang) -f (Get-UiString -Key $key -Language $lang), $raw) }
+  if ($status -gt 0) { return ((Get-UiString -Key 'AssignWriteErrStatus' -Language $lang) -f $status, $raw) }
   return $raw
 }
 
@@ -127,9 +133,17 @@ function Move-AppAssignments {
       }
     }
     $bodyNew = @{ mobileAppAssignments = @($merged) } | ConvertTo-Json -Depth 12
-    Invoke-RestMethod -Method POST -Uri "$base/$NewAppId/assign" -Headers $headers -Body $bodyNew -ErrorAction Stop | Out-Null
+    # Ueber Invoke-GraphRest (40-Graph): Zeitablauf und ein zweiter Versuch bei Drosselung. Vorher
+    # hatte dieser Schreibvorgang keines von beiden - eine haengende Antwort fror das Fenster ein,
+    # und ein 429 machte aus einer Uebergabe den halb angewendeten Zustand darunter.
+    Invoke-GraphRest -Method POST -Uri "$base/$NewAppId/assign" -Headers $headers -Body $bodyNew `
+      -Context ("assign {0} assignment(s) to successor {1}" -f $merged.Count, $NewAppId) | Out-Null
     # Tracks which of the two writes already landed. A failure after this point leaves BOTH versions
     # assigned, which is a different situation from "nothing happened" and has to be reported as such.
+    # Hier stand $false - der Merker wurde also nie gesetzt, und der Zweig darunter war tot: nach
+    # einem geglueckten ersten und einem gescheiterten zweiten Schreibvorgang meldete das Protokoll
+    # "did not happen; nothing was changed", waehrend in Wahrheit BEIDE Versionen zugewiesen waren.
+    # Das ist genau die falsche Reparaturanweisung. Gefunden von MoveAssignments.Tests.ps1.
     $newAppWritten = $true
     Write-Log ("Assignments: new app {0} now has {1} assignment(s) [{2}]" -f $NewAppId, $merged.Count, $desc)
     # Recorded as soon as it is true, not at the end: the successors really do carry the assignments
@@ -139,14 +153,20 @@ function Move-AppAssignments {
 
     # 2) only now clear the old app
     $bodyOld = @{ mobileAppAssignments = @() } | ConvertTo-Json -Depth 4
-    Invoke-RestMethod -Method POST -Uri "$base/$OldAppId/assign" -Headers $headers -Body $bodyOld -ErrorAction Stop | Out-Null
+    # DER Schreibvorgang, dessen Fehlschlag den "PARTIALLY applied"-Zustand erzeugt: die neue Version
+    # traegt die Zuweisungen schon, die alte ist noch nicht geleert, beide sind zugewiesen, und
+    # jemand muss das von Hand aufraeumen. Die wahrscheinlichste Ursache ist genau die Drosselung,
+    # die zwei schnelle Schreibvorgaenge hintereinander ausloesen - und dagegen half hier vorher
+    # nichts. Ein leerer assign-Aufruf ist idempotent, ein zweiter Versuch also gefahrlos.
+    Invoke-GraphRest -Method POST -Uri "$base/$OldAppId/assign" -Headers $headers -Body $bodyOld `
+      -Context ("clear assignments on superseded app {0}" -f $OldAppId) | Out-Null
     Write-Log ("Assignments: removed {0} assignment(s) from superseded app {1} ({2}) [{3}]" -f $oldAssignments.Count, $OldAppId, $AppName, $desc)
     return $true
   } catch {
     # Say WHICH step failed and what the tenant looks like now. "move failed" alone sent the reader
     # looking for a lost assignment when in fact the new version had it and the old one had not been
     # cleared - two very different repairs.
-    $detail = Get-AssignmentWriteErrorText -ErrorRecord $_
+    $detail = Get-AssignmentWriteErrorText -ErrorRecord $_ -ForLog
     if ($newAppWritten) {
       Write-Log ("Assignments: hand-over for {0} PARTIALLY applied - the new version {1} carries the assignments, but clearing the superseded app {2} failed: {3}. Both versions are assigned right now; remove the assignment from the old version in Intune, or run the update again." -f $AppName, $NewAppId, $OldAppId, $detail)
     } else {
@@ -182,11 +202,12 @@ function Clear-AppAssignments {
       return $false
     }
     $body = @{ mobileAppAssignments = @() } | ConvertTo-Json -Depth 4
-    Invoke-RestMethod -Method POST -Uri "$base/$AppId/assign" -Headers $headers -Body $body -ErrorAction Stop | Out-Null
+    Invoke-GraphRest -Method POST -Uri "$base/$AppId/assign" -Headers $headers -Body $body `
+      -Context ("clear {0} assignment(s) on {1}" -f $existing.Count, $AppId) | Out-Null
     Write-Log ("Assignments: cleared {0} assignment(s) from {1} ({2})." -f $existing.Count, $AppId, $AppName)
     return $true
   } catch {
-    Write-Log ("Assignments: clearing failed for {0} ({1}): {2}" -f $AppId, $AppName, (Get-AssignmentWriteErrorText -ErrorRecord $_))
+    Write-Log ("Assignments: clearing failed for {0} ({1}): {2}" -f $AppId, $AppName, (Get-AssignmentWriteErrorText -ErrorRecord $_ -ForLog))
     return $false
   }
 }
@@ -475,7 +496,8 @@ function Set-AppAssignmentSettings {
     }
 
     $body = @{ mobileAppAssignments = @($payload) } | ConvertTo-Json -Depth 12
-    Invoke-RestMethod -Method POST -Uri "$base/$AppId/assign" -Headers $headers -Body $body -ErrorAction Stop | Out-Null
+    Invoke-GraphRest -Method POST -Uri "$base/$AppId/assign" -Headers $headers -Body $body `
+      -Context ("write {0} assignment(s) on {1}" -f $payload.Count, $AppId) | Out-Null
     $out.Changed = $payload.Count
     $baseNote = if ($TargetChanges.ContainsKey('AssignmentMode') -and [string]$TargetChanges.AssignmentMode -eq 'exclude') {
       " [exclude base: $([string]$(if ($TargetChanges.ExcludeBaseTarget) { $TargetChanges.ExcludeBaseTarget } else { 'AllUsers' }))]"
@@ -487,7 +509,7 @@ function Set-AppAssignmentSettings {
     # Enriched, not raw: a 403 here means the account may not write app assignments, and this text is
     # what the user sees in the status bar.
     $out.ErrorMessage = Get-AssignmentWriteErrorText -ErrorRecord $_
-    Write-Log ("Assignment settings FAILED for '{0}': {1}" -f $AppName, $out.ErrorMessage)
+    Write-Log ("Assignment settings FAILED for '{0}': {1}" -f $AppName, (Get-AssignmentWriteErrorText -ErrorRecord $_ -ForLog))
     return $out
   }
 }
@@ -596,13 +618,14 @@ function New-AppAssignmentConfiguration {
       )
     }
     $body = @{ mobileAppAssignments = @($assignments) } | ConvertTo-Json -Depth 14
-    Invoke-RestMethod -Method POST -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assign" -Headers $headers -Body $body -ErrorAction Stop | Out-Null
+    Invoke-GraphRest -Method POST -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assign" `
+      -Headers $headers -Body $body -Context ("create {0} assignment(s) on {1}" -f $assignments.Count, $AppId) | Out-Null
     $out.Changed = $assignments.Count
     Write-Log ("Created {0} assignment(s) for '{1}' ({2}): intent={3}, mode={4}, target={5}, exclusionBase={6}, filter={7}, kind={8}, {9}" -f $assignments.Count, $AppName, $AppId, $Intent, $AssignmentMode, $TargetValue, $ExcludeBaseTarget, $FilterType, $AppKind, (Get-AssignmentSettingsSummary $Settings))
     try { Add-SessionActivity -Kind 'AssignmentsChanged' -Name $AppName -Detail ((Get-UiString 'ActivityAssignmentCreated') -f $Intent, $TargetValue) } catch { }
   } catch {
     $out.ErrorMessage = Get-AssignmentWriteErrorText -ErrorRecord $_
-    Write-Log ("Creating assignment FAILED for '{0}' ({1}): {2}" -f $AppName, $AppId, $out.ErrorMessage)
+    Write-Log ("Creating assignment FAILED for '{0}' ({1}): {2}" -f $AppName, $AppId, (Get-AssignmentWriteErrorText -ErrorRecord $_ -ForLog))
   }
   return $out
 }
@@ -614,6 +637,31 @@ function New-AppAssignmentConfiguration {
 # cleanup paths go through - version trimming, the bulk superseded cleanup and the single delete.
 # Recording it at each call site instead would have meant three chances to forget one, which is how
 # a session that deleted eight app versions could still report "no apps updated".
+# Apps, deren Loeschung in DIESER Sitzung strukturell abgelehnt wurde. Tenantbezogen, also wird die
+# Liste beim Tenantwechsel geleert (Clear-TenantViews) - eine App-Id des vorigen Kunden hier zu
+# behalten wuerde beim naechsten Kunden eine Loeschung ueberspringen, die gehen wuerde.
+$script:deleteBlockedApps = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+function Clear-DeleteBlockedAppCache {
+  if ($script:deleteBlockedApps.Count -gt 0) {
+    Write-Log ("Cleared the list of {0} app(s) whose deletion Intune refused structurally." -f $script:deleteBlockedApps.Count)
+  }
+  $script:deleteBlockedApps.Clear()
+}
+
+# "Ist diese Absage strukturell, also in jedem weiteren Lauf dieselbe?"
+#
+# Rein, weil daran haengt, ob eine App noch einmal angefasst wird. Gemeint ist genau Intunes
+# Weigerung, eine App zu loeschen, die Vorgaenger einer anderen ist ("Cannot delete this app as it
+# is the parent of another app: ..."). Ein 429, ein 5xx oder ein Zeitablauf ist das NICHT - der
+# naechste Lauf hat dort echte Aussicht auf Erfolg, und ihn zu ueberspringen wuerde Aufraeumen
+# stillschweigend abschalten.
+function Test-IsStructuralDeleteRefusal {
+  param([string]$Message)
+  if ([string]::IsNullOrWhiteSpace($Message)) { return $false }
+  return ($Message -match 'parent of another app' -or $Message -match 'Cannot delete this app')
+}
+
 function Remove-AppWithUnlinkFallback {
   param(
     [Parameter(Mandatory)][string]$GraphId,
@@ -621,6 +669,17 @@ function Remove-AppWithUnlinkFallback {
     [string]$Version = '',
     [ValidateSet('VersionRemoved','SupersededRemoved')][string]$RecordAs = 'VersionRemoved'
   )
+  # Was in dieser Sitzung schon strukturell abgelehnt wurde, wird nicht in jedem Durchlauf erneut
+  # versucht.
+  #
+  # Gemessen am Betriebsprotokoll vom 03.09.2026: drei Apps scheiterten in DREI aufeinander
+  # folgenden Aufraeumlaeufen mit derselben Absage. Je App und Durchlauf kostete das 5 bis 7
+  # Sekunden Standbild, zwei wirkungslose Schreibvorgaenge in den Tenant und ein Dutzend Zeilen im
+  # Protokoll - und die Aussicht auf Erfolg war jedes Mal dieselbe: keine.
+  if ($script:deleteBlockedApps.Contains($GraphId)) {
+    Write-Log ("Deletion skipped for {0} ({1}): Intune already refused it structurally in this session (it is the predecessor of another app). Nothing was attempted." -f $AppName, $GraphId)
+    return $false
+  }
   try {
     $null = Save-AppScopeSnapshot -AppId $GraphId -AppName $AppName -Version $Version `
       -Reason (Get-UiString 'ScopeSnapshotReasonVersionCleanup')
@@ -631,12 +690,16 @@ function Remove-AppWithUnlinkFallback {
     $m = $_.Exception.Message
     # Already gone counts as success - but nothing was deleted here, so nothing is recorded.
     if (Test-IsNotFoundError -ErrorRecord $_ -Context $AppName) { return $true }
-    if ($m -match 'parent of another app' -or $m -match 'Cannot delete this app') {
+    if (Test-IsStructuralDeleteRefusal -Message $m) {
       $newId = Get-SupersedingAppIdFromError $m
       if ($newId -and (Remove-SupersededByUnlinking -OldAppId $GraphId -NewAppId $newId)) {
         Add-SessionActivity -Kind $RecordAs -Name $AppName -FromVersion $Version
         return $true
       }
+      # Abhaengen hat es auch nicht geloest. Damit ist die Absage fuer diese Sitzung endgueltig:
+      # gemerkt, damit der naechste Durchlauf sie nicht wiederholt.
+      [void]$script:deleteBlockedApps.Add($GraphId)
+      Write-Log ("Version cleanup: {0} ({1}) cannot be deleted while it is the predecessor of another app, and unlinking did not resolve it. It will not be retried in this session; delete the newer app's supersedence in the Intune portal, or delete the newer app first." -f $AppName, $GraphId)
     }
     Write-Log ("Version cleanup: could not remove {0} ({1}): {2}" -f $AppName, $GraphId, $m)
     return $false

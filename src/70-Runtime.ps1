@@ -659,13 +659,61 @@ function Confirm-ChangeAction {
 # Totalverlust. Wer "Bestaetigungen unterdruecken" gesetzt hat, hat das fuer den Alltag getan
 # (zwei Chrome-Updates), nicht fuer diesen Fall; deshalb -AlwaysAsk.
 #
-# Gibt $true zurueck, wenn KEINE geschuetzte App dabei ist - der Normalfall kostet also keinen Klick.
+# Trennt eine Auswahl in geschuetzte und uebrige Apps. Eine Stelle fuer die Frage "ist diese App
+# geschuetzt?", damit Rueckfrage, Protokoll und die tatsaechlich laufende Liste nie auseinandergehen.
+function Split-ProtectedApps {
+  param([AllowNull()][AllowEmptyCollection()][object[]]$Apps)
+  $protected = @()
+  $rest = @()
+  foreach ($a in @($Apps)) {
+    if (-not $a) { continue }
+    if ($a.PSObject.Properties['IsProtected'] -and $a.IsProtected) { $protected += $a } else { $rest += $a }
+  }
+  return @{ Protected = @($protected); Unprotected = @($rest) }
+}
+
+# Was aus der Antwort des Benutzers folgt - als reine Rechnung, ohne Fenster.
+#
+# 'all'    alles laeuft, geschuetzte eingeschlossen
+# 'skip'   die geschuetzten fallen raus, der Rest laeuft
+# 'cancel' nichts laeuft
+#
+# Der Sonderfall, der sonst als "abgebrochen" durchginge: waren AUSSCHLIESSLICH geschuetzte Apps
+# angehakt, bleibt bei 'skip' nichts uebrig. Das ist kein Abbruch durch den Benutzer, und die
+# Meldung darf nicht so tun - er hat gewaehlt, es gab nur nichts mehr zu tun.
+function Resolve-ProtectedRunChoice {
+  param(
+    [AllowNull()][AllowEmptyCollection()][object[]]$Apps,
+    [ValidateSet('all', 'skip', 'cancel')][string]$Choice
+  )
+  $split = Split-ProtectedApps -Apps $Apps
+  switch ($Choice) {
+    'all' { return @{ Proceed = $true; Apps = @($Apps); Skipped = @(); Reason = 'all' } }
+    'skip' {
+      $kept = @($split.Unprotected)
+      if ($kept.Count -eq 0) {
+        return @{ Proceed = $false; Apps = @(); Skipped = @($split.Protected); Reason = 'empty' }
+      }
+      return @{ Proceed = $true; Apps = $kept; Skipped = @($split.Protected); Reason = 'skip' }
+    }
+    default { return @{ Proceed = $false; Apps = @(); Skipped = @(); Reason = 'cancel' } }
+  }
+}
+
+# Ohne geschuetzte App kostet der Normalfall keinen Klick: dann wird nichts gefragt und die Liste
+# geht unveraendert weiter.
+#
+# Mit geschuetzten Apps gibt es DREI Wege statt Ja/Nein. Der Grund ist der haeufigste reale Fall:
+# zehn Apps angehakt, zwei davon geschuetzt uebersehen. Bei einer Ja/Nein-Frage muss man abbrechen,
+# die zwei abwaehlen und von vorn anfangen - die Rueckfrage kostet dann mehr, als sie bringt, und
+# genau so gewoehnt man sich an, sie wegzuklicken.
 function Confirm-ProtectedAppsInRun {
   param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Apps)
-  $protected = @($Apps | Where-Object {
-    $_ -and $_.PSObject.Properties['IsProtected'] -and $_.IsProtected
-  })
-  if ($protected.Count -eq 0) { return $true }
+  $split = Split-ProtectedApps -Apps $Apps
+  $protected = @($split.Protected)
+  if ($protected.Count -eq 0) {
+    return @{ Proceed = $true; Apps = @($Apps); Skipped = @(); Reason = 'none' }
+  }
   $preview = (@($protected | Select-Object -First 15 | ForEach-Object {
     "- {0}: {1} -> {2}" -f [string]$_.Name, [string]$_.CurrentVersion, [string]$_.LatestVersion
   }) -join "`r`n")
@@ -674,14 +722,30 @@ function Confirm-ProtectedAppsInRun {
   # freigegeben wurden - und genau die wird nach einem Fehlgriff gestellt.
   Write-Log ("Update run contains {0} protected app(s), asking for an explicit confirmation regardless of the suppression setting: {1}" -f `
     $protected.Count, ((@($protected | ForEach-Object { [string]$_.Name })) -join ', '))
-  $ok = Confirm-ChangeAction -AlwaysAsk `
-    -Text ((Get-UiString 'ProtectedRunConfirmDialog') -f $protected.Count, $preview) `
-    -Title (Get-UiString 'ProtectedRunConfirmTitle') `
-    -LogContext ("update run containing {0} protected app(s)" -f $protected.Count)
-  if (-not $ok) {
-    Write-Log 'Update run canceled at the protected-apps confirmation; nothing was built or uploaded.'
+
+  # Eigener Dialog statt Confirm-ChangeAction: drei Wege brauchen drei beschriftete Knoepfe.
+  # "Ja/Nein/Abbrechen" einer MessageBox sagt nicht, WAS ja bedeutet. Dass diese Frage von
+  # "Rueckfragen abschalten" nicht unterdrueckt wird, ergibt sich hier von selbst - der Dialog
+  # geht gar nicht erst durch Confirm-ChangeAction.
+  $choice = Show-ProtectedRunDialog -Count $protected.Count -Preview $preview
+  $result = Resolve-ProtectedRunChoice -Apps $Apps -Choice $choice
+
+  switch ($result.Reason) {
+    'all' {
+      Write-Log ("Protected apps confirmed for this run: {0} app(s) will be superseded." -f $protected.Count)
+    }
+    'skip' {
+      Write-Log ("Protected apps left out of this run ({0}): {1}. Continuing with {2} app(s)." -f `
+        $protected.Count, ((@($protected | ForEach-Object { [string]$_.Name })) -join ', '), @($result.Apps).Count)
+    }
+    'empty' {
+      Write-Log 'Only protected apps were selected and the user chose to leave them out; nothing was built or uploaded.'
+    }
+    default {
+      Write-Log 'Update run canceled at the protected-apps confirmation; nothing was built or uploaded.'
+    }
   }
-  return $ok
+  return $result
 }
 
 # Laeuft dieser Start unbeaufsichtigt, also als Prueflauf ohne Benutzer?

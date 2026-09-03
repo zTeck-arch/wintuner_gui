@@ -38,6 +38,14 @@ ignoriert ForeColor — auf dunklem Grund 3,56 : 1. Statt zu deaktivieren: `Set-
 -Dimmed $true` (65-Theme). Für Eingabeelemente (Kästchen, Zahlenfelder) bleibt Windows' Darstellung —
 die müssen wirklich gesperrt sein. Tests: `DimmedLabels.Tests.ps1`, `LAYOUT-CONTRAST` in der Probe.
 
+### `.Visible` sagt nicht, was Sie meinen
+WinForms liefert die **wirksame** Sichtbarkeit: für jedes Kind einer versteckten Sektion ist
+`.Visible` gleich `$false` — nachgemessen mit einem Panel, dessen Elternteil auf `Visible = $false`
+steht. Wer damit eine Kartenhöhe misst, während ein *anderer* Bereich offen ist, bekommt „kein Kind
+sichtbar" und lässt die Karte auf ihren Rand zusammenschrumpfen. Der Zustand eines Aufklappers
+gehört deshalb in eine Variable (`$script:advExpanded`), und `Update-StackedCards` bekommt die
+ausgeblendeten Steuerelemente über `-Exclude` genannt, statt sie zu erraten.
+
 ### `@($liste)[0]` auf einer `List[object]`
 wirft „Argument types do not match". In einer Funktion mit `catch { Write-LogDebug }` fällt das
 nirgends auf — außer im gerenderten Bild (sieben Karten lagen übereinander). Elemente lieber in
@@ -53,6 +61,54 @@ einer Schleife holen.
 - Die Fenstergröße wird an zwei Stellen gesetzt; die in `90-Main.ps1` läuft zuletzt und gewinnt.
 - Fensterlage immer aus `Screen.PrimaryScreen.WorkingArea` rechnen, nie `CenterScreen` — das
   zentriert über die Taskleiste hinweg.
+
+### Ohne `-TimeoutSec` wartet PowerShell 7 für immer
+`Invoke-RestMethod` ohne Zeitablauf hat keine Obergrenze. Gemessen am 31.08.2026: von 22
+Aufrufstellen trugen **sieben** eine Angabe, **fünfzehn** nicht — und alle laufen auf dem UI-Faden.
+Eine Antwort, die nie kommt, war ein eingefrorenes Fenster ohne Abbruchweg; nur das Beenden half.
+
+Graph läuft deshalb über `Invoke-GraphRest` (40-Graph): Zeitablauf (100 s), Wiederholung bei 429 und
+5xx mit `Retry-After` (begrenzt auf 45 s), Abbruchprüfung über `$script:cancelBatch`, und eine
+Protokollzeile, die sagt **was** gewartet hat. Eine StaticCheck-Regel weist jeden neuen Aufruf ab,
+der weder darüber läuft noch `-TimeoutSec` nennt.
+
+Zwei Entscheidungen darin sind Sicherheits- und keine Bequemlichkeitsfragen:
+
+- **Wiederholt wird nur bei einem gelesenen HTTP-Status.** Status 0 heißt „kein Status lesbar":
+  Zeitablauf, abgerissene Verbindung, DNS. Genau dann ist unbekannt, ob der Dienst die Anfrage schon
+  ausgeführt hat — ein zweiter `POST /mobileApps` legte eine zweite App an. Deshalb `-MaxRetries 0`
+  bei allem, was nicht idempotent ist. `POST …/assign` **ist** idempotent (es ersetzt die ganze
+  Zuweisungsliste), dort wird wiederholt.
+- **Zwei Ebenen Wiederholung multiplizieren sich.** Inventar (`Get-Win32AppsResilient`) und Paketbau
+  (`Invoke-PackageBuildWithThrottleRetry`) haben ihre eigene, abgestimmte Schleife; ihre Aufrufe
+  gehen mit `-MaxRetries 0` durch den Transport. Sonst wären drei äußere × drei innere Versuche mit
+  bis zu 30 s Pause Minuten Wartezeit für eine Liste.
+
+Der eigentliche Anlass: die Zuweisungs-Übergabe schreibt **zwei** Mal (neue App bekommt die
+Zuweisungen, dann wird die alte geleert). Scheitert der zweite Schreibvorgang, sind beide Versionen
+zugewiesen — der Zustand, den `Move-AppAssignments` als `PARTIALLY applied` protokolliert und den
+jemand von Hand aufräumen muss. Die wahrscheinlichste Ursache ist die Drosselung, die zwei schnelle
+Schreibvorgänge auslösen, und dagegen half dort vorher nichts.
+Tests: `GraphTransport.Tests.ps1` (rein, ohne Netz und ohne Uhr).
+
+### `if (Get-Command X …)` vor einem Aufruf im eigenen Skript schützt vor nichts
+Es ist ein Ein-Datei-Skript: die Funktion ist immer definiert. Das Gatter kann also nur eines tun —
+eine Umbenennung oder einen Tippfehler in ein stilles „wird übersprungen" verwandeln.
+
+Wo das teuer wird: `Clear-TenantViews` (85-Rows) ist der **eine** Riegel, der beim Anmelden, Trennen
+und Abmelden alles wegwirft, was einem bestimmten Kunden gehört — Inventar, Gruppennamen,
+Installationsquelle. Jeder dieser vier Aufrufe stand hinter so einem Gatter. Ein übersprungener
+Aufruf heißt: Kunde A steht im Fenster von Kunde B. Bei einem MSP-Werkzeug ist das der Unterschied
+zwischen „Pilot-Gruppe von Kunde A" und „falsche Organisation".
+
+Die Gatter sind dort weg; dass die Liste vollständig **bleibt**, hält eine StaticCheck-Regel: jede
+Funktion, die einen Zwischenspeicher leert, muss im Riegel gerufen werden oder in der Regel
+ausdrücklich als nicht-tenantbezogen eingetragen sein. Berechtigt bleibt das Gatter nur bei einem
+echten Vorwärtsbezug über Teilgrenzen (`Set-ActiveTheme` in Teil 65 ruft eine Funktion aus Teil 75).
+
+Nebenbei gelernt, als die Gegenprüfung zu dieser Regel zuschlug: die erste Fassung suchte den
+Funktionsnamen als **Text** im Rumpf des Riegels — und blieb grün, als die Gegenprüfung den Aufruf
+auskommentierte. Eine auskommentierte Zeile ist kein Aufruf. Solche Regeln über den Parser stellen.
 
 ## Zustand und Sperren
 
@@ -86,6 +142,66 @@ Paketbau und Inventar-Abfrage teilen sich `$script:pkgRunspace`. Beide pumpen di
 Nachrichtenschleife, also kann ein Klick eine zweite Nutzung auslösen → „a pipeline is already
 running". Wer den Runspace besetzt findet (`$script:pkgRunspaceInUse` / `$script:packagingBusy`),
 arbeitet **inline** weiter statt zu warten oder zu scheitern.
+
+Es sind inzwischen **drei** Runspaces mit je einem Zweck: Paketbau (`$script:pkgRunspace`, geteilt
+mit dem Inventar), Vorab-Bau (`$script:prebuildRunspace`) und Upload (`$script:deployRunspace`).
+Geteilt werden dürfen sie nicht — während des Uploads baut der Vorab-Bau schon die nächste App, und
+genau dieses Nebeneinander ist ihr Sinn. Erzeugt werden alle über `New-PackagingRunspace -Purpose`,
+geschlossen werden alle drei beim Beenden (ein offener Runspace hält mit seinem Thread das Beenden
+auf).
+
+### Ein Modulaufruf auf dem UI-Faden hat zwei Symptome, nicht eins
+Gemeldet am 02.09.2026: das Fenster friert beim Upload ein, **und** die Konsole füllt sich mit
+„[ERROR] Write log to PowerShell failed: The WriteObject and WriteError methods cannot be called
+from outside … the same thread". Das sieht nach zwei Fehlern aus und ist einer. `Deploy-WtWin32App`
+lief auf dem UI-Faden; dann pumpt niemand die Nachrichtenschleife (das Fenster steht), und der
+.NET-Logger des Moduls schreibt in den Host **seines** Runspace — auf dem UI-Faden ist das unsere
+Konsole, und weil das Modul aus fortgesetzten Aufgaben protokolliert, scheitert jede einzelne Zeile
+mit genau dieser Meldung. Beim Paketbau war beides längst weg, aus demselben Grund: eigener
+Runspace. Wer also eine Logger-Flut aus dem Modul sieht, sucht nicht nach einem Protokollfehler,
+sondern nach einem Modulaufruf auf dem falschen Faden.
+
+Upload **und Löschen** haben dabei eine Sonderregel, die der Paketbau nicht hat: **kein Abbruch,
+kein Zeitablauf, kein `$ps.Stop()`**. Beide gehen über `Invoke-WtModuleCallOffThread`
+(35-Packaging), wo diese Politik **einmal** steht; die zwei öffentlichen Trichter
+(`Invoke-WtDeployOffThread`, `Invoke-WtRemoveWin32App`) halten nur noch ihren Inline-Rückfall, damit
+jeder echte Modulaufruf genau einmal im Quelltext steht und eine StaticCheck-Regel ihn über den
+Parser finden kann. Ein abgebrochener Paketbau lässt lokale Dateien zurück, ein abgebrochener
+Upload eine halb angelegte App und eine abgebrochene Löschung eine App, an der Intune noch
+Ablösebeziehungen führt. Der Abbruchknopf wirkt deshalb **zwischen** den Apps.
+
+### Die zwei Ablöse-Zähler von Graph, und warum sie vertauscht waren
+`supersededAppCount` = wie viele Apps **diese App ablöst** (> 0 auf der **neuen**).
+`supersedingAppCount` = von wie vielen Apps sie **abgelöst wird** (> 0 auf der **alten**).
+
+„Abgelöst" im Sinne der Oberfläche ist also `supersedingAppCount > 0`. Bis 0.18.0 stand hier das
+Gegenteil — mit einer Begründung, die sich auf die Dokumentation berief, und mit Unit-Tests, die
+denselben Irrtum festschrieben. Widerlegt hat es ein Protokoll aus dem Betrieb: der paginierte
+Graph-Weg lieferte mit `supersededAppCount == 0` genau die **alten** Versionen als aktiv, und es
+fehlten genau die neuen — also die, die je eine App ablösen. Die einzige Ausnahme in der Liste war
+eine App, die ohne Ablösung bereitgestellt worden war.
+
+Zwei Lehren: eine Zählerbedeutung gehört an einem echten Tenant nachgemessen, nicht aus der
+Dokumentation abgeschrieben — und ein Test, der eine Annahme wiederholt, prüft sie nicht. Der Fall,
+der den Fehler festnagelt, ist deshalb jetzt ausdrücklich als Test formuliert: **die neue Version
+ist aktiv, obwohl sie selbst eine alte ablöst.**
+
+### Ein Schreibvorgang, der Erfolg meldet, hat nicht unbedingt etwas geändert
+Am 03.09.2026 entfernte `updateRelationships` eine Ablösebeziehung, antwortete mit Erfolg — und im
+nächsten Durchlauf war die Beziehung wieder da, dreimal hintereinander. Die anschließende Löschung
+scheiterte weiter mit derselben Absage, und der Rückbau lief in einen 400er, dessen Grund im
+Protokoll fehlte, weil dort nur der Status stand.
+
+Zwei Regeln daraus, beide umgesetzt: bei einer Mutation, von der eine Löschung abhängt, **nachlesen**
+statt annehmen (`Remove-SupersededByUnlinking` liest die Beziehungen nach dem Schreiben erneut) — und
+bei einem Graph-Fehler **den Antwortkörper protokollieren** (`Get-GraphErrorText`, 40-Graph). „400
+(Bad Request)" allein ist keine Diagnose, der Grund steht immer im Körper.
+
+Dazu die dritte: eine Absage, die **strukturell** ist, nicht in jedem Lauf wiederholen
+(`Test-IsStructuralDeleteRefusal`, `$script:deleteBlockedApps`). Die Grenze ist wichtig — nur
+„parent of another app"/„Cannot delete this app" gelten als endgültig; 429, 5xx, 403 und Zeitablauf
+**nicht**, sonst schaltet ein einzelner Fehlschlag das Aufräumen für die Sitzung ab. Und der
+Merkzettel gehört in den Tenant-Riegel: App-Ids gehören einem Kunden.
 
 ### Das Protokoll muss sagen, WIE die Anwendung eingestellt ist
 `Get-SettingsSnapshotLines` (10-Settings) liefert die Zeilen, `90-Main` schreibt sie beim Start und
@@ -163,6 +279,19 @@ Tenants antworten auf die ersten zwei mit HTTP 400, also kostete jede Sonde drei
 `$script:installProbeSource` merkt sich die Quelle, die geantwortet hat, und fragt sie zuerst — die
 Regeln bleiben: eine Null muss von einer zweiten Quelle bestätigt sein, unbekannt blockiert jedes
 Löschen. Beim Tenant-Wechsel wieder offen (`Clear-InstallProbeSource`).
+
+### Einen Zwischenspeicher einmal je Schleife schreiben, nicht einmal je Element
+`Save-VersionDiskCache` stand **in** `Get-WingetVersions` und war dort die einzige Aufrufstelle. Eine
+Update-Suche über 100 Apps schrieb damit 100 Mal die ganze Tabelle: je Paket ein
+`Select-LiveVersionCacheEntries` über bis zu 2000 Einträge, ein `ConvertTo-Json` darüber und eine
+vollständige Datei — auf dem UI-Faden, zwischen zwei Netzabfragen.
+
+Jetzt setzt `Get-WingetVersions` nur `$script:diskCacheDirty`, und `Save-PendingVersionDiskCache`
+schreibt einmal: am Ende der Update-Suche (im `finally`, damit auch ein Abbruch behält was er schon
+weiß), nach dem Dashboard-Vollscan und beim Schließen. Schlimmster Fall bei einem Abschuss der
+Anwendung: eine Suche ist einmal langsamer — dieselbe Risikoklasse wie die Einstellungen, die auch
+erst beim Beenden geschrieben werden. Eine StaticCheck-Regel hält den Schreibvorgang aus der
+Schleife heraus; Test: `VersionCacheFlush.Tests.ps1`.
 
 ### Dieselbe Frage nicht zweimal stellen
 `Get-FreshLatestPackageVersion` kostet zwei Netzabfragen und 1–3 s. Dashboard-Kachel und
@@ -243,9 +372,44 @@ Arbeitsfläche > Entwurfsgröße, begrenzt auf [Minimum .. Arbeitsfläche − 8]
 schon einmal falsch (Fenster unter der Taskleiste, vierte Kachel abgeschnitten, gespeicherte Größe
 unter dem Minimum). Deshalb rein und getestet, nicht inline im Startcode.
 
-### Eine Layout-Funktion muss an drei Stellen aufgerufen werden
-`Show-Section`, `$form.Add_Resize`, `Set-ActiveTheme`. Fehlt die dritte, behält der Bereich nach
-einem Designwechsel die Geometrie der alten Schriftart, bis man ihn verlässt und neu öffnet.
+### Die Zuordnung Bereich → Layout-Funktion steht an EINER Stelle
+`$script:sectionLayoutFunctions` (75-UiState). `Update-SectionLayout -Key x` ordnet einen Bereich neu
+an, `Update-AllSectionLayouts` alle.
+
+Vorher stand dieselbe Zuordnung vier Mal da, und die vier Fassungen waren **nachweislich
+verschieden**: `Show-Section` kannte zehn Bereiche (ohne `settings`), `$form.Add_Resize` neun
+(ohne `settings` und `ownpackage`) und rief sie **ohne Rücksicht auf den sichtbaren Bereich**,
+`Set-ActiveTheme` elf, und die Layout-Probe eine vierte Liste aus sechs Namen — unter dem Kommentar
+„dieselben Aufrufe, die ein Fenster-Resize auslöst". Zwei Folgen, beide erst durch das Zusammenlegen
+sichtbar geworden:
+
+- **Zwei Bereiche ordneten sich beim Ziehen am Fensterrand gar nicht neu an** („Einstellungen",
+  „Eigene Installer"). Aufgefallen war das nie, weil `Show-Section` sie beim Betreten anordnet.
+- **Jedes Resize-Ereignis rechnete zehn unsichtbare Bereiche mit.** Gemessen am 31.08.2026 im
+  laufenden Fenster: 15–19 ms je Ereignis vorher, 1,1–6,0 ms nachher. WinForms feuert das Ereignis
+  während eines Ziehvorgangs dutzende Mal je Sekunde, und jede Layout-Funktion vermisst Text über
+  `TextRenderer::MeasureText`.
+
+Die Probe ruft jetzt dieselbe Funktion wie das Fenster — ein Nachbau des Produktionspfads findet
+Fehler des Nachbaus (so geschehen beim Dialog „Geschützte Apps").
+Tests: `SectionLayoutTable.Tests.ps1`, dazu eine StaticCheck-Regel gegen Tippfehler in der Tabelle.
+
+### Ein neuer Bereich braucht zwei Einträge, die niemand vermisst
+`Add-Section` allein genügt nicht: `$navKeyOrder` (90-Main) bestimmt die Reihenfolge, `$navGlyphs`
+(75-UiState) das Symbol. Wer dort fehlt, landet **hinten in seiner Gruppe und ohne Symbol** — mit
+Absicht so gebaut, damit ein neuer Bereich nie verschwindet, aber eben auch ohne jede Fehlermeldung.
+Beim Bereich „Kundendaten" ist genau das passiert; gesehen hat es erst eine Bildschirmkopie.
+Seither hält eine StaticCheck-Regel beide Tabellen vollständig.
+
+### Zeilenfarben in Listen hängen am Design
+Eine feste Farbe kann nicht beides: gemessen gegen die Listenfläche (dunkel `38,38,38`, die sechs
+hellen weiß) erreichte das frühere `DarkOrange` auf hellem Grund **2,33 : 1**. `Get-RowAlertColor`
+(65-Theme) liefert je Design ein Paar für `protected` / `warn` / `blocked` (gemessen 4,4 – 6,7 : 1).
+Weil die Farbe damit vom Design abhängt, muss ein Designwechsel die **Zeilen** neu einfärben —
+`Set-GuiTheme` färbt nur die Liste, nicht ihre Einträge; das erledigt `Update-UpdateListRows`.
+Und: eine Zeile bekommt **eine** Farbe, am Ende einmal gesetzt. Vorher überschrieb jede folgende
+Regel ihr Orange über das Rot der geschützten App — die Kennzeichnung verschwand genau dann, wenn
+zusätzlich etwas unklar war.
 
 ### Leere Listen tragen den Verbindungszustand
 `Set-ListEmptyText -Label X -NormalKey 'Y'` schreibt „Nicht verbunden…", solange keine Sitzung
@@ -317,6 +481,17 @@ Profil.
   Bildschirmkopie). Damit die Toleranz nicht unbemerkt zu groß wird, prüft die Probe bei **jedem
   Lauf** sechs Fälle gegen: die drei echten Befunde aus ihrer Geschichte müssen anschlagen, die
   Rand-Bleeds nicht.
+- **Eine Ausnahme nach Typ statt nach Geometrie ist ein blinder Fleck.** Die Überlappungsprüfung
+  übersprang jedes Paar, an dem ein `Panel` beteiligt war — begründet mit „Wirte enthalten ihre
+  Kinder". Der Gedanke stimmt, die Umsetzung nicht: `New-RoundedInput` liefert für **jedes**
+  gerundete Eingabefeld ein Panel, also war jedes Paar *Beschriftung gegen Eingabefeld* von der
+  Prüfung ausgenommen — genau die Form von Befund, um derer willen die Probe existiert. Gemessen am
+  02.09.2026 lag `Installer-Argumente:` in **allen sieben Designs und beiden Sprachen** 4–11 px auf
+  seinem Feld, und die Probe blieb grün. Gefragt wird jetzt nach der Geometrie (`Test-LayoutNested`:
+  deckt einer den anderen **vollständig** ab?), und auch diese Regel prüft sich bei jedem Lauf
+  selbst. **Die Lehre ist allgemein:** wer eine Prüfung an einem Typ vorbeiführt, nimmt sie für
+  alles heraus, was zufällig diesen Typ hat — und merkt es nie, weil das Ergebnis grün ist. Der
+  gesamte Restbestand war übrigens sauber: die verschärfte Regel fand **einen** echten Fall.
 
 ## Pester 5: Discovery und Run sind zwei Phasen
 
@@ -334,7 +509,9 @@ Profil.
 
 ## Form
 
-- **CRLF** überall, **BOM** in allen `src/*.ps1` außer `65-Theme.ps1`.
+- **CRLF** überall, **BOM** in allen `src/*.ps1` außer `45-Assignments.ps1` (bis zum 31.08.2026 stand
+  hier `65-Theme.ps1`; nachgemessen ist es `45-Assignments.ps1`). In `tests/` ist beides gemischter
+  Bestand und wird von nichts erzwungen — der Build prüft nur `src/`.
 - Einzeilige UI-Strings vertragen keine deutschen Anführungszeichen; Here-Strings schon.
 - Backticks (`` `r`n ``) nie über eine Bash-Heredoc setzen — Write-/Edit-Werkzeug benutzen.
 - Kommentare erklären **warum** und nennen den Fehler, den sie verhindern.

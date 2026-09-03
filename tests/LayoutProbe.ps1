@@ -88,11 +88,39 @@ if ($env:WINTUNER_LAYOUT -eq '1') {
       exit 3
     }
   }
-  function Test-LayoutContainer {
-    param($C)
-    # Wirte (Karten, Rundungs-Panels) enthalten ihre Kinder - das ist keine Ueberlappung.
-    return ($C -is [System.Windows.Forms.Panel] -or $C -is [System.Windows.Forms.GroupBox] -or
-            $C -is [System.Windows.Forms.TableLayoutPanel] -or $C -is [System.Windows.Forms.FlowLayoutPanel])
+  # Ein Wirt, der seinen Inhalt umschliesst, ist keine Ueberlappung - gemeint war IMMER dieser Fall.
+  #
+  # Bis zum 02.09.2026 stand hier "ist eins der beiden ein Panel?", und das war ein grosses Loch:
+  # New-RoundedInput liefert fuer JEDES gerundete Eingabefeld ein Panel. Damit war jedes Paar
+  # "Beschriftung gegen Eingabefeld" von der Pruefung ausgenommen - also genau die Form von Befund,
+  # um derer willen diese Probe existiert. Gemessen am 02.09.2026 lag 'Installer-Argumente:' in
+  # ALLEN 7 Designs und BEIDEN Sprachen 4 bis 11 px auf seinem Feld, und die Probe blieb gruen.
+  #
+  # Gefragt wird jetzt nach der Geometrie: deckt einer den anderen vollstaendig ab, ist es ein Wirt.
+  # Zwei Geschwister, die sich nur teilweise schneiden, sind es nicht - egal welchen Typs sie sind.
+  function Test-LayoutNested {
+    param($A, $B)
+    $aInB = ($A.Left -ge $B.Left) -and ($A.Top -ge $B.Top) -and ($A.Right -le $B.Right) -and ($A.Bottom -le $B.Bottom)
+    $bInA = ($B.Left -ge $A.Left) -and ($B.Top -ge $A.Top) -and ($B.Right -le $A.Right) -and ($B.Bottom -le $A.Bottom)
+    return ($aInB -or $bInA)
+  }
+
+  # Gegenprobe der Wirt-Erkennung, bei JEDEM Lauf - aus demselben Grund wie die der Toleranz
+  # daneben. Der dritte Fall ist der, an dem die alte Regel scheiterte: eine Beschriftung, die zur
+  # Haelfte auf einem Panel liegt, ist KEIN Wirt und muss durch die Ueberlappungspruefung.
+  $nestedCases = @(
+    @{ Name = 'Karte enthaelt ihre Beschriftung';      A = @{Left=16; Top=48; Right=742; Bottom=278}; B = @{Left=30; Top=58;  Right=200; Bottom=78};  Expect = $true }
+    @{ Name = 'Beschriftung liegt in ihrem Wirt';      A = @{Left=30; Top=58; Right=200; Bottom=78};  B = @{Left=16; Top=48;  Right=742; Bottom=278}; Expect = $true }
+    @{ Name = 'Beschriftung halb auf dem Eingabefeld'; A = @{Left=14; Top=290; Right=159; Bottom=315}; B = @{Left=150; Top=284; Right=610; Bottom=316}; Expect = $false }
+    @{ Name = 'deckungsgleich - zaehlt als umschlossen'; A = @{Left=0; Top=0; Right=100; Bottom=25};  B = @{Left=0;  Top=0;   Right=100; Bottom=25};  Expect = $true }
+    @{ Name = 'nebeneinander, kein Kontakt';           A = @{Left=0;  Top=0;  Right=100; Bottom=25};  B = @{Left=120; Top=0;  Right=220; Bottom=25};  Expect = $false }
+  )
+  foreach ($case in $nestedCases) {
+    $got = Test-LayoutNested $case.A $case.B
+    if ($got -ne $case.Expect) {
+      Write-Host ("LAYOUT-SELFTEST FAILED: '{0}' erwartet {1}, gemessen {2}" -f $case.Name, $case.Expect, $got)
+      exit 3
+    }
   }
   function Get-LayoutDesc {
     param($C)
@@ -107,7 +135,7 @@ if ($env:WINTUNER_LAYOUT -eq '1') {
     for ($i = 0; $i -lt $kids.Count; $i++) {
       for ($j = $i + 1; $j -lt $kids.Count; $j++) {
         $a = $kids[$i]; $b = $kids[$j]
-        if ((Test-LayoutContainer $a) -or (Test-LayoutContainer $b)) { continue }
+        if (Test-LayoutNested $a.Bounds $b.Bounds) { continue }
         if (Test-LayoutRects $a.Bounds $b.Bounds) {
           Write-Host ("LAYOUT-OVERLAP {0}: {1}  <>  {2}" -f $Path, (Get-LayoutDesc $a), (Get-LayoutDesc $b))
           $found++
@@ -132,11 +160,15 @@ if ($env:WINTUNER_LAYOUT -eq '1') {
     $panel.AutoScrollPosition = New-Object System.Drawing.Point(0, 300)
     [System.Windows.Forms.Application]::DoEvents()
     if ($panel.AutoScrollPosition.Y -eq 0) { return 0 }   # passt ohnehin ohne Bildlaufleiste
-    # Dieselben Aufrufe, die ein Fenster-Resize ausloest.
-    foreach ($fn in @('Update-CardWidths', 'Update-SettingsLayout', 'Update-StoreLayout',
-                      'Update-LocalPackagesLayout', 'Update-OwnPackageLayout', 'Update-TenantAppsLayout')) {
-      if (Get-Command $fn -ErrorAction SilentlyContinue) { try { & $fn } catch { } }
-    }
+    # Genau die Aufrufe, die ein Fenster-Resize ausloest - nicht mehr eine eigene Namensliste.
+    #
+    # Hier standen sechs fest genannte Funktionen unter derselben Behauptung, und die Liste war
+    # nachweislich eine andere als die des Resize-Handlers: zwei Namen kamen dort gar nicht vor,
+    # sechs andere fehlten hier. Eine Probe, die einen Nachbau des Produktionspfads misst, findet
+    # Fehler des Nachbaus (genau so ist es beim Dialog "Geschuetzte Apps" passiert). Jetzt wird
+    # dieselbe Funktion gerufen, die das Fenster ruft, fuer denselben Bereich.
+    try { Update-CardWidths } catch { }
+    try { Update-SectionLayout -Key $Section.Key } catch { }
     [System.Windows.Forms.Application]::DoEvents()
     $panel.AutoScrollPosition = New-Object System.Drawing.Point(0, 0)
     [System.Windows.Forms.Application]::DoEvents()
@@ -252,6 +284,52 @@ if ($env:WINTUNER_LAYOUT -eq '1') {
       Write-Host ("LAYOUT-SCROLL {0}: Inhalt {1}px, sichtbar {2}px" -f $s.Key, $needed, $s.Panel.ClientSize.Height)
     }
   }
+
+  # Aufklapper ("Erweiterte Optionen"). Bis hierher hat diese Probe nur den ZUGEKLAPPTEN Zustand
+  # gesehen - der aufgeklappte war nie gemessen, und dort lagen drei Beschriftungen auf ihren
+  # eigenen Eingabefeldern (im Deutschen bis 98 px).
+  #
+  # Zweitens: ein Aufklapper darf nichts ausserhalb seiner eigenen Sektion bewegen. Der
+  # WinGet-Aufklapper setzte $cardFavorites.Top - eine Karte der Sektion "Lokale Pakete". Gemessen
+  # stand sie danach auf Top=1108 statt 48. Aufgefallen ist es nie, weil Update-LocalPackagesLayout
+  # den Bereich beim Betreten neu anordnet; der Fehler war also nur einen Handler weit von einer
+  # leeren Seite entfernt.
+  $expanders = @(
+    @{ Key = 'winget'; Toggle = $advToggle }
+    @{ Key = 'store';  Toggle = $storeAdvToggle }
+  )
+  foreach ($e in $expanders) {
+    if (-not $e.Toggle) { continue }
+    $own = @($script:sections | Where-Object { $_.Key -eq $e.Key }) | Select-Object -First 1
+    if (-not $own) { continue }
+
+    # Lage ALLER Steuerelemente der uebrigen Sektionen merken. Nicht ueber GetHashCode: ein
+    # verworfener Hashcode wird wiederverwendet, und dann vergleicht man zwei verschiedene Dinge.
+    $foreign = New-Object System.Collections.Generic.List[object]
+    foreach ($s in $script:sections) {
+      if ($s.Key -eq $e.Key) { continue }
+      foreach ($c in $s.Panel.Controls) {
+        [void]$foreign.Add(@{ Section = $s.Key; Control = $c; Top = $c.Top; Height = $c.Height })
+      }
+    }
+
+    Show-Section $e.Key
+    [System.Windows.Forms.Application]::DoEvents()
+    $e.Toggle.PerformClick()
+    [System.Windows.Forms.Application]::DoEvents()
+    foreach ($f in $foreign) {
+      if ($f.Control.Top -ne $f.Top -or $f.Control.Height -ne $f.Height) {
+        Write-Host ("LAYOUT-CROSS-SECTION {0}: der Aufklapper hat ein Steuerelement in '{1}' verschoben (Top {2}->{3}, Hoehe {4}->{5})" -f $e.Key, $f.Section, $f.Top, $f.Control.Top, $f.Height, $f.Control.Height)
+        $overlaps++
+      }
+    }
+    $overlaps += Test-LayoutPanel $own.Panel ("{0}[aufgeklappt]" -f $e.Key)
+
+    # Wieder zuklappen - der Rest der Probe misst den Normalzustand.
+    $e.Toggle.PerformClick()
+    [System.Windows.Forms.Application]::DoEvents()
+    $overlaps += Test-LayoutPanel $own.Panel ("{0}[zugeklappt]" -f $e.Key)
+  }
   # Alle Designs: Kontrast UND Ueberlappung. Die Retro-Designs wechseln die Schriftart (Tahoma),
   # womit jede Beschriftung breiter oder hoeher wird - das ist die Lage, in der eine handgezaehlte
   # Koordinate zuschnappt. Deshalb wird hier je Design neu angeordnet und neu gemessen.
@@ -342,10 +420,15 @@ try {
       if ($stderr) { Write-Host $stderr }
       throw "Layout probe at $size ($lang) did not reach the end of the run."
     }
+    # JEDE Befundzeile durchreichen, nicht eine Aufzaehlung bekannter Praefixe.
+    #
+    # Vorher standen hier vier Muster, und eine neu hinzugekommene Meldung (LAYOUT-CROSS-SECTION)
+    # war in keinem davon: der Zaehler stieg, die Probe wurde rot - und sagte nicht, was sie
+    # gefunden hatte. Ein Befund ohne Text ist fuer den, der ihn beheben soll, kein Befund.
+    # Die Zaehl- und Endemarken (LAYOUT_OVERLAPS=, LAYOUT_PROBE_OK) tragen einen Unterstrich und
+    # fallen deshalb nicht unter diese Regel.
     foreach ($line in ($stdout -split "`r?`n")) {
-      if ($line -match '^LAYOUT-OVERLAP' -or $line -match '^LAYOUT-SCROLL') { Write-Host "  $line" }
-      elseif ($line -match '^LAYOUT-SCROLLSHIFT' -or $line -match '^LAYOUT-CONTRAST' -or $line -match '^LAYOUT-TRUNCATED') { Write-Host "  $line" }
-      elseif ($line -match '^LAYOUT-THEME') { Write-Host "  $line" }
+      if ($line -match '^LAYOUT-') { Write-Host "  $line" }
     }
     $count = if ($stdout -match 'LAYOUT_OVERLAPS=(\d+)') { [int]$Matches[1] } else { -1 }
     if ($count -lt 0) { throw "Layout probe at $size ($lang) did not report a result." }

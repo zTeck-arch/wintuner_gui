@@ -166,11 +166,21 @@ $script:settings = @{
   # Liste je Kunde fängt bei jeder NEUEN Umgebung leer an, und genau dort passiert der Unfall.
   # Produktnamen sind ausserdem keine Kundendaten, es gibt also nichts zu trennen.
   ProtectedApps = @()
+  # Welche Werksmuster schon einmal eingetragen wurden. Ohne diesen Merker gaebe es nur zwei
+  # schlechte Moeglichkeiten: die Werksliste bei jedem Start erzwingen (dann kann der Benutzer
+  # keines davon loswerden - es kaeme beim naechsten Start zurueck) oder sie nur bei einer frischen
+  # Installation setzen (dann bekaeme sie niemand, der die Anwendung schon benutzt). Der Merker
+  # trennt "hat der Benutzer bewusst entfernt" von "kannte er noch nicht".
+  ProtectedAppsSeeded = @()
 }
 
 # Set when Load-Settings had to resolve a conflict, so the change can be logged and explained once
 # the UI exists (Write-Log and the form are not available this early).
 $script:cleanupConflictResolved = $false
+
+# Welche Werksmuster dieser Start ergaenzt hat. Wird gesetzt, solange es noch kein Protokoll gibt,
+# und beim Anzeigen des Fensters einmal protokolliert und gespeichert (90-Main).
+$script:protectedAppsSeeded = @()
 
 # Der Abdruck der wirksamen Einstellungen fuer das Protokoll.
 #
@@ -305,7 +315,14 @@ function Get-SettingValue {
     [Parameter(Mandatory)][string]$Name,
     [Parameter(Mandatory)][ValidateSet('Bool', 'Int', 'String', 'StringArray')][string]$Type,
     [Parameter(Mandatory)]$Default,
-    [int]$Minimum
+    [int]$Minimum,
+    # Obergrenze, gleiche Behandlung wie -Minimum: ausserhalb des Bereichs gilt die Vorgabe.
+    #
+    # Wichtig ist, wo sie NICHT hingehoert: eine Obergrenze auf KeepVersionCount waere gefaehrlich.
+    # Ein zu hoher Wert bewahrt dort nur mehr Versionen (harmlose Richtung) - ein Rueckfall auf die
+    # Vorgabe 2 wuerde genau die Versionen LOESCHEN, die der Benutzer behalten wollte. Grenzen also
+    # nur dort, wo ein absurder Wert wirklich stoert und ein Rueckfall nichts kaputt macht.
+    [int]$Maximum
   )
   try {
     if (-not $Source.PSObject.Properties[$Name]) { return $Default }
@@ -315,6 +332,7 @@ function Get-SettingValue {
       'Int'    {
         $number = [int]$raw
         if ($PSBoundParameters.ContainsKey('Minimum') -and $number -lt $Minimum) { return $Default }
+        if ($PSBoundParameters.ContainsKey('Maximum') -and $number -gt $Maximum) { return $Default }
         return $number
       }
       'String' { return [string]$raw }
@@ -384,6 +402,100 @@ function Add-ProtectedAppPattern {
   return @(Set-ProtectedAppPatterns -Patterns (@($Patterns) + @([string]$Pattern)))
 }
 
+# Werksseitig geschuetzte Namen.
+#
+# Diese Programme werden in der Praxis fast immer SELBST paketiert - mit kundeneigener
+# Konfiguration, eigener Lizenz oder eingebauten Zugangsdaten. Ein Update darauf baut eine neue App,
+# loest die vorhandene ab und zieht deren Zuweisungen mit; bei einem von Hand gebauten Paket laesst
+# sich das durch keinen zweiten Lauf zurueckholen. Genau dieser Unfall soll nicht davon abhaengen,
+# dass jemand in einer neuen Umgebung zuerst an die Schutzliste denkt.
+#
+# Alle mit '*', weil es um JEDE Fassung des Produkts geht ("TeamViewer", "TeamViewer Host",
+# "TeamViewer Meeting"). Geschuetzt heisst nicht gesperrt: die App bleibt sichtbar und anhakbar, der
+# Lauf fragt bei ihr nur ausdruecklich nach - auch bei abgeschalteten Rueckfragen. Ein zu breites
+# Muster kostet daher eine Rueckfrage, ein fehlendes eine App.
+#
+# Wer sie erweitert, traegt hier ein: der Merker ProtectedAppsSeeded sorgt dafuer, dass Nachtraege
+# auch bei Bestandsinstallationen ankommen, ohne von Hand entfernte Muster zurueckzuholen.
+#
+# Zwei Klassen, und beide aus demselben Grund:
+#
+# 1. Fernwartung und RMM. Der Installer traegt die Zuordnung zum Betreuer in sich - Mandanten-Id,
+#    Kundenschluessel, oft ein eigens erzeugtes Installationspaket. Ein aus WinGet gebautes Paket
+#    hat das nicht: es installiert dasselbe Produkt "leer", und danach meldet sich der Rechner bei
+#    niemandem mehr. Bei einer Fernwartung ist das genau der Zugang, ueber den man den Fehler
+#    haette beheben koennen.
+# 2. Passwortmanager. Sie werden mit Richtliniendatei, SSO-Anbindung oder fest eingestelltem
+#    Server ausgerollt. Ein Ersatz durch die nackte Herstellerfassung nimmt dem Benutzer nicht die
+#    Passwoerter, aber die Anmeldung an den Tresor - und das faellt erst am Endgeraet auf.
+#
+# Alle mit '*', weil die Produkte in mehreren Fassungen auftreten ("ConnectWise Control",
+# "ConnectWise Automate", "ScreenConnect Client (abc123)"). Das kostet im schlechtesten Fall eine
+# Rueckfrage bei einer App, die man doch aktualisieren wollte - ein fehlendes Muster kostet die App.
+$script:defaultProtectedApps = @(
+  # Fernwartung / RMM
+  'TeamViewer*'
+  'Jamf*'
+  'Splashtop*'
+  'AnyDesk*'
+  'ScreenConnect*'
+  'ConnectWise*'
+  'N-able*'
+  'N-central*'
+  'Datto*'
+  # Nachtrag 03.09.2026, dieselbe Klasse: der Agent traegt die Mandanten- oder Organisations-Id im
+  # Installer. Bewusst 'NinjaOne*'/'NinjaRMM*' statt 'Ninja*' - 'NinjaTrader' ist ein voellig
+  # fremdes Produkt, das aus WinGet aktualisiert werden soll, und ein zu breites Muster kostet
+  # genau dort eine Rueckfrage, die sich nicht wegdruecken laesst.
+  'NinjaOne*'
+  'NinjaRMM*'
+  'Atera*'
+  'Action1*'
+  # BeyondTrust breit, und das mit Absicht: Remote Support, Privileged Remote Access und
+  # Privilege Management binden alle an die Appliance beziehungsweise an eine Richtlinie des
+  # Kunden (Jump-Client mit Site-Schluessel, Konsole mit Appliance-Adresse). Ein aus WinGet
+  # gebautes Paket kennt beides nicht.
+  'BeyondTrust*'
+  # Passwortmanager
+  'Keeper*'
+  '1Password*'
+  'Bitwarden*'
+  'LastPass*'
+  'KeePass*'
+)
+
+# Reine Rechnung: welche Werksmuster fehlen noch, und wie sehen die beiden Listen danach aus.
+# Getrennt von der Oberflaeche, damit die Regel "einmal eintragen, danach nie wieder aufzwingen"
+# ohne Anmeldung und ohne Fenster pruefbar ist.
+function Get-SeededProtectedApps {
+  param(
+    [AllowNull()][object[]]$Patterns,
+    [AllowNull()][object[]]$Seeded,
+    [AllowNull()][object[]]$Defaults
+  )
+  $already = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($s in @($Seeded)) {
+    $t = ([string]$s).Trim()
+    if (-not [string]::IsNullOrWhiteSpace($t)) { [void]$already.Add($t) }
+  }
+  $added = [System.Collections.Generic.List[string]]::new()
+  $result = @($Patterns)
+  foreach ($d in @($Defaults)) {
+    $t = ([string]$d).Trim()
+    if ([string]::IsNullOrWhiteSpace($t)) { continue }
+    if ($already.Contains($t)) { continue }   # schon einmal angeboten - Entscheidung des Benutzers gilt
+    $result = @(Add-ProtectedAppPattern -Patterns $result -Pattern $t)
+    $added.Add($t)
+  }
+  return @{
+    Patterns = @(Set-ProtectedAppPatterns -Patterns $result)
+    # Der Merker fuehrt IMMER die vollstaendige Werksliste, nicht nur das eben Ergaenzte: sonst
+    # wuerde ein Muster, das der Benutzer entfernt, beim naechsten Start erneut eingetragen.
+    Seeded   = @(Set-ProtectedAppPatterns -Patterns (@($Seeded) + @($Defaults)))
+    Added    = @($added.ToArray())
+  }
+}
+
 function Remove-ProtectedAppPattern {
   param([AllowNull()][object[]]$Patterns, [string]$Pattern)
   $target = ([string]$Pattern).Trim()
@@ -422,7 +534,12 @@ function Load-Settings {
         $script:settings.ThemeName               = Get-SettingValue -Source $o -Name 'ThemeName'               -Type String -Default 'Light'
         $script:settings.Language                = Get-SettingValue -Source $o -Name 'Language'                -Type String -Default 'en'
         $script:settings.RecentLogins            = Get-SettingValue -Source $o -Name 'RecentLogins'            -Type StringArray -Default @()
-        $script:settings.MaxRecentLogins         = Get-SettingValue -Source $o -Name 'MaxRecentLogins'         -Type Int  -Default 15 -Minimum 1
+        # Obergrenze 50: die settings.json ist ausdruecklich von Hand bearbeitbar (der Kommentar am
+        # Vorgabeblock sagt es), und ein Tippfehler wie 1500 baut ein Menue, das ueber den unteren
+        # Bildschirmrand hinauslaeuft. Die Liste ist reine Bequemlichkeit, ein Rueckfall auf 15
+        # kostet also nichts. KeepVersionCount bekommt bewusst KEINE Obergrenze - warum, steht in
+        # Get-SettingValue.
+        $script:settings.MaxRecentLogins         = Get-SettingValue -Source $o -Name 'MaxRecentLogins'         -Type Int  -Default 15 -Minimum 1 -Maximum 50
 
         # Restore the last user-selected window state. Releases before 0.13.2 saved these
         # values but never loaded them. Migrate only the exact former built-in default;
@@ -465,6 +582,7 @@ function Load-Settings {
         # Ueber Set-ProtectedAppPatterns, damit eine von Hand bearbeitete Datei denselben
         # Normalisierungs- und Doppelten-Filter durchlaeuft wie die Oberflaeche.
         $script:settings.ProtectedApps = @(Set-ProtectedAppPatterns -Patterns (Get-SettingValue -Source $o -Name 'ProtectedApps' -Type StringArray -Default @()))
+        $script:settings.ProtectedAppsSeeded = @(Set-ProtectedAppPatterns -Patterns (Get-SettingValue -Source $o -Name 'ProtectedAppsSeeded' -Type StringArray -Default @()))
         $script:settings.SuppressChangeConfirmations = Get-SettingValue -Source $o -Name 'SuppressChangeConfirmations' -Type Bool -Default $false
         $script:settings.ChangeConfirmationRiskAcceptedVersion = Get-SettingValue -Source $o -Name 'ChangeConfirmationRiskAcceptedVersion' -Type String -Default ''
         # Friendly tenant names: a plain UPN -> string map. Anything that is not a usable pair is
@@ -531,6 +649,17 @@ function Load-Settings {
   # Runs outside the try block on purpose: a settings file that failed to parse leaves the defaults
   # in place, and those must be normalized just the same.
   if (Resolve-CleanupOptionConflict) { $script:cleanupConflictResolved = $true }
+
+  # Ebenfalls ausserhalb des try: die Werksmuster gelten fuer die frische Installation UND fuer den
+  # Bestand. Gespeichert wird hier NICHT - das passiert einmal, sobald das Fenster steht
+  # (Add_Shown in 90-Main), wie beim Aufraeum-Konflikt daneben. Load-Settings laeuft so frueh, dass
+  # es weder Write-Log noch ein Fenster gibt.
+  $seed = Get-SeededProtectedApps -Patterns $script:settings.ProtectedApps `
+                                  -Seeded $script:settings.ProtectedAppsSeeded `
+                                  -Defaults $script:defaultProtectedApps
+  $script:settings.ProtectedApps = @($seed.Patterns)
+  $script:settings.ProtectedAppsSeeded = @($seed.Seeded)
+  if (@($seed.Added).Count -gt 0) { $script:protectedAppsSeeded = @($seed.Added) }
 }
 
 function Save-Settings {

@@ -24,6 +24,7 @@ Packaging, deployment, version comparison, assignments and the controlled retire
 - [Requirements](#requirements)
 - [Account and permissions](#account-and-permissions)
 - [A typical run](#a-typical-run)
+- [A fresh customer tenant, and the steady state](#a-fresh-customer-tenant-and-the-steady-state)
 - [Limits and responsibility](#limits-and-responsibility)
 - [Project status](#project-status)
 - [License and origin](#license-and-origin)
@@ -184,6 +185,27 @@ For a tool that manages customer tenants, a cache left behind on a shared techni
 - The cache belongs to the `Microsoft.Graph` module and is **shared**, not private to this application. Signing out therefore also ends the cached session of **other** PowerShell tools used by the same Windows user.
 - Signing out only deletes the **local** copy. The refresh token stays valid at Entra ID and is **not revoked**. If you genuinely suspect an account or device is compromised, signing out is not enough: revoke the sessions centrally in the Entra portal as well.
 
+### How many sign-in addresses are remembered
+
+The dropdown next to the address field offers the addresses used before, most recent first. It keeps **15** of them by default; beyond that the oldest drops off the end. The list is pure convenience — it suggests an address, it holds no session open.
+
+If you look after more customers than that, raise `MaxRecentLogins` in the settings file (1 to 50, anything outside falls back to 15):
+
+```text
+%APPDATA%\WinTunerGUI\settings.json
+```
+
+```powershell
+# close the application first - it writes this file when it exits
+$p = "$env:APPDATA\WinTunerGUI\settings.json"
+$s = Get-Content -Raw -LiteralPath $p | ConvertFrom-Json
+$s.MaxRecentLogins = 20
+$s | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $p -Encoding utf8
+```
+
+> [!NOTE]
+> An installation that has been in use for a while may still carry `MaxRecentLogins = 8`. That was the default in earlier versions, and an existing settings file keeps its value — a raised default only applies to new installations. If your list stops growing at eight, this is why.
+
 ---
 
 ## Requirements
@@ -248,6 +270,88 @@ Depending on the tenant, administrator consent, Conditional Access policies or f
 5. Check the result in Intune and in the local activity log.
 
 For an update there are two routes. Deploy the new version as its own app and supersede the old one (the default under **Updates**), or replace the content of the existing app (**Own installers**). The second route avoids ending up with several app objects per product, but it assumes the detection rules still fit.
+
+---
+
+## A fresh customer tenant, and the steady state
+
+The tool is built for a **steady state**: set up once, a recurring run keeps a tenant's apps current without hand work. That state does not establish itself on the first run, though. A tenant that has not been managed with WinTuner or WinGet before needs a closer look **once**. After that, never again.
+
+### The steady state: a few switches, and supersedence runs by itself
+
+Routine operation rests on three settings. Together they close the loop: package the new version → upload → supersede the predecessor → move the assignment → clean up the old version. Nothing is left behind, and nobody has to finish the job in the portal.
+
+| Setting | What it does for routine operation |
+|---|---|
+| **Move the group assignment to the new version (unassign the old one)** | Without it **both** versions carry the assignment after an update, and someone has to unassign the old one by hand in the portal. This is the switch that turns "an update was deployed" into "the new version is actually in use". |
+| **Delete the predecessor version right after a successful update** *or* **Keep only the newest N versions per package and delete the rest** | Both clear away the superseded app objects — otherwise the **Superseded versions** tile grows with every single update. The two options are mutually exclusive: delete immediately, or keep a number. Either way nothing is deleted until assignments and successful installations have been checked again. |
+| **Also check Win32 apps that carry no WinTuner marker** | The marker in the notes field only says **who** created an app — not whether a newer version exists. Without this switch, everything created by hand or with another tool stays invisible, and in an inherited tenant that is the majority. |
+
+With these switches set and the mappings verified once, a run via **Update all** can go through without a single click (**Skip the confirmation prompts before changes in Intune**). Protected apps still ask — that one question deliberately cannot be suppressed.
+
+### It gets easier once every app has gone through this tool once
+
+The mapping "which Intune app is which WinGet package" is the one thing this tool cannot guess reliably. It does not have to guess when the answer is written down — and it is written down as soon as an app has been created or superseded through WinTuner: the app's **notes** field in Intune then carries a marker of the form
+
+```
+[WinTuner|winget|Google.Chrome]
+```
+
+That marker holds the **package id**, and reading it is exact — no name comparison, no similarity score, no ambiguity. So the first round is the expensive one, and every app that has been superseded once through this tool leaves the guessing behind for good. In a tenant where every app has gone through once, the update scan is simply a lookup.
+
+Two consequences worth knowing:
+
+- **Leave the notes field alone.** Clearing or overwriting it in the Intune portal throws the package id away. The app does not disappear from the scan — it falls back to matching by display name (see the first round below), and if that stays ambiguous, it shows up as a **blocked row** instead of as an update. If you use the notes field for your own comments, write them **next to** the marker, not over it.
+- **A hand-written note counts too.** A notes field that just says `installed with WinGet: Google.Chrome` or `WinTuner - Zoom.ZoomRooms` is read as well, as long as the id looks like `Publisher.Product`. That is a deliberate second chance for apps whose marker has been removed at some point. It only ever **adds** an id, though: such an app stays in the unmarked list and is still checked there.
+
+None of this replaces the **Also check Win32 apps that carry no WinTuner marker** switch — that one decides whether unmarked apps are looked at at all. The marker decides how precisely a looked-at app can be mapped.
+
+### Why the first round is different
+
+In a freshly inherited tenant, **no** app came from this tool. Four consequences follow that do not exist later on:
+
+- **There is no mapping to WinGet.** No marker, no package id in the notes field; only a display name somebody chose freely. Mapping name → WinGet id is therefore the critical step of the first round. It is only accepted on an **exact** name match, a clearly dominant match, or a stored mapping — anything ambiguous is skipped. A wrong id would package the wrong product and supersede the real app.
+- **Apps that could not be checked appear as blocked rows** with a reason ("no WinGet id could be mapped safely", "Intune reports no version"). They cannot be ticked and a run leaves them out. Where it makes sense, the id can be set by hand via right-click → **Assign WinGet id...**; the rest stays blocked on purpose.
+- **Not all self-packaged apps are known yet.** Remote support, RMM and the common password managers are protected out of the box (the full list is below). **Customer-specific** installers are known to nobody but you — those belong on the protection list **before** the first run. An update on one of them builds a new app from the public catalogue, supersedes the hand-built one and moves its assignments; for a package built by hand, no second run brings that back.
+- **Supersedence is not yet proven here.** Whether the assignment really moved to the new version only shows on a real run in this tenant.
+
+### The protection list: what is protected out of the box, and how to get past it
+
+These patterns are on the list from the first start, because their installers carry something a package built from the public catalogue does not have: the assignment to whoever maintains the machine (tenant id, customer key, a generated installer), or a policy file and SSO binding.
+
+| Group | Patterns |
+|---|---|
+| Remote support and RMM | `TeamViewer*`, `AnyDesk*`, `Splashtop*`, `ScreenConnect*`, `ConnectWise*`, `N-able*`, `N-central*`, `Datto*`, `NinjaOne*`, `NinjaRMM*`, `Atera*`, `Action1*`, `BeyondTrust*`, `Jamf*` |
+| Password managers | `Keeper*`, `1Password*`, `Bitwarden*`, `LastPass*`, `KeePass*` |
+
+Replacing one of these with the plain vendor build installs the same product "empty": the machine stops reporting to anybody, and the very access you would need to repair it is the thing that is gone.
+
+**Protected does not mean blocked.** The app stays visible in the update list, stays tickable, and still shows that a newer version exists. The only difference is that a run asks about it explicitly — and that question is asked even with **Skip the confirmation prompts before changes in Intune** switched on.
+
+Three ways past it, from the most local to the most permanent:
+
+1. **For this one run:** the question offers **Update all, protected included**. The other buttons are **Continue without the protected ones** (the default) and Cancel. Closing the dialog without clicking always means cancel, never "update everything".
+2. **For this one app, permanently:** right-click its row in the update list and remove the protection. The status line confirms with **Protection removed: ...**.
+3. **For a whole pattern:** **Protected apps...** in the update view, or the same list under **Settings → Self-packaged apps**. Select the entry, **Remove selected**. Changes take effect and are saved immediately; the **Save Settings** button is not involved.
+
+Two properties of the list that matter in day-to-day use:
+
+- **A pattern you remove does not come back.** The tool remembers which factory patterns it has offered you once, so your decision stands across restarts — and a pattern added to the factory list in a later version still reaches an **existing** installation.
+- **The list is global, not per customer.** A per-tenant list would start out empty in every new environment, and that is exactly where the accident happens.
+
+An entry without `*` or `?` matches the app name exactly; with a wildcard it is a pattern — `Zoom Rooms` protects one app, `Zoom*` protects all of them.
+
+### Suggested order for the first round
+
+1. Connect and run the update scan with **Also check Win32 apps that carry no WinTuner marker** switched on. Only then does the list see what is actually there.
+2. Walk the **blocked rows**: read the reason, map the WinGet id where it is unambiguous, leave the rest. An unmapped app is inconvenient; a wrongly mapped one is expensive.
+3. **Protect self-packaged apps** while nothing is running yet.
+4. Start the first run with **confirmations on** and **cleanup off**, on two or three uncritical apps — not on all of them.
+5. Check in Intune: does the new app carry the assignments? Is the predecessor listed as superseded? The activity log records both.
+6. **Only then** switch on routine operation: cleanup, and confirmations off if you want that.
+
+> [!IMPORTANT]
+> The risky options are off by default for a reason. Switching them on in a tenant nobody has verified yet means automating deletions before anyone has seen whether the mappings in this tenant are correct.
 
 ---
 

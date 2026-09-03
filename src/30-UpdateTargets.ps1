@@ -404,6 +404,17 @@ function Resolve-DeployedUpdateTarget {
 
 # WinTuner renamed the removal parameter from -GraphId to -AppId. Detect the installed command at
 # runtime so both older deployments and the current 1.4.x module work.
+#
+# Laeuft seit 0.18.0 im Hintergrund-Runspace, aus demselben Grund wie der Upload. Gemeldet am
+# 03.09.2026: waehrend des Aufraeumens stand das Fenster still und "Nach aktueller App stoppen" tat
+# nichts. Gemessen am Protokoll desselben Laufs kostete jede FEHLGESCHLAGENE Loeschung 5 bis 7
+# Sekunden (Zoom 09:07:16-09:07:21, Firefox 09:07:09-09:07:14) - bei drei Apps je Aufraeumlauf rund
+# 20 Sekunden Standbild, und genau darin tut der Abbruchknopf nichts.
+#
+# Derselbe Riegel wie beim Upload: KEIN Abbruch und KEIN Zeitablauf. Eine halb ausgefuehrte Loeschung
+# ist so wenig zurueckzunehmen wie ein halber Upload - Intune haengt an einer App ihre
+# Abloesebeziehungen, und nach einem Abbruch mitten darin ist nicht feststellbar, was schon weg ist.
+# Der Abbruchknopf wirkt weiterhin ZWISCHEN den Apps.
 function Invoke-WtRemoveWin32App {
   param([Parameter(Mandatory)][string]$AppId)
   $command = Get-Command Remove-WtWin32App -ErrorAction Stop
@@ -414,6 +425,14 @@ function Invoke-WtRemoveWin32App {
     $removeArgs.GraphId = $AppId
   } else {
     throw 'The installed Remove-WtWin32App command exposes neither -AppId nor -GraphId.'
+  }
+  # Echter Vorwaertsbezug ueber eine Teilgrenze: der Trichter steht in 35-Packaging, diese Datei
+  # laedt davor. NUR dafuer ist ein Get-Command-Gatter berechtigt (siehe PATTERNS.md) - und die
+  # Unit-Tests, die diese Funktion einzeln aus der Quelle laden, kommen so ohne echten Runspace aus.
+  if (Get-Command Invoke-WtModuleCallOffThread -ErrorAction SilentlyContinue) {
+    $off = Invoke-WtModuleCallOffThread -CommandName $command.Name -Arguments $removeArgs -Label ("delete {0}" -f $AppId)
+    if ($off.Ran) { return $off.Result }
+    Write-Log ("Deleting {0} on the UI thread (no background runspace); the window will not respond until it finishes." -f $AppId)
   }
   & $command @removeArgs
 }
@@ -695,7 +714,10 @@ function New-TenantStoreAppViaGraph {
 
   $json = $body | ConvertTo-Json -Depth 8
   Write-Log ("Creating Store app directly over Graph: '{0}' ({1}), publisher '{2}', runAs {3}." -f $DisplayName, $PackageIdentifier, $Publisher, $RunAsAccount)
-  $created = Invoke-RestMethod -Method POST -Uri 'https://graph.microsoft.com/beta/deviceAppManagement/mobileApps' -Headers $headers -Body $json -ErrorAction Stop
+  # -MaxRetries 0: dieser POST LEGT EINE APP AN. Bei einem Zeitablauf ist unbekannt, ob Intune sie
+  # schon erzeugt hat, und ein zweiter Versuch erzeugte eine zweite Store-App im Tenant.
+  $created = Invoke-GraphRest -Method POST -Uri 'https://graph.microsoft.com/beta/deviceAppManagement/mobileApps' `
+    -Headers $headers -Body $json -MaxRetries 0 -Context ("create Store app {0}" -f $PackageIdentifier)
   Clear-Win32AppsCache   # a new app exists; a cached inventory would not contain it
   Write-Log ("Store app created over Graph: {0}" -f [string]$created.id)
   return $created

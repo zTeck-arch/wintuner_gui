@@ -15,6 +15,8 @@ BeforeAll {
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '75-UiState.ps1' -Name @(
     'Update-ProgressDisplay', 'Show-Progress', 'Set-ProgressValue', 'Hide-Progress', 'Test-ProgressVisible',
     'Request-RunCancel'))))
+  # Request-RunCancel stoppt seit 0.18.0 auch den Vorab-Bau des naechsten Pakets.
+  . ([scriptblock]::Create((Get-SourceFunctionText -Part '35-Packaging.ps1' -Name 'Stop-PackagePrebuild')))
 
   $script:progressLabel = New-Object System.Windows.Forms.Label
   $script:progressLabel.Visible = $false

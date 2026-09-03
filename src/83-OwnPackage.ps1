@@ -1682,7 +1682,12 @@ function New-Win32AppViaGraph {
 
   $json = $body | ConvertTo-Json -Depth 10
   Write-Log ("Creating Win32 app over Graph: '{0}' ({1}), runAs {2}, detection {3}." -f $DisplayName, $Publisher, $RunAsAccount, $DetectionRule['@odata.type'])
-  $created = Invoke-RestMethod -Method POST -Uri 'https://graph.microsoft.com/beta/deviceAppManagement/mobileApps' -Headers $headers -Body $json -ErrorAction Stop
+  # -MaxRetries 0, und das ist keine Sparsamkeit: dieser POST LEGT EINE APP AN. Bei einem Zeitablauf
+  # oder einer abgerissenen Verbindung weiss der Aufrufer nicht, ob Intune sie schon erzeugt hat -
+  # ein zweiter Versuch legte dann eine zweite, nicht verknuepfte App an. Get-GraphRetryPlan
+  # wiederholt zwar ohnehin nur bei einem gelesenen Status, aber hier steht es ausdruecklich da.
+  $created = Invoke-GraphRest -Method POST -Uri 'https://graph.microsoft.com/beta/deviceAppManagement/mobileApps' `
+    -Headers $headers -Body $json -MaxRetries 0 -Context 'create Win32 app'
   # A new app exists, so any cached inventory is stale. Note that the module's inventory would not
   # list THIS app at any point - it carries no '[WinTuner|' notes marker - which is why the
   # content-replacement list reads the tenant directly (Get-TenantWin32Apps). Clearing the cache

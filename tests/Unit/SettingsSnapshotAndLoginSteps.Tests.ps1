@@ -93,11 +93,11 @@ Describe 'Weniger Schritte beim Anmelden' {
       $global:TestGraphPages++
       return [pscustomobject]@{ value = @(
         [pscustomobject]@{ id = 'a'; '@odata.type' = '#microsoft.graph.win32LobApp'; displayName = 'App A'
-                           displayVersion = '1.0'; notes = '[WinTuner|winget|App.A]'; supersededAppCount = 0; isAssigned = $true },
+                           displayVersion = '1.0'; notes = '[WinTuner|winget|App.A]'; supersedingAppCount = 0; isAssigned = $true },
         [pscustomobject]@{ id = 'b'; '@odata.type' = '#microsoft.graph.win32LobApp'; displayName = 'App B'
-                           displayVersion = '0.9'; notes = '[WinTuner|winget|App.B]'; supersededAppCount = 1; isAssigned = $false },
+                           displayVersion = '0.9'; notes = '[WinTuner|winget|App.B]'; supersedingAppCount = 1; isAssigned = $false },
         [pscustomobject]@{ id = 'c'; '@odata.type' = '#microsoft.graph.win32LobApp'; displayName = 'Handarbeit'
-                           displayVersion = '1'; notes = ''; supersededAppCount = 0; isAssigned = $true }
+                           displayVersion = '1'; notes = ''; supersedingAppCount = 0; isAssigned = $true }
       ) }
     }
   }
