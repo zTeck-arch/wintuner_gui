@@ -43,7 +43,7 @@ Invoke-ScriptAnalyzer -Path .\tests -Settings .\PSScriptAnalyzerSettings.Tests.p
 ```
 
 Erwartet (gemessen am 03.09.2026, Stand 0.18.0): StaticChecks grün
-(**361 Funktionen, 1006 UI-Keys je Sprache**), SmokeTest grün, LayoutProbe grün, **778 Pester** grün
+(**366 Funktionen, 1006 UI-Keys je Sprache**), SmokeTest grün, LayoutProbe grün, **794 Pester** grün
 (1 übersprungen), Analyzer **0 blockierend** (5 informational in `65-Theme.ps1` sind Altbestand).
 
 Die eine übersprungene Prüfung wechselt die Seite, je nachdem was auf dem Rechner installiert ist:

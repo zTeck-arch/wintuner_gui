@@ -13,7 +13,8 @@
 BeforeAll {
   . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
   Initialize-TestAmbient
-  . ([scriptblock]::Create((Get-SourceFunctionText -Part '35-Packaging.ps1' -Name 'Invoke-WtDeployOffThread')))
+  . ([scriptblock]::Create((Get-SourceFunctionText -Part '35-Packaging.ps1' -Name @(
+    'Invoke-WtModuleCallOffThread', 'Invoke-WtDeployOffThread'))))
 
   # Kein Runspace: damit laeuft in jedem Fall der Inline-Zweig, und die Attrappe unten wird wirklich
   # gerufen. Der Runspace-Zweig wuerde das WinTuner-Modul importieren - das ist Sache des
@@ -74,7 +75,11 @@ Describe 'Invoke-WtDeployOffThread' {
 Describe 'Zusicherungen im Quelltext' {
 
   BeforeAll {
-    $script:fnText = Get-SourceFunctionText -Part '35-Packaging.ps1' -Name 'Invoke-WtDeployOffThread'
+    # Die Politik (kein Abbruch, kein Zeitablauf, DoEvents, Fehler auspacken) sitzt seit dem
+    # Loesch-Fix im gemeinsamen Rumpf: Upload UND Loeschen teilen sie sich, und zweimal
+    # geschrieben waere sie beim naechsten Mal einmal geaendert.
+    $script:fnText = Get-SourceFunctionText -Part '35-Packaging.ps1' -Name @(
+      'Invoke-WtModuleCallOffThread', 'Invoke-WtDeployOffThread')
   }
 
   # Der Unterschied zum Paketbau, und der Grund, aus dem der Trichter nicht von ihm abgeleitet ist:

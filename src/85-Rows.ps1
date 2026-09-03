@@ -2055,6 +2055,7 @@ function Clear-TenantViews {
     Clear-EntraGroupNameCache     # eine GUID des vorigen Tenants darf hier nie mit DEM Namen von dort auftauchen
     Clear-LatestVersionCache      # kundenunabhaengig, aber beim Wechsel erwartet man frische Zahlen
     Clear-InstallProbeSource      # welche Installationsquelle antwortet, ist eine Eigenschaft DES TENANTS
+    Clear-DeleteBlockedAppCache   # gemerkte App-Ids, deren Loeschung abgelehnt wurde - Ids des vorigen Kunden
     # Update scan
     $script:updateApps = @()
     if ($updateListBox) { $updateListBox.Items.Clear() }

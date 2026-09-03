@@ -38,6 +38,45 @@ function Get-ErrorHttpStatus {
   return 0
 }
 
+# Der ANTWORTKOERPER eines fehlgeschlagenen Graph-Aufrufs, einzeilig und gekuerzt.
+#
+# Gebraucht, weil "Response status code does not indicate success: 400 (Bad Request)" nichts sagt.
+# Am 03.09.2026 stand genau diese Zeile im Protokoll, als das Zurueckschreiben einer
+# Abloesebeziehung scheiterte (CRITICAL in Remove-SupersededByUnlinking) - und der Grund war damit
+# nicht feststellbar. Der Grund steht immer im Koerper: Graph schickt bei 400 ein
+# { "error": { "code": ..., "message": ... } }.
+#
+# PowerShell 7 legt ihn in $_.ErrorDetails.Message; die Antwort selbst ist danach nicht mehr lesbar
+# (der Inhalt ist ein bereits verbrauchter Stream), deshalb wird nur diese Quelle benutzt.
+#
+# Einzeilig und gekuerzt, weil die Zeile in ein Protokoll geht, das jemand liest: ein
+# mehrzeiliger JSON-Block darin ist nicht greppbar - genau das Problem, das der Modulfehler in
+# demselben Protokoll schon macht.
+function Get-GraphErrorBody {
+  param([Parameter(Mandatory)]$ErrorRecord, [int]$MaxLength = 1200)
+  $text = ''
+  try {
+    if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) {
+      $text = [string]$ErrorRecord.ErrorDetails.Message
+    }
+  } catch { }   # class 3: ein nicht lesbarer Koerper ist einfach keiner
+  if ([string]::IsNullOrWhiteSpace($text)) { return '' }
+  $flat = ($text -replace '\s+', ' ').Trim()
+  if ($MaxLength -gt 0 -and $flat.Length -gt $MaxLength) {
+    return $flat.Substring(0, $MaxLength) + ('… (+{0} Zeichen)' -f ($flat.Length - $MaxLength))
+  }
+  return $flat
+}
+
+# Fehlertext plus Antwortkoerper in einer Zeile - das, was in ein Protokoll gehoert.
+function Get-GraphErrorText {
+  param([Parameter(Mandatory)]$ErrorRecord)
+  $message = [string]$ErrorRecord.Exception.Message
+  $body = Get-GraphErrorBody -ErrorRecord $ErrorRecord
+  if ([string]::IsNullOrWhiteSpace($body)) { return $message }
+  return ("{0} | response: {1}" -f $message, $body)
+}
+
 # Entscheidet, ob und wie lange ein zweiter Versuch wartet. Rein, damit die Regel ohne Netz und ohne
 # Uhr geprueft werden kann (Get-GraphRetryPlan in tests/Unit/GraphTransport.Tests.ps1).
 #

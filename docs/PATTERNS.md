@@ -161,10 +161,31 @@ mit genau dieser Meldung. Beim Paketbau war beides längst weg, aus demselben Gr
 Runspace. Wer also eine Logger-Flut aus dem Modul sieht, sucht nicht nach einem Protokollfehler,
 sondern nach einem Modulaufruf auf dem falschen Faden.
 
-Der Upload hat dabei eine Sonderregel, die der Paketbau nicht hat: **kein Abbruch, kein
-Zeitablauf, kein `$ps.Stop()`** (`Invoke-WtDeployOffThread`). Ein abgebrochener Paketbau lässt
-lokale Dateien zurück, ein abgebrochener Upload eine halb angelegte App im Kundentenant. Der
-Abbruchknopf wirkt deshalb **zwischen** den Apps.
+Upload **und Löschen** haben dabei eine Sonderregel, die der Paketbau nicht hat: **kein Abbruch,
+kein Zeitablauf, kein `$ps.Stop()`**. Beide gehen über `Invoke-WtModuleCallOffThread`
+(35-Packaging), wo diese Politik **einmal** steht; die zwei öffentlichen Trichter
+(`Invoke-WtDeployOffThread`, `Invoke-WtRemoveWin32App`) halten nur noch ihren Inline-Rückfall, damit
+jeder echte Modulaufruf genau einmal im Quelltext steht und eine StaticCheck-Regel ihn über den
+Parser finden kann. Ein abgebrochener Paketbau lässt lokale Dateien zurück, ein abgebrochener
+Upload eine halb angelegte App und eine abgebrochene Löschung eine App, an der Intune noch
+Ablösebeziehungen führt. Der Abbruchknopf wirkt deshalb **zwischen** den Apps.
+
+### Ein Schreibvorgang, der Erfolg meldet, hat nicht unbedingt etwas geändert
+Am 03.09.2026 entfernte `updateRelationships` eine Ablösebeziehung, antwortete mit Erfolg — und im
+nächsten Durchlauf war die Beziehung wieder da, dreimal hintereinander. Die anschließende Löschung
+scheiterte weiter mit derselben Absage, und der Rückbau lief in einen 400er, dessen Grund im
+Protokoll fehlte, weil dort nur der Status stand.
+
+Zwei Regeln daraus, beide umgesetzt: bei einer Mutation, von der eine Löschung abhängt, **nachlesen**
+statt annehmen (`Remove-SupersededByUnlinking` liest die Beziehungen nach dem Schreiben erneut) — und
+bei einem Graph-Fehler **den Antwortkörper protokollieren** (`Get-GraphErrorText`, 40-Graph). „400
+(Bad Request)" allein ist keine Diagnose, der Grund steht immer im Körper.
+
+Dazu die dritte: eine Absage, die **strukturell** ist, nicht in jedem Lauf wiederholen
+(`Test-IsStructuralDeleteRefusal`, `$script:deleteBlockedApps`). Die Grenze ist wichtig — nur
+„parent of another app"/„Cannot delete this app" gelten als endgültig; 429, 5xx, 403 und Zeitablauf
+**nicht**, sonst schaltet ein einzelner Fehlschlag das Aufräumen für die Sitzung ab. Und der
+Merkzettel gehört in den Tenant-Riegel: App-Ids gehören einem Kunden.
 
 ### Das Protokoll muss sagen, WIE die Anwendung eingestellt ist
 `Get-SettingsSnapshotLines` (10-Settings) liefert die Zeilen, `90-Main` schreibt sie beim Start und

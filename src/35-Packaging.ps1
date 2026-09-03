@@ -375,45 +375,58 @@ function Close-DeployRunspace {
 # Dass die Anmeldung in den zweiten Runspace traegt, ist gemessen und nicht angenommen:
 # GraphSession::Instance ist ein statisches Singleton (tests/Unit/GraphSessionSharing.Tests.ps1),
 # und das Inventar wird laengst so gelesen.
-function Invoke-WtDeployOffThread {
+# Der gemeinsame Rumpf: EIN Modulaufruf im Upload-Runspace, waehrend der UI-Faden weiterzeichnet.
+#
+# Hier steht die Regel, nicht der Modulname. Zwei Aufrufer teilen sie sich - der Upload und das
+# Loeschen -, und beide brauchen dieselbe Politik: kein Abbruch, kein Zeitablauf, Fehler
+# unveraendert nach oben. Waere sie zweimal geschrieben, waere sie beim naechsten Mal einmal
+# geaendert.
+#
+# Rueckgabe @{ Ran; Result }:
+#   Ran = $false  - es gab keinen Runspace; der Aufrufer macht es inline (und sagt das im Protokoll)
+#   Ran = $true   - gelaufen, Result ist die Rueckgabe des Moduls
+#   wirft         - der Fehler AUS dem Aufruf, ausgepackt, auf dem UI-Faden
+#
+# Der Modulname kommt als Zeichenfolge herein, der Inline-Rueckfall bleibt bewusst beim Aufrufer:
+# so steht jeder echte Modulaufruf genau einmal im Quelltext und die StaticCheck-Regeln koennen
+# ueber den Parser pruefen, dass es keinen zweiten gibt.
+function Invoke-WtModuleCallOffThread {
   param(
+    [Parameter(Mandatory)][string]$CommandName,
     [Parameter(Mandatory)][hashtable]$Arguments,
-    [string]$Label = 'upload'
+    [string]$Label = ''
   )
   $rs = $null
-  # Besetzt heisst hier nicht "warten": zwei Uploads gleichzeitig gibt es nicht (die Busy-Sperre
-  # haelt sie auseinander), aber wenn doch, ist inline richtig und nicht eine zweite Pipeline im
-  # selben Runspace - die liefe in "Pipelines cannot be run concurrently".
+  # Besetzt heisst hier nicht "warten": zwei schreibende Modulaufrufe gleichzeitig gibt es nicht
+  # (die Busy-Sperre haelt sie auseinander), aber wenn doch, ist inline richtig und nicht eine
+  # zweite Pipeline im selben Runspace - die liefe in "Pipelines cannot be run concurrently".
   if (-not $script:deployRunspaceInUse) {
     try { $rs = Get-DeployRunspace } catch { $rs = $null }
   }
-  if (-not $rs) {
-    Write-Log ("Uploading {0} on the UI thread (no background runspace); the window will not respond until it finishes." -f $Label)
-    return Deploy-WtWin32App @Arguments
-  }
+  if (-not $rs) { return @{ Ran = $false; Result = $null } }
 
   $ps = [powershell]::Create()
   $ps.Runspace = $rs
-  [void]$ps.AddCommand('Deploy-WtWin32App').AddParameters($Arguments)
+  [void]$ps.AddCommand($CommandName).AddParameters($Arguments)
   $script:deployRunspaceInUse = $true
   try {
     $async = $ps.BeginInvoke()
-    # Das ist der ganze Gewinn: der UI-Faden pumpt seine Nachrichtenschleife, waehrend der Upload
+    # Das ist der ganze Gewinn: der UI-Faden pumpt seine Nachrichtenschleife, waehrend der Aufruf
     # auf dem anderen Thread laeuft. Das Fenster zeichnet, das Protokoll laesst sich aufklappen.
     while (-not $async.AsyncWaitHandle.WaitOne(50)) {
       [System.Windows.Forms.Application]::DoEvents()
     }
     $out = $ps.EndInvoke($async)
     if ($ps.Streams.Error.Count -gt 0) {
-      # Deploy-WtWin32App wird mit ErrorAction Stop gerufen, ein abbrechender Fehler kommt also aus
-      # EndInvoke als Ausnahme. Was im Strom liegenbleibt, wird unveraendert weitergeworfen.
+      # Gerufen wird mit ErrorAction Stop, ein abbrechender Fehler kommt also aus EndInvoke als
+      # Ausnahme. Was im Strom liegenbleibt, wird unveraendert weitergeworfen.
       throw (($ps.Streams.Error | ForEach-Object { $_.ToString() }) -join '; ')
     }
-    if ($out -and $out.Count -gt 0) { return $out[$out.Count - 1] }
-    return $null
+    $value = if ($out -and $out.Count -gt 0) { $out[$out.Count - 1] } else { $null }
+    return @{ Ran = $true; Result = $value }
   } catch {
     # BeginInvoke/EndInvoke verpacken den Modulfehler. Ausgepackt, damit die Textpruefungen der
-    # Aufrufer weiter greifen.
+    # Aufrufer weiter greifen (403, Duplikat, "parent of another app").
     if ($_.Exception.InnerException -and $_.Exception.InnerException.Message) {
       throw $_.Exception.InnerException.Message
     }
@@ -422,6 +435,17 @@ function Invoke-WtDeployOffThread {
     $script:deployRunspaceInUse = $false
     try { $ps.Dispose() } catch { }   # class 3: teardown
   }
+}
+
+function Invoke-WtDeployOffThread {
+  param(
+    [Parameter(Mandatory)][hashtable]$Arguments,
+    [string]$Label = 'upload'
+  )
+  $off = Invoke-WtModuleCallOffThread -CommandName 'Deploy-WtWin32App' -Arguments $Arguments -Label $Label
+  if ($off.Ran) { return $off.Result }
+  Write-Log ("Uploading {0} on the UI thread (no background runspace); the window will not respond until it finishes." -f $Label)
+  return Deploy-WtWin32App @Arguments
 }
 
 # Uebernimmt das Ergebnis des Vorab-Baus - aber NUR bei exakt gleichem Argumentsatz.
@@ -734,7 +758,34 @@ function Remove-SupersededByUnlinking {
     Invoke-GraphRest -Method POST -Uri $updUri -Headers $headers -Body $body `
       -Context ("unlink supersedence on {0}" -f $NewAppId) | Out-Null
     Write-Log ("Unlink: removed supersedence {0} -> {1}; kept {2} other outgoing relationship(s)." -f $NewAppId, $OldAppId, $keep.Count)
-    Start-Sleep -Seconds 2
+    # Zwei Sekunden, damit Intune die Aenderung sieht. Mit DoEvents, sonst steht das Fenster - und
+    # dieser Pfad laeuft mitten im Aufraeumen, wo bis 0.18.0 rund 20 s Standbild entstanden.
+    for ($tick = 0; $tick -lt 20; $tick++) {
+      try { [System.Windows.Forms.Application]::DoEvents() } catch { }
+      Start-Sleep -Milliseconds 100
+    }
+    # NACHLESEN, statt es anzunehmen.
+    #
+    # Am 03.09.2026 im Betrieb gemessen: dieser POST meldete Erfolg, und im naechsten Durchlauf war
+    # dieselbe Beziehung wieder da - dreimal hintereinander (09:05:46, 09:06:43, 09:07:11). Der
+    # Schreibvorgang hatte also keine Wirkung, die Loeschung scheiterte danach mit derselben Meldung,
+    # und der Rueckbau lief in einen 400er. Ohne diese Pruefung sieht das im Protokoll aus wie eine
+    # geglueckte Aenderung, der nur die Loeschung nicht folgte - das ist die falsche Fehlersuche.
+    $stillThere = $false
+    try {
+      foreach ($r in @(Get-GraphCollectionItems -Uri $relUri -Headers $headers)) {
+        if ([string]$r.sourceId -ne $NewAppId) { continue }
+        if ([string]$r.'@odata.type' -match 'Supersedence' -and [string]$r.targetId -eq $OldAppId) { $stillThere = $true; break }
+      }
+    } catch {
+      Write-Log ("Unlink: could not verify the removal on {0}: {1}" -f $NewAppId, (Get-GraphErrorText -ErrorRecord $_))
+    }
+    if ($stillThere) {
+      # Nicht loeschen und nicht zurueckbauen: es gibt nichts zurueckzubauen, und der Loeschversuch
+      # wuerde nur mit derselben Absage enden - 5 bis 7 Sekunden je App, in jedem Lauf.
+      Write-Log ("Unlink: Intune reported success but the supersedence {0} -> {1} is STILL there; not attempting the delete. This is a tenant-side refusal, not a transient error." -f $NewAppId, $OldAppId)
+      return $false
+    }
     try {
       Invoke-WtRemoveWin32App -AppId $OldAppId
     } catch {
@@ -747,7 +798,13 @@ function Remove-SupersededByUnlinking {
           -Context ("restore supersedence on {0}" -f $NewAppId) | Out-Null
         Write-Log ("Unlink rollback: restored {0} outgoing relationship(s) on {1} after delete failed." -f $originalOutgoing.Count, $NewAppId)
       } catch {
-        Write-Log ("CRITICAL: could not restore relationships on {0} after delete of {1} failed: {2}" -f $NewAppId, $OldAppId, $_.Exception.Message)
+        # Der ANTWORTKOERPER gehoert hier hin, nicht nur der Status. Am 03.09.2026 stand hier
+        # dreimal "400 (Bad Request)" und nichts weiter - damit war nicht feststellbar, ob unser
+        # Rumpf falsch geformt ist oder Intune die Beziehung nicht zurueckschreiben laesst. Das ist
+        # die Zeile, an der die Zusicherung "eine gescheiterte Loeschung bricht die Abloesung nie
+        # stillschweigend" bewiesen oder widerlegt wird; sie muss den Grund nennen.
+        Write-Log ("CRITICAL: could not restore relationships on {0} after delete of {1} failed: {2}" -f $NewAppId, $OldAppId, (Get-GraphErrorText -ErrorRecord $_))
+        Write-Log ("CRITICAL: the supersedence {0} -> {1} may now be MISSING in the tenant. Check the app's supersedence in the Intune portal." -f $NewAppId, $OldAppId)
       }
       throw $deleteError
     }

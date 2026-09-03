@@ -637,6 +637,31 @@ function New-AppAssignmentConfiguration {
 # cleanup paths go through - version trimming, the bulk superseded cleanup and the single delete.
 # Recording it at each call site instead would have meant three chances to forget one, which is how
 # a session that deleted eight app versions could still report "no apps updated".
+# Apps, deren Loeschung in DIESER Sitzung strukturell abgelehnt wurde. Tenantbezogen, also wird die
+# Liste beim Tenantwechsel geleert (Clear-TenantViews) - eine App-Id des vorigen Kunden hier zu
+# behalten wuerde beim naechsten Kunden eine Loeschung ueberspringen, die gehen wuerde.
+$script:deleteBlockedApps = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+function Clear-DeleteBlockedAppCache {
+  if ($script:deleteBlockedApps.Count -gt 0) {
+    Write-Log ("Cleared the list of {0} app(s) whose deletion Intune refused structurally." -f $script:deleteBlockedApps.Count)
+  }
+  $script:deleteBlockedApps.Clear()
+}
+
+# "Ist diese Absage strukturell, also in jedem weiteren Lauf dieselbe?"
+#
+# Rein, weil daran haengt, ob eine App noch einmal angefasst wird. Gemeint ist genau Intunes
+# Weigerung, eine App zu loeschen, die Vorgaenger einer anderen ist ("Cannot delete this app as it
+# is the parent of another app: ..."). Ein 429, ein 5xx oder ein Zeitablauf ist das NICHT - der
+# naechste Lauf hat dort echte Aussicht auf Erfolg, und ihn zu ueberspringen wuerde Aufraeumen
+# stillschweigend abschalten.
+function Test-IsStructuralDeleteRefusal {
+  param([string]$Message)
+  if ([string]::IsNullOrWhiteSpace($Message)) { return $false }
+  return ($Message -match 'parent of another app' -or $Message -match 'Cannot delete this app')
+}
+
 function Remove-AppWithUnlinkFallback {
   param(
     [Parameter(Mandatory)][string]$GraphId,
@@ -644,6 +669,17 @@ function Remove-AppWithUnlinkFallback {
     [string]$Version = '',
     [ValidateSet('VersionRemoved','SupersededRemoved')][string]$RecordAs = 'VersionRemoved'
   )
+  # Was in dieser Sitzung schon strukturell abgelehnt wurde, wird nicht in jedem Durchlauf erneut
+  # versucht.
+  #
+  # Gemessen am Betriebsprotokoll vom 03.09.2026: drei Apps scheiterten in DREI aufeinander
+  # folgenden Aufraeumlaeufen mit derselben Absage. Je App und Durchlauf kostete das 5 bis 7
+  # Sekunden Standbild, zwei wirkungslose Schreibvorgaenge in den Tenant und ein Dutzend Zeilen im
+  # Protokoll - und die Aussicht auf Erfolg war jedes Mal dieselbe: keine.
+  if ($script:deleteBlockedApps.Contains($GraphId)) {
+    Write-Log ("Deletion skipped for {0} ({1}): Intune already refused it structurally in this session (it is the predecessor of another app). Nothing was attempted." -f $AppName, $GraphId)
+    return $false
+  }
   try {
     $null = Save-AppScopeSnapshot -AppId $GraphId -AppName $AppName -Version $Version `
       -Reason (Get-UiString 'ScopeSnapshotReasonVersionCleanup')
@@ -654,12 +690,16 @@ function Remove-AppWithUnlinkFallback {
     $m = $_.Exception.Message
     # Already gone counts as success - but nothing was deleted here, so nothing is recorded.
     if (Test-IsNotFoundError -ErrorRecord $_ -Context $AppName) { return $true }
-    if ($m -match 'parent of another app' -or $m -match 'Cannot delete this app') {
+    if (Test-IsStructuralDeleteRefusal -Message $m) {
       $newId = Get-SupersedingAppIdFromError $m
       if ($newId -and (Remove-SupersededByUnlinking -OldAppId $GraphId -NewAppId $newId)) {
         Add-SessionActivity -Kind $RecordAs -Name $AppName -FromVersion $Version
         return $true
       }
+      # Abhaengen hat es auch nicht geloest. Damit ist die Absage fuer diese Sitzung endgueltig:
+      # gemerkt, damit der naechste Durchlauf sie nicht wiederholt.
+      [void]$script:deleteBlockedApps.Add($GraphId)
+      Write-Log ("Version cleanup: {0} ({1}) cannot be deleted while it is the predecessor of another app, and unlinking did not resolve it. It will not be retried in this session; delete the newer app's supersedence in the Intune portal, or delete the newer app first." -f $AppName, $GraphId)
     }
     Write-Log ("Version cleanup: could not remove {0} ({1}): {2}" -f $AppName, $GraphId, $m)
     return $false
