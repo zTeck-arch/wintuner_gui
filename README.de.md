@@ -268,14 +268,57 @@ Der Regelbetrieb hängt an drei Einstellungen. Zusammen ergeben sie eine geschlo
 
 Sind diese Schalter gesetzt und die Zuordnungen einmal geprüft, kann ein Lauf über **Alle aktualisieren** ohne einen einzigen Klick durchlaufen (**Rückfragen vor Änderungen in Intune überspringen**). Geschützte Apps fragen weiterhin nach — diese eine Rückfrage lässt sich bewusst nicht wegdrücken.
 
+### Es wird leichter, sobald jede App einmal durch dieses Werkzeug gelaufen ist
+
+Die Zuordnung „welche Intune-App ist welches WinGet-Paket" ist das eine, was dieses Werkzeug nicht verlässlich raten kann. Es muss auch nicht raten, wenn die Antwort aufgeschrieben ist — und sie ist aufgeschrieben, sobald eine App über WinTuner angelegt oder abgelöst wurde: im **Notizfeld** der App in Intune steht dann eine Marke der Form
+
+```
+[WinTuner|winget|Google.Chrome]
+```
+
+Diese Marke enthält die **Paket-Id**, und sie zu lesen ist eindeutig — kein Namensvergleich, kein Ähnlichkeitswert, keine Mehrdeutigkeit. Die erste Runde ist also die teure, und jede App, die einmal über dieses Werkzeug abgelöst wurde, lässt das Raten endgültig hinter sich. In einer Umgebung, in der jede App einmal durchgelaufen ist, ist die Update-Suche nur noch ein Nachschlagen.
+
+Zwei Folgen, die man kennen sollte:
+
+- **Das Notizfeld in Ruhe lassen.** Wer es im Intune-Portal leert oder überschreibt, wirft die Paket-Id weg. Die App verschwindet damit nicht aus der Suche — sie fällt auf die Zuordnung über den Anzeigenamen zurück (siehe die erste Runde unten), und bleibt die mehrdeutig, steht sie als **gesperrte Zeile** da statt als Update. Wer das Notizfeld für eigene Anmerkungen nutzt, schreibt sie **neben** die Marke, nicht darüber.
+- **Eine von Hand geschriebene Notiz zählt auch.** Ein Notizfeld, in dem nur `mit WinGet installiert: Google.Chrome` oder `WinTuner - Zoom.ZoomRooms` steht, wird ebenfalls gelesen, solange die Id wie `Hersteller.Produkt` aussieht. Das ist eine bewusste zweite Chance für Apps, deren Marke irgendwann entfernt wurde. Sie kann eine Id aber immer nur **hinzufügen**: eine so gelesene App bleibt in der Liste der unmarkierten Apps und wird weiter dort geprüft.
+
+Das alles ersetzt den Schalter **Auch Win32-Apps ohne WinTuner-Marke prüfen** nicht — der entscheidet, ob unmarkierte Apps überhaupt angesehen werden. Die Marke entscheidet, wie genau eine angesehene App zugeordnet werden kann.
+
 ### Warum die erste Runde anders ist
 
 In einer frisch übernommenen Umgebung stammt **keine** App aus diesem Werkzeug. Daraus folgen vier Dinge, die es später nicht mehr gibt:
 
 - **Es gibt keine Zuordnung zu WinGet.** Weder eine Marke noch eine Paket-Id im Notizfeld; nur einen Anzeigenamen, den jemand frei gewählt hat. Die Zuordnung Name → WinGet-Id ist deshalb der kritische Schritt der ersten Runde. Übernommen wird sie nur bei einem **exakten** Namenstreffer, einem klar dominierenden Treffer oder einer hinterlegten Zuordnung — alles Mehrdeutige wird übersprungen. Eine falsche Id würde das falsche Produkt paketieren und die echte App ablösen.
 - **Nicht prüfbare Apps stehen als gesperrte Zeilen in der Liste**, mit Grund („keine WinGet-Id sicher zuzuordnen", „Intune meldet keine Version"). Sie sind nicht anhakbar und werden von einem Lauf ausgelassen. Wo es sinnvoll ist, lässt sich die Id per Rechtsklick → **WinGet-Id zuordnen…** von Hand setzen; der Rest bleibt bewusst stehen.
-- **Selbst paketierte Apps sind noch nicht alle bekannt.** Fernwartung, RMM und die gängigen Passwortmanager sind ab Werk geschützt (TeamViewer, AnyDesk, ScreenConnect/ConnectWise, N-able, Datto, Jamf, Splashtop, Keeper, 1Password, Bitwarden, LastPass, KeePass). **Kundeneigene** Installer kennt niemand außer Ihnen — die gehören in die Schutzliste, **bevor** der erste Lauf startet. Ein Update darauf baut eine neue App aus dem öffentlichen Katalog, löst die selbst gebaute ab und zieht deren Zuweisungen mit; bei einem von Hand gebauten Paket holt das kein zweiter Lauf zurück.
+- **Selbst paketierte Apps sind noch nicht alle bekannt.** Fernwartung, RMM und die gängigen Passwortmanager sind ab Werk geschützt (die vollständige Liste steht unten). **Kundeneigene** Installer kennt niemand außer Ihnen — die gehören in die Schutzliste, **bevor** der erste Lauf startet. Ein Update darauf baut eine neue App aus dem öffentlichen Katalog, löst die selbst gebaute ab und zieht deren Zuweisungen mit; bei einem von Hand gebauten Paket holt das kein zweiter Lauf zurück.
 - **Die Ablösung ist beim ersten Mal noch nicht belegt.** Ob die Zuweisung wirklich auf die neue Version übergegangen ist, sieht man erst an einem echten Lauf in diesem Tenant.
+
+### Die Schutzliste: was ab Werk geschützt ist, und wie man daran vorbeikommt
+
+Diese Muster stehen ab dem ersten Start in der Liste, weil ihr Installer etwas in sich trägt, das ein aus dem öffentlichen Katalog gebautes Paket nicht hat: die Zuordnung zu dem, der den Rechner betreut (Mandanten-Id, Kundenschlüssel, eigens erzeugtes Installationspaket), oder eine Richtliniendatei und die SSO-Anbindung.
+
+| Gruppe | Muster |
+|---|---|
+| Fernwartung und RMM | `TeamViewer*`, `AnyDesk*`, `Splashtop*`, `ScreenConnect*`, `ConnectWise*`, `N-able*`, `N-central*`, `Datto*`, `NinjaOne*`, `NinjaRMM*`, `Atera*`, `Action1*`, `BeyondTrust*`, `Jamf*` |
+| Passwortmanager | `Keeper*`, `1Password*`, `Bitwarden*`, `LastPass*`, `KeePass*` |
+
+Ein Ersatz durch die nackte Herstellerfassung installiert dasselbe Produkt „leer": der Rechner meldet sich bei niemandem mehr, und ausgerechnet der Zugang, über den man das reparieren könnte, ist weg.
+
+**Geschützt heißt nicht gesperrt.** Die App bleibt in der Update-Liste sichtbar, bleibt anhakbar und zeigt weiterhin, dass es eine neuere Version gibt. Anders ist nur: ein Lauf fragt bei ihr ausdrücklich nach — und diese Frage kommt auch dann, wenn **Rückfragen vor Änderungen in Intune überspringen** eingeschaltet ist.
+
+Drei Wege daran vorbei, vom kurzlebigsten zum dauerhaftesten:
+
+1. **Für diesen einen Lauf:** die Rückfrage bietet **Alle aktualisieren, auch geschützte** an. Die anderen Knöpfe sind **Ohne die geschützten fortfahren** (der Vorgabeknopf) und Abbrechen. Ein weggeklickter Dialog bedeutet immer Abbruch, nie „alle aktualisieren".
+2. **Für diese eine App, dauerhaft:** Rechtsklick auf ihre Zeile in der Update-Liste und den Schutz aufheben. Die Statuszeile bestätigt mit **Schutz aufgehoben: …**.
+3. **Für ein ganzes Muster:** **Geschützte Apps…** in der Update-Ansicht, oder dieselbe Liste unter **Einstellungen → Selbst paketierte Apps**. Eintrag auswählen, **Ausgewählten entfernen**. Änderungen wirken sofort und werden sofort gespeichert; der Knopf **Einstellungen speichern** ist dafür nicht zuständig.
+
+Zwei Eigenschaften der Liste, die im Alltag zählen:
+
+- **Ein Muster, das Sie entfernen, kommt nicht zurück.** Das Werkzeug merkt sich, welche Werksmuster es Ihnen einmal angeboten hat — Ihre Entscheidung gilt also über Neustarts hinweg, und ein Muster, das in einer späteren Version dazukommt, erreicht trotzdem eine **bestehende** Installation.
+- **Die Liste gilt global, nicht je Kunde.** Eine Liste pro Tenant fängt in jeder neuen Umgebung leer an, und genau dort passiert der Unfall.
+
+Ein Eintrag ohne `*` oder `?` trifft den App-Namen genau; mit Platzhalter gilt er als Muster — `Zoom Rooms` schützt eine App, `Zoom*` alle.
 
 ### Empfohlene Reihenfolge für die erste Runde
 

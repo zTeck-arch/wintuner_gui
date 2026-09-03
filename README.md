@@ -268,14 +268,57 @@ Routine operation rests on three settings. Together they close the loop: package
 
 With these switches set and the mappings verified once, a run via **Update all** can go through without a single click (**Skip the confirmation prompts before changes in Intune**). Protected apps still ask — that one question deliberately cannot be suppressed.
 
+### It gets easier once every app has gone through this tool once
+
+The mapping "which Intune app is which WinGet package" is the one thing this tool cannot guess reliably. It does not have to guess when the answer is written down — and it is written down as soon as an app has been created or superseded through WinTuner: the app's **notes** field in Intune then carries a marker of the form
+
+```
+[WinTuner|winget|Google.Chrome]
+```
+
+That marker holds the **package id**, and reading it is exact — no name comparison, no similarity score, no ambiguity. So the first round is the expensive one, and every app that has been superseded once through this tool leaves the guessing behind for good. In a tenant where every app has gone through once, the update scan is simply a lookup.
+
+Two consequences worth knowing:
+
+- **Leave the notes field alone.** Clearing or overwriting it in the Intune portal throws the package id away. The app does not disappear from the scan — it falls back to matching by display name (see the first round below), and if that stays ambiguous, it shows up as a **blocked row** instead of as an update. If you use the notes field for your own comments, write them **next to** the marker, not over it.
+- **A hand-written note counts too.** A notes field that just says `installed with WinGet: Google.Chrome` or `WinTuner - Zoom.ZoomRooms` is read as well, as long as the id looks like `Publisher.Product`. That is a deliberate second chance for apps whose marker has been removed at some point. It only ever **adds** an id, though: such an app stays in the unmarked list and is still checked there.
+
+None of this replaces the **Also check Win32 apps that carry no WinTuner marker** switch — that one decides whether unmarked apps are looked at at all. The marker decides how precisely a looked-at app can be mapped.
+
 ### Why the first round is different
 
 In a freshly inherited tenant, **no** app came from this tool. Four consequences follow that do not exist later on:
 
 - **There is no mapping to WinGet.** No marker, no package id in the notes field; only a display name somebody chose freely. Mapping name → WinGet id is therefore the critical step of the first round. It is only accepted on an **exact** name match, a clearly dominant match, or a stored mapping — anything ambiguous is skipped. A wrong id would package the wrong product and supersede the real app.
 - **Apps that could not be checked appear as blocked rows** with a reason ("no WinGet id could be mapped safely", "Intune reports no version"). They cannot be ticked and a run leaves them out. Where it makes sense, the id can be set by hand via right-click → **Assign WinGet id...**; the rest stays blocked on purpose.
-- **Not all self-packaged apps are known yet.** Remote support, RMM and the common password managers are protected out of the box (TeamViewer, AnyDesk, ScreenConnect/ConnectWise, N-able, Datto, Jamf, Splashtop, Keeper, 1Password, Bitwarden, LastPass, KeePass). **Customer-specific** installers are known to nobody but you — those belong on the protection list **before** the first run. An update on one of them builds a new app from the public catalogue, supersedes the hand-built one and moves its assignments; for a package built by hand, no second run brings that back.
+- **Not all self-packaged apps are known yet.** Remote support, RMM and the common password managers are protected out of the box (the full list is below). **Customer-specific** installers are known to nobody but you — those belong on the protection list **before** the first run. An update on one of them builds a new app from the public catalogue, supersedes the hand-built one and moves its assignments; for a package built by hand, no second run brings that back.
 - **Supersedence is not yet proven here.** Whether the assignment really moved to the new version only shows on a real run in this tenant.
+
+### The protection list: what is protected out of the box, and how to get past it
+
+These patterns are on the list from the first start, because their installers carry something a package built from the public catalogue does not have: the assignment to whoever maintains the machine (tenant id, customer key, a generated installer), or a policy file and SSO binding.
+
+| Group | Patterns |
+|---|---|
+| Remote support and RMM | `TeamViewer*`, `AnyDesk*`, `Splashtop*`, `ScreenConnect*`, `ConnectWise*`, `N-able*`, `N-central*`, `Datto*`, `NinjaOne*`, `NinjaRMM*`, `Atera*`, `Action1*`, `BeyondTrust*`, `Jamf*` |
+| Password managers | `Keeper*`, `1Password*`, `Bitwarden*`, `LastPass*`, `KeePass*` |
+
+Replacing one of these with the plain vendor build installs the same product "empty": the machine stops reporting to anybody, and the very access you would need to repair it is the thing that is gone.
+
+**Protected does not mean blocked.** The app stays visible in the update list, stays tickable, and still shows that a newer version exists. The only difference is that a run asks about it explicitly — and that question is asked even with **Skip the confirmation prompts before changes in Intune** switched on.
+
+Three ways past it, from the most local to the most permanent:
+
+1. **For this one run:** the question offers **Update all, protected included**. The other buttons are **Continue without the protected ones** (the default) and Cancel. Closing the dialog without clicking always means cancel, never "update everything".
+2. **For this one app, permanently:** right-click its row in the update list and remove the protection. The status line confirms with **Protection removed: ...**.
+3. **For a whole pattern:** **Protected apps...** in the update view, or the same list under **Settings → Self-packaged apps**. Select the entry, **Remove selected**. Changes take effect and are saved immediately; the **Save Settings** button is not involved.
+
+Two properties of the list that matter in day-to-day use:
+
+- **A pattern you remove does not come back.** The tool remembers which factory patterns it has offered you once, so your decision stands across restarts — and a pattern added to the factory list in a later version still reaches an **existing** installation.
+- **The list is global, not per customer.** A per-tenant list would start out empty in every new environment, and that is exactly where the accident happens.
+
+An entry without `*` or `?` matches the app name exactly; with a wildcard it is a pattern — `Zoom Rooms` protects one app, `Zoom*` protects all of them.
 
 ### Suggested order for the first round
 
