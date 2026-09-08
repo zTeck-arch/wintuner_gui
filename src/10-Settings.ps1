@@ -83,6 +83,15 @@ function Resolve-PackagePathSetting {
   }
   return @{ Path = $Saved; Migrated = $false }
 }
+
+# Wie viele Anmeldungen der Verlauf ab Werk merkt. Steht als Variable und nicht als Zahl an vier
+# Stellen (Vorgabeblock, Loader, Anhebung, Fallback in Add-RecentLogin): eine Anhebung, die drei
+# Stellen erwischt und die vierte nicht, kappt die Liste stillschweigend an der alten Zahl.
+$script:maxRecentLoginsDefault = 20
+# Von welchem Wert dieser Start MaxRecentLogins angehoben hat (-1 = keine Anhebung). Wie bei den
+# Werksmustern gesetzt, solange es noch kein Protokoll gibt; ausgewertet, sobald das Fenster steht.
+$script:maxRecentLoginsRaisedFrom = -1
+
 $script:settings = @{
   WingetOverrides = @{}
   # Seed with the safe per-user default so a fresh install (no settings.json) is NEVER empty - an
@@ -105,12 +114,13 @@ $script:settings = @{
   ThemeName = "Light"
   Language = "en"
   RecentLogins = @()   # most-recent-first list of previously used UPNs, for quick re-selection
-  # 15 statt 8: ein MSP betreut mehr Kunden als das, und der neunte fiel bisher lautlos hinten
-  # heraus - im Verlauf sah es dann aus, als haette man sich dort nie angemeldet. Die Liste ist
-  # eine reine Bequemlichkeit (Adresse vorschlagen), sie haelt keine Sitzung offen; laenger zu sein
-  # kostet nichts ausser Menuehoehe. Wer mehr oder weniger will, setzt MaxRecentLogins in der
-  # settings.json.
-  MaxRecentLogins = 15
+  # 20 statt 15 statt 8: ein MSP betreut mehr Kunden als das, und der naechste fiel bisher lautlos
+  # hinten heraus - im Verlauf sah es dann aus, als haette man sich dort nie angemeldet. Die Liste
+  # ist eine reine Bequemlichkeit (Adresse vorschlagen), sie haelt keine Sitzung offen; laenger zu
+  # sein kostet nichts ausser Menuehoehe. Wer mehr oder weniger will, setzt MaxRecentLogins in der
+  # settings.json - ein selbst gesetzter Wert bleibt danach unangetastet (siehe
+  # MaxRecentLoginsSeeded).
+  MaxRecentLogins = $script:maxRecentLoginsDefault
   # Entra group favorites, keyed by TENANT DOMAIN: @{ 'kunde.de' = @(@{Id=..; Name=..}) }.
   # Keyed per tenant on purpose - this is an MSP tool, and offering customer A's groups while
   # connected to customer B would invite assigning an app to the wrong organisation entirely.
@@ -172,6 +182,22 @@ $script:settings = @{
   # Installation setzen (dann bekaeme sie niemand, der die Anwendung schon benutzt). Der Merker
   # trennt "hat der Benutzer bewusst entfernt" von "kannte er noch nicht".
   ProtectedAppsSeeded = @()
+  # Ob die Anhebung von MaxRecentLogins auf die heutige Vorgabe schon gelaufen ist. Derselbe Gedanke
+  # wie bei ProtectedAppsSeeded: eine erhoehte Vorgabe erreicht sonst NUR neue Installationen, weil
+  # eine bestehende settings.json ihren alten Wert behaelt - gemeldet am 03.09.2026 als "aktuell
+  # kann ich nur 8 Logins speichern", und das galt fuer jeden Bestandsnutzer. Angehoben wird
+  # deshalb einmalig jeder Wert UNTERHALB der Vorgabe, danach nie wieder: wer die Liste bewusst
+  # kurz haelt, setzt seinen Wert nach der Anhebung erneut und behaelt ihn dann.
+  MaxRecentLoginsSeeded = $false
+  # Welche Startmeldungen der Benutzer ueber "Diese Meldung nicht mehr anzeigen" ausgeblendet hat -
+  # als Schluessel -> FINGERABDRUCK des Inhalts, nicht als bloße Liste.
+  #
+  # Der Fingerabdruck ist der Punkt: ausgeblendet wird die Meldung, die er GELESEN hat. Fehlt
+  # spaeter ein ANDERER Modulparameter oder laeuft eine andere alte Version, ist das eine neue
+  # Aussage und die Meldung kommt wieder. Ohne das waere ein Haekchen von heute eine Blindheit fuer
+  # jede kuenftige Modulinkompatibilitaet - und genau die ist der Grund, aus dem es diese Meldungen
+  # ueberhaupt gibt (Fehlerbericht vom 03.09.2026: -SearchQuery).
+  SuppressedStartupNotices = @{}
 }
 
 # Set when Load-Settings had to resolve a conflict, so the change can be logged and explained once
@@ -456,6 +482,41 @@ $script:defaultProtectedApps = @(
   # Kunden (Jump-Client mit Site-Schluessel, Konsole mit Appliance-Adresse). Ein aus WinGet
   # gebautes Paket kennt beides nicht.
   'BeyondTrust*'
+  # Nachtrag 07.09.2026, auf Zuruf - dieselbe Klasse, dieselbe Begruendung: der Agent traegt die
+  # Zuordnung zum Betreuer in sich (Kaseya: Server-Adresse und Gruppen-Id im Installer;
+  # Tactical RMM: API-Adresse und Client-Schluessel; Level: Installationsschluessel der
+  # Organisation). Ein aus WinGet gebautes Paket hat davon nichts.
+  #
+  # 'Kaseya*' deckt "Kaseya Agent" und "Kaseya VSA Agent" ab. Bewusst NICHT 'VSA*' oder 'AgentMon*':
+  # das eine ist zu unspezifisch fuer eine Namensliste, das andere ist der Prozessname, nicht der
+  # Anzeigename in Intune.
+  'Kaseya*'
+  # Zwei Muster, weil das Produkt in beiden Schreibweisen auftritt ("TacticalRMM Agent" aus dem
+  # Installer, "Tactical RMM Agent" in der Anzeige). 'Tactical*' allein waere zu breit.
+  'TacticalRMM*'
+  'Tactical RMM*'
+  # 'Level.io*' und nicht 'Level*': "Level" ist als Wortanfang in Produktnamen zu haeufig, und ein
+  # zu breites Muster kostet genau dort eine Rueckfrage, die sich nicht wegdruecken laesst.
+  'Level.io*'
+  # Nachtrag 07.09.2026, zweite Runde auf Zuruf - dieselbe Klasse und dieselbe Begruendung: der
+  # Agent traegt Mandant, Kundenschluessel oder Appliance-Adresse im Installer, ein aus WinGet
+  # gebautes Paket kennt davon nichts.
+  #
+  # 'Syncro' EXAKT plus 'Syncro *' mit Leerzeichen, nicht 'Syncro*': sonst faellt "Syncrosoft
+  # eLicenser" (Steinberg, ein voellig fremdes Produkt) mit hinein. Dieselbe Ueberlegung wie bei
+  # NinjaOne/NinjaTrader - nur ist der Agent hier schlicht "Syncro", weshalb es zwei Eintraege
+  # braucht statt eines Musters.
+  'Syncro'
+  'Syncro *'
+  'Pulseway*'
+  'ImmyBot*'
+  'SuperOps*'
+  'Naverisk*'
+  # Die alten Produktnamen zweier Anbieter, die schon in der Liste stehen: CentraStage hiess Datto
+  # RMM vor der Uebernahme, Bomgar war BeyondTrust. Beide Namen laufen im Bestand weiter, und
+  # 'Datto*'/'BeyondTrust*' treffen sie NICHT.
+  'CentraStage*'
+  'Bomgar*'
   # Passwortmanager
   'Keeper*'
   '1Password*'
@@ -494,6 +555,50 @@ function Get-SeededProtectedApps {
     Seeded   = @(Set-ProtectedAppPatterns -Patterns (@($Seeded) + @($Defaults)))
     Added    = @($added.ToArray())
   }
+}
+
+# Ist diese Startmeldung mit DIESEM Inhalt ausgeblendet?
+#
+# Rein, ohne Einstellungsdatei und ohne Fenster: die eine Regel, auf die es ankommt, ist "der
+# Fingerabdruck muss uebereinstimmen". Ein Vergleich, der nur den Schluessel prueft, macht aus einem
+# Haekchen von heute eine Blindheit fuer jede kuenftige Abweichung.
+function Test-StartupNoticeSuppressed {
+  param(
+    [AllowNull()][object]$Store,
+    [Parameter(Mandatory)][string]$Key,
+    [AllowEmptyString()][string]$Fingerprint = ''
+  )
+  if (-not $Store -or [string]::IsNullOrWhiteSpace($Key)) { return $false }
+  $saved = $null
+  try {
+    if ($Store -is [System.Collections.IDictionary]) {
+      if (-not $Store.Contains($Key)) { return $false }
+      $saved = [string]$Store[$Key]
+    } elseif ($Store.PSObject.Properties[$Key]) {
+      $saved = [string]$Store.PSObject.Properties[$Key].Value
+    } else {
+      return $false
+    }
+  } catch { return $false }
+  return [string]::Equals($saved, [string]$Fingerprint, [System.StringComparison]::Ordinal)
+}
+
+# Reine Rechnung fuer die einmalige Anhebung von MaxRecentLogins. Wert und Merker rein, Wert und
+# Merker raus - ohne Einstellungsdatei, damit die eine Regel, auf die es ankommt ("einmal anheben,
+# danach nie wieder"), ohne Fenster und ohne Anmeldung pruefbar ist.
+#
+# Angehoben wird nur nach OBEN und nur, wenn der Merker noch nicht gesetzt ist. Ein Wert oberhalb
+# der Vorgabe bleibt liegen (jemand hat ihn bewusst hochgesetzt), und ein Wert, den der Benutzer
+# NACH der Anhebung kleiner setzt, bleibt ebenfalls liegen - dann steht der Merker schon.
+function Get-SeededMaxRecentLogins {
+  param(
+    [int]$Current,
+    [bool]$Seeded,
+    [int]$Default = 20
+  )
+  if ($Seeded) { return @{ Value = $Current; Seeded = $true; Raised = $false } }
+  if ($Current -ge $Default) { return @{ Value = $Current; Seeded = $true; Raised = $false } }
+  return @{ Value = $Default; Seeded = $true; Raised = $true; Previous = $Current }
 }
 
 function Remove-ProtectedAppPattern {
@@ -536,10 +641,12 @@ function Load-Settings {
         $script:settings.RecentLogins            = Get-SettingValue -Source $o -Name 'RecentLogins'            -Type StringArray -Default @()
         # Obergrenze 50: die settings.json ist ausdruecklich von Hand bearbeitbar (der Kommentar am
         # Vorgabeblock sagt es), und ein Tippfehler wie 1500 baut ein Menue, das ueber den unteren
-        # Bildschirmrand hinauslaeuft. Die Liste ist reine Bequemlichkeit, ein Rueckfall auf 15
-        # kostet also nichts. KeepVersionCount bekommt bewusst KEINE Obergrenze - warum, steht in
-        # Get-SettingValue.
-        $script:settings.MaxRecentLogins         = Get-SettingValue -Source $o -Name 'MaxRecentLogins'         -Type Int  -Default 15 -Minimum 1 -Maximum 50
+        # Bildschirmrand hinauslaeuft. Die Liste ist reine Bequemlichkeit, ein Rueckfall auf die
+        # Vorgabe kostet also nichts. KeepVersionCount bekommt bewusst KEINE Obergrenze - warum,
+        # steht in Get-SettingValue.
+        $script:settings.MaxRecentLogins         = Get-SettingValue -Source $o -Name 'MaxRecentLogins'         -Type Int  -Default $script:maxRecentLoginsDefault -Minimum 1 -Maximum 50
+        # Fehlt der Merker, ist die Datei aelter als die Anhebung - dann laeuft sie unten einmal.
+        $script:settings.MaxRecentLoginsSeeded   = Get-SettingValue -Source $o -Name 'MaxRecentLoginsSeeded'   -Type Bool -Default $false
 
         # Restore the last user-selected window state. Releases before 0.13.2 saved these
         # values but never loaded them. Migrate only the exact former built-in default;
@@ -604,6 +711,18 @@ function Load-Settings {
           $script:settings.ProductionWarningAcceptedVersion = ""
         }
 
+        # Wie WingetOverrides daneben: PSCustomObject aus dem JSON in eine Hashtable, damit die
+        # Einstellung im Programm schreibbar ist. Nur Zeichenketten werden uebernommen - ein
+        # verstuemmelter Eintrag wird verworfen und die Meldung kommt dann wieder, was der
+        # ungefaehrliche von zwei Ausgaengen ist.
+        if ($o.PSObject.Properties['SuppressedStartupNotices']) {
+          $notices = @{}
+          foreach ($p in $o.SuppressedStartupNotices.PSObject.Properties) {
+            if (-not [string]::IsNullOrWhiteSpace($p.Name)) { $notices[$p.Name] = [string]$p.Value }
+          }
+          $script:settings.SuppressedStartupNotices = $notices
+        } else { $script:settings.SuppressedStartupNotices = @{} }
+
         if ($o.PSObject.Properties['WingetOverrides']) {
           # Convert PSCustomObject to hashtable
           $ht = @{}
@@ -660,6 +779,15 @@ function Load-Settings {
   $script:settings.ProtectedApps = @($seed.Patterns)
   $script:settings.ProtectedAppsSeeded = @($seed.Seeded)
   if (@($seed.Added).Count -gt 0) { $script:protectedAppsSeeded = @($seed.Added) }
+
+  # Dieselbe Stelle und derselbe Grund wie beim Werksschutz darueber: gilt fuer die frische
+  # Installation UND fuer den Bestand, gespeichert wird erst, sobald das Fenster steht.
+  $loginSeed = Get-SeededMaxRecentLogins -Current ([int]$script:settings.MaxRecentLogins) `
+                                         -Seeded ([bool]$script:settings.MaxRecentLoginsSeeded) `
+                                         -Default $script:maxRecentLoginsDefault
+  $script:settings.MaxRecentLogins = [int]$loginSeed.Value
+  $script:settings.MaxRecentLoginsSeeded = [bool]$loginSeed.Seeded
+  if ($loginSeed.Raised) { $script:maxRecentLoginsRaisedFrom = [int]$loginSeed.Previous }
 }
 
 function Save-Settings {
@@ -690,7 +818,7 @@ function Save-Settings {
 function Add-RecentLogin {
   param([string]$Upn)
   if ([string]::IsNullOrWhiteSpace($Upn)) { return }
-  $max = if ([int]$script:settings.MaxRecentLogins -gt 0) { [int]$script:settings.MaxRecentLogins } else { 15 }
+  $max = if ([int]$script:settings.MaxRecentLogins -gt 0) { [int]$script:settings.MaxRecentLogins } else { $script:maxRecentLoginsDefault }
   $script:settings.RecentLogins = @(Add-RecentLoginEntry -Entries $script:settings.RecentLogins -Upn $Upn -Max $max)
   Save-Settings
 }
@@ -706,9 +834,13 @@ function Add-RecentLoginEntry {
   param(
     [AllowNull()][string[]]$Entries,
     [Parameter(Mandatory)][string]$Upn,
-    [int]$Max = 15
+    [int]$Max = $script:maxRecentLoginsDefault
   )
-  if ($Max -lt 1) { $Max = 15 }
+  if ($Max -lt 1) { $Max = [int]$script:maxRecentLoginsDefault }
+  # Immer noch keine gueltige Grenze (die Vorgabe-Variable fehlt, weil die Funktion isoliert
+  # geladen wurde): dann NICHT kappen. Ohne diesen Riegel waere $Max hier 0, und die Schleife unten
+  # loescht damit den ganzen Verlauf - der schlechteste aller Ausgaenge fuer eine fehlende Zahl.
+  if ($Max -lt 1) { $Max = [int]::MaxValue }
   $trimmed = ([string]$Upn).Trim()
   if ([string]::IsNullOrWhiteSpace($trimmed)) { return @($Entries) }
   $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)

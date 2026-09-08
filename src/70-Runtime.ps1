@@ -191,8 +191,15 @@ function Invoke-UiAction {
 }
 
 # Status update function
+# -NoLog ist fuer Zeilen, die sich SEKUENDLICH aendern.
+#
+# Gemessen an einem Protokoll vom 03.09.2026: eine einzige 429-Wartezeit (5 s + 15 s + 30 s)
+# hinterliess ueber 50 Zeilen "The package source is throttling requests ... Retrying 3 in 29
+# seconds...". Das Protokoll wandert in Tickets, und dort verdeckt so ein Countdown alles andere -
+# der GRUND steht ohnehin schon in der Zeile davor ("Package source throttled ...; retry 1/3 after
+# 5s"). Die Statuszeile soll weiterzaehlen, das Protokoll nicht.
 function Update-Status {
-  param([string]$status)
+  param([string]$status, [switch]$NoLog)
   $statusText = if ([string]::IsNullOrWhiteSpace($status)) { "" } else { $status }
   try {
     Invoke-UiAction -Control $script:statusLabel -Action {
@@ -201,6 +208,7 @@ function Update-Status {
   } catch {
     # Keep status updates non-fatal even on cross-thread/disposed-control races
   }
+  if ($NoLog) { return }
   try {
     $safeLogger = Get-Command -Name Write-LogSafe -CommandType Function -ErrorAction SilentlyContinue
     if ($safeLogger) {
@@ -663,13 +671,47 @@ function Confirm-ChangeAction {
 # geschuetzt?", damit Rueckfrage, Protokoll und die tatsaechlich laufende Liste nie auseinandergehen.
 function Split-ProtectedApps {
   param([AllowNull()][AllowEmptyCollection()][object[]]$Apps)
-  $protected = @()
+  $split = Split-AppsByFlag -Apps $Apps -FlagName 'IsProtected'
+  return @{ Protected = @($split.Matching); Unprotected = @($split.Rest) }
+}
+
+# Der gemeinsame Kern: Auswahl in "traegt den Merker" und "Rest" teilen.
+#
+# Einmal geschrieben, weil es zwei Rueckfragen dieser Art gibt (geschuetzte Apps, geratene Paket-Id)
+# und beide dieselbe Falle haben: die Frage, das Protokoll und die tatsaechlich laufende Liste
+# muessen ueber DASSELBE Urteil reden. Zwei Kopien derselben Schleife laufen genau darin auseinander.
+#
+# -ExcludeFlagName laesst Apps aus, die schon ueber eine ANDERE Rueckfrage gelaufen sind: eine
+# geschuetzte App mit geratener Id wurde eben ausdruecklich freigegeben, und eine zweite Frage zur
+# selben App bringt kein neues Urteil - sie lehrt nur, Rueckfragen wegzuklicken.
+function Split-AppsByFlag {
+  param(
+    [AllowNull()][AllowEmptyCollection()][object[]]$Apps,
+    [Parameter(Mandatory)][string]$FlagName,
+    [string]$ExcludeFlagName = ''
+  )
+  $matching = @()
   $rest = @()
   foreach ($a in @($Apps)) {
     if (-not $a) { continue }
-    if ($a.PSObject.Properties['IsProtected'] -and $a.IsProtected) { $protected += $a } else { $rest += $a }
+    $hasFlag = [bool]($a.PSObject.Properties[$FlagName] -and $a.$FlagName)
+    if ($hasFlag -and $ExcludeFlagName) {
+      if ($a.PSObject.Properties[$ExcludeFlagName] -and $a.$ExcludeFlagName) { $hasFlag = $false }
+    }
+    if ($hasFlag) { $matching += $a } else { $rest += $a }
   }
-  return @{ Protected = @($protected); Unprotected = @($rest) }
+  return @{ Matching = @($matching); Rest = @($rest) }
+}
+
+# Apps, deren Paket-Id aus einem AEHNLICHKEITSTREFFER auf den Anzeigenamen stammt - kein Override,
+# keine WinTuner-Marke, kein exakter Name (siehe Resolve-WingetIdForApp -Detailed).
+#
+# Geschuetzte Apps bleiben hier aussen vor: fuer die ist die Frage schon gestellt worden, und zwar
+# die ernstere.
+function Split-FuzzyMatchedApps {
+  param([AllowNull()][AllowEmptyCollection()][object[]]$Apps)
+  $split = Split-AppsByFlag -Apps $Apps -FlagName 'PackageIdFuzzy' -ExcludeFlagName 'IsProtected'
+  return @{ Fuzzy = @($split.Matching); Rest = @($split.Rest) }
 }
 
 # Was aus der Antwort des Benutzers folgt - als reine Rechnung, ohne Fenster.
@@ -698,6 +740,79 @@ function Resolve-ProtectedRunChoice {
     }
     default { return @{ Proceed = $false; Apps = @(); Skipped = @(); Reason = 'cancel' } }
   }
+}
+
+# Dasselbe fuer die geratene Paket-Id. Getrennt von Resolve-ProtectedRunChoice, weil die
+# ausgelassene Menge eine andere ist (geschuetzte Apps sind hier ausgenommen) - aber mit derselben
+# Bedeutung von 'all', 'skip' und 'cancel' und demselben Sonderfall 'empty'.
+function Resolve-FuzzyRunChoice {
+  param(
+    [AllowNull()][AllowEmptyCollection()][object[]]$Apps,
+    [ValidateSet('all', 'skip', 'cancel')][string]$Choice
+  )
+  $split = Split-FuzzyMatchedApps -Apps $Apps
+  switch ($Choice) {
+    'all' { return @{ Proceed = $true; Apps = @($Apps); Skipped = @(); Reason = 'all' } }
+    'skip' {
+      $kept = @($split.Rest)
+      if ($kept.Count -eq 0) {
+        return @{ Proceed = $false; Apps = @(); Skipped = @($split.Fuzzy); Reason = 'empty' }
+      }
+      return @{ Proceed = $true; Apps = $kept; Skipped = @($split.Fuzzy); Reason = 'skip' }
+    }
+    default { return @{ Proceed = $false; Apps = @(); Skipped = @(); Reason = 'cancel' } }
+  }
+}
+
+# Die zweite Rueckfrage, die "Rueckfragen abschalten" NICHT abschalten darf.
+#
+# Der Fall: eine App, deren WinGet-Id die Anwendung aus dem ANZEIGENAMEN geraten hat (Aehnlichkeit
+# >= 80, 15 Punkte Abstand zum Zweiten). Trifft die Vermutung daneben, baut der Lauf das falsche
+# Produkt, loest die vorhandene App damit ab und zieht ihre Zuweisungen mit - bei einer selbst
+# paketierten App ist das der Totalverlust, den docs/PATTERNS.md beschreibt. Mit
+# SuppressChangeConfirmations lief genau das bisher ohne einen einzigen Klick durch: geschuetzte
+# Apps fragten nach, die allgemeine Rueckfrage blieb stumm, und eine unmarkierte App mit geratener
+# Id fiel durch beide Netze.
+#
+# Ohne geratene Id kostet der Normalfall keinen Klick. Die Absicherung an der Strenge der
+# Id-Auflaesung bleibt unveraendert - diese Frage kommt zusaetzlich, nicht statt ihrer.
+function Confirm-FuzzyMatchedAppsInRun {
+  param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Apps)
+  $split = Split-FuzzyMatchedApps -Apps $Apps
+  $fuzzy = @($split.Fuzzy)
+  if ($fuzzy.Count -eq 0) {
+    return @{ Proceed = $true; Apps = @($Apps); Skipped = @(); Reason = 'none' }
+  }
+  # Namentlich MIT der geratenen Id ins Protokoll: nach einem Fehlgriff ist genau das die Frage -
+  # welches Paket hat er fuer diese App genommen?
+  $preview = (@($fuzzy | Select-Object -First 15 | ForEach-Object {
+    "- {0}: {1} -> {2}   [{3}]" -f [string]$_.Name, [string]$_.CurrentVersion, [string]$_.LatestVersion, [string]$_.PackageId
+  }) -join "`r`n")
+  if ($fuzzy.Count -gt 15) { $preview += "`r`n- ..." }
+  Write-Log ("Update run contains {0} app(s) whose WinGet id was GUESSED from the display name, asking for an explicit confirmation regardless of the suppression setting: {1}" -f `
+    $fuzzy.Count, ((@($fuzzy | ForEach-Object { "{0} -> {1}" -f [string]$_.Name, [string]$_.PackageId })) -join ', '))
+
+  $choice = Show-ProtectedRunDialog -Count $fuzzy.Count -Preview $preview `
+    -TitleKey 'FuzzyRunConfirmTitle' -TextKey 'FuzzyRunConfirmDialog' `
+    -SkipButtonKey 'FuzzyRunSkipButton' -AllButtonKey 'FuzzyRunAllButton'
+  $result = Resolve-FuzzyRunChoice -Apps $Apps -Choice $choice
+
+  switch ($result.Reason) {
+    'all' {
+      Write-Log ("Guessed package ids confirmed for this run: {0} app(s) will be updated from an id that was matched by name only." -f $fuzzy.Count)
+    }
+    'skip' {
+      Write-Log ("Apps with a guessed package id left out of this run ({0}): {1}. Continuing with {2} app(s)." -f `
+        $fuzzy.Count, ((@($fuzzy | ForEach-Object { [string]$_.Name })) -join ', '), @($result.Apps).Count)
+    }
+    'empty' {
+      Write-Log 'Only apps with a guessed package id were selected and the user chose to leave them out; nothing was built or uploaded.'
+    }
+    default {
+      Write-Log 'Update run canceled at the guessed-package-id confirmation; nothing was built or uploaded.'
+    }
+  }
+  return $result
 }
 
 # Ohne geschuetzte App kostet der Normalfall keinen Klick: dann wird nichts gefragt und die Liste
@@ -768,16 +883,48 @@ function Test-UnattendedRun {
 #
 # Die Regel dahinter steht in tests/StaticChecks.ps1: vor dem Smoke-Tor darf auf der obersten Ebene
 # keine MessageBox mehr direkt aufgerufen werden.
+# -SuppressKey macht die Meldung ausblendbar: der Dialog bekommt dann "Diese Meldung nicht mehr
+# anzeigen", und das Haekchen gilt fuer GENAU DIESEN Inhalt (-SuppressFingerprint). Aendert sich
+# der Inhalt - ein anderer fehlender Parameter, eine andere alte Modulversion -, ist das eine neue
+# Aussage und die Meldung kommt wieder.
+#
+# Bewusst NICHT ausblendbar ist der gescheiterte Modulimport: danach ist alles ausser den
+# Einstellungen abgeschaltet, und diese Meldung ist die einzige Stelle, an der jemand erfaehrt,
+# warum. Eine Warnung, die man ausblenden kann, muss ohne sie noch benutzbar sein.
+#
+# Ins Protokoll geht die Meldung IMMER, auch die ausgeblendete: sonst waere ein Haekchen von heute
+# in einem Ticket von morgen nicht mehr nachvollziehbar.
 function Show-StartupDialog {
   param(
     [Parameter(Mandatory)][string]$Text,
     [Parameter(Mandatory)][string]$Title,
-    [System.Windows.Forms.MessageBoxIcon]$Icon = [System.Windows.Forms.MessageBoxIcon]::Information
+    [System.Windows.Forms.MessageBoxIcon]$Icon = [System.Windows.Forms.MessageBoxIcon]::Information,
+    [string]$SuppressKey = '',
+    [AllowEmptyString()][string]$SuppressFingerprint = ''
   )
   if (Test-UnattendedRun) {
     # Auf die Standardausgabe, nicht auf den Fehlerkanal: der Smoke-Test wertet eine nicht leere
     # Fehlerausgabe als misslungenen Start.
     Write-Host ("STARTUP DIALOG [{0}] {1}" -f $Title, (($Text -replace '\s+', ' ').Trim()))
+    return
+  }
+  if ($SuppressKey) {
+    if (Test-StartupNoticeSuppressed -Store $script:settings.SuppressedStartupNotices `
+        -Key $SuppressKey -Fingerprint $SuppressFingerprint) {
+      Write-Log ("Startup notice '{0}' was hidden by the user and is only in the log: {1}" -f `
+        $SuppressKey, (($Text -replace '\s+', ' ').Trim()))
+      return
+    }
+    # Ohne -Icon: der eigene Dialog zeigt kein Systemsymbol. Der Ernst der Lage steht im Text, und
+    # ein nachgebautes Symbol waere Zierrat, der in sieben Designs nachgezogen werden muesste.
+    $hide = Show-StartupNoticeDialog -Text $Text -Title $Title
+    if ($hide) {
+      if ($null -eq $script:settings.SuppressedStartupNotices) { $script:settings.SuppressedStartupNotices = @{} }
+      $script:settings.SuppressedStartupNotices[$SuppressKey] = [string]$SuppressFingerprint
+      Save-Settings
+      Write-Log ("Startup notice '{0}' will stay hidden while it says the same thing (fingerprint '{1}'); it can be re-enabled under Settings." -f `
+        $SuppressKey, $SuppressFingerprint)
+    }
     return
   }
   [void][System.Windows.Forms.MessageBox]::Show(

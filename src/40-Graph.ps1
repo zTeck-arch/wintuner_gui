@@ -189,7 +189,8 @@ function Invoke-GraphRest {
       # Nachrichtenschleife - sonst friert das Fenster fuer die Dauer der Pause ein.
       for ($remaining = $plan.WaitSeconds; $remaining -gt 0; $remaining--) {
         if ($script:cancelBatch) { throw $err }
-        try { Update-Status ((Get-UiString 'RateLimitRetryStatus') -f $attempt, $remaining) } catch { }
+        # -NoLog: sekuendlich, siehe Update-Status. Der Grund steht in der Zeile darueber.
+        try { Update-Status ((Get-UiString 'RateLimitRetryStatus') -f $attempt, $remaining) -NoLog } catch { }
         try { [System.Windows.Forms.Application]::DoEvents() } catch { }
         Start-Sleep -Seconds 1
       }
@@ -425,6 +426,12 @@ function Group-UpdateCandidates {
       # im Lauf vom 28.08.2026 traf das jede der vier angezeigten Zeilen.
       IsUnmanaged           = [bool]@($members | Where-Object { $_.PSObject.Properties['IsUnmanaged'] -and $_.IsUnmanaged }).Count
       PackageIdFromNotes    = [bool]@($members | Where-Object { $_.PSObject.Properties['PackageIdFromNotes'] -and $_.PackageIdFromNotes }).Count
+      # Aus demselben Grund mitgenommen, und mit demselben "ein Mitglied genuegt": die Gruppe wird zu
+      # EINEM Ziel zusammengefasst, also darf die Rueckfrage nicht an einem Mitglied vorbeigehen,
+      # dessen Id geraten ist. Ohne diese Zeile ginge der Merker genau dort verloren, wo laut
+      # docs/PATTERNS.md schon IsUnmanaged, IsProtected und PackageIdFromNotes verlorengingen.
+      PackageIdFuzzy        = [bool]@($members | Where-Object { $_.PSObject.Properties['PackageIdFuzzy'] -and $_.PackageIdFuzzy }).Count
+      PackageIdSource       = [string]($members | Where-Object { $_.PSObject.Properties['PackageIdSource'] -and $_.PackageIdSource } | Select-Object -First 1 -ExpandProperty PackageIdSource)
       # Schutz gilt fuer die ganze Gruppe, sobald ein Vorgaenger geschuetzt ist: der Lauf fasst sie
       # zu einem Ziel zusammen, also darf die Rueckfrage nicht an einem Mitglied vorbeigehen.
       IsProtected           = [bool]@($members | Where-Object { $_.PSObject.Properties['IsProtected'] -and $_.IsProtected }).Count

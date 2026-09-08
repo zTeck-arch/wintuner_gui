@@ -173,22 +173,22 @@ Describe 'Get-SettingValue: Zahlengrenzen' {
   # Die settings.json ist ausdruecklich von Hand bearbeitbar (der Kommentar an MaxRecentLogins sagt
   # es), also ist ein absurder Wert ein zu erwartender Eingabefall und kein Ausnahmezustand.
   It 'nimmt einen Wert innerhalb der Grenzen' {
-    $src = [pscustomobject]@{ MaxRecentLogins = 20 }
-    Get-SettingValue -Source $src -Name 'MaxRecentLogins' -Type Int -Default 15 -Minimum 1 -Maximum 50 | Should -Be 20
+    $src = [pscustomobject]@{ MaxRecentLogins = 30 }
+    Get-SettingValue -Source $src -Name 'MaxRecentLogins' -Type Int -Default 20 -Minimum 1 -Maximum 50 | Should -Be 30
   }
   It 'faellt bei einem Wert ueber der Obergrenze auf die Vorgabe zurueck' {
     $src = [pscustomobject]@{ MaxRecentLogins = 1500 }
-    Get-SettingValue -Source $src -Name 'MaxRecentLogins' -Type Int -Default 15 -Minimum 1 -Maximum 50 | Should -Be 15
+    Get-SettingValue -Source $src -Name 'MaxRecentLogins' -Type Int -Default 20 -Minimum 1 -Maximum 50 | Should -Be 20
   }
   It 'faellt bei einem Wert unter der Untergrenze auf die Vorgabe zurueck' {
     $src = [pscustomobject]@{ MaxRecentLogins = 0 }
-    Get-SettingValue -Source $src -Name 'MaxRecentLogins' -Type Int -Default 15 -Minimum 1 -Maximum 50 | Should -Be 15
+    Get-SettingValue -Source $src -Name 'MaxRecentLogins' -Type Int -Default 20 -Minimum 1 -Maximum 50 | Should -Be 20
   }
   It 'nimmt genau die Grenzwerte noch an' {
     $low = [pscustomobject]@{ MaxRecentLogins = 1 }
     $high = [pscustomobject]@{ MaxRecentLogins = 50 }
-    Get-SettingValue -Source $low -Name 'MaxRecentLogins' -Type Int -Default 15 -Minimum 1 -Maximum 50 | Should -Be 1
-    Get-SettingValue -Source $high -Name 'MaxRecentLogins' -Type Int -Default 15 -Minimum 1 -Maximum 50 | Should -Be 50
+    Get-SettingValue -Source $low -Name 'MaxRecentLogins' -Type Int -Default 20 -Minimum 1 -Maximum 50 | Should -Be 1
+    Get-SettingValue -Source $high -Name 'MaxRecentLogins' -Type Int -Default 20 -Minimum 1 -Maximum 50 | Should -Be 50
   }
   # Der Grund, warum KeepVersionCount bewusst KEINE Obergrenze hat: ein hoher Wert bewahrt dort nur
   # mehr Versionen (harmlose Richtung), ein Rueckfall auf die Vorgabe 2 wuerde die Versionen LOESCHEN,

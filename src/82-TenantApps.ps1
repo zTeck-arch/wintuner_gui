@@ -217,7 +217,9 @@ $tenantListView.Location = New-Object System.Drawing.Point(14, 58)
 $tenantListView.Size = New-Object System.Drawing.Size(698, 300)
 $tenantListView.View = [System.Windows.Forms.View]::Details
 $tenantListView.FullRowSelect = $true
-$tenantListView.MultiSelect = $false
+# Mehrfachauswahl, seit es das Loeschen gibt: eine App nach der anderen zu loeschen heisst, die
+# Rueckfrage je App zu bestaetigen - und genau daran gewoehnt man sich, sie wegzuklicken.
+$tenantListView.MultiSelect = $true
 $tenantListView.HideSelection = $false
 $tenantListView.HeaderStyle = [System.Windows.Forms.ColumnHeaderStyle]::Nonclickable
 [void]$tenantListView.Columns.Add((Get-UiString 'TenantColName'), 300)
@@ -304,9 +306,162 @@ $tenantBulkEditButton.Add_Click({
   try { Show-AppSettingsDialog } catch { Write-Log ("App settings dialog failed: {0}" -f $_.Exception.Message) }
 })
 
+# Entscheidet, WAS von einer Auswahl geloescht werden darf. Rein und ohne Fenster pruefbar, weil an
+# dieser Regel eine unumkehrbare Aenderung im Kundentenant haengt.
+#
+# Zwei Klassen werden ausgelassen, und beide aus einem Grund, der schon fuer die Bereinigung gilt:
+#   * GESCHUETZT - selbst paketierte Apps. Sie hier zu loeschen waere derselbe Totalverlust, den die
+#     Schutzliste verhindern soll, nur mit einem Klick statt mit einem Lauf. Wer eine geschuetzte App
+#     wirklich loeschen will, hebt zuerst den Schutz auf; das ist eine bewusste zweite Handlung.
+#   * UNBEKANNT - Intune hat auf eine der beiden Sonden nicht geantwortet. "Ich weiss es nicht" ist
+#     keine Erlaubnis (dieselbe Regel wie beim Loeschen abgeloester Apps).
+# In BENUTZUNG (zugewiesen oder erfolgreich installiert) wird NICHT ausgelassen - das ist eine
+# ausdrueckliche Auswahl des Benutzers -, aber es steht in der Rueckfrage.
+function Get-TenantAppDeletePlan {
+  param(
+    [AllowNull()][object[]]$Apps,
+    [AllowNull()][object[]]$ProtectedPatterns
+  )
+  $plan = @{ Delete = [System.Collections.Generic.List[object]]::new()
+             Excluded = [System.Collections.Generic.List[object]]::new()
+             InUse = [System.Collections.Generic.List[object]]::new() }
+  foreach ($app in @($Apps)) {
+    if (-not $app -or [string]::IsNullOrWhiteSpace([string]$app.GraphId)) { continue }
+    if (Test-IsProtectedApp -Name ([string]$app.Name) -Patterns $ProtectedPatterns) {
+      $plan.Excluded.Add([pscustomobject]@{ App = $app; Reason = 'protected' })
+      continue
+    }
+    if (-not $app.ProbeSucceeded) {
+      $plan.Excluded.Add([pscustomobject]@{ App = $app; Reason = 'state unknown' })
+      continue
+    }
+    $plan.Delete.Add($app)
+    if ($app.HasAssignments -or $app.HasInstallations) { $plan.InUse.Add($app) }
+  }
+  return @{ Delete = @($plan.Delete.ToArray()); Excluded = @($plan.Excluded.ToArray()); InUse = @($plan.InUse.ToArray()) }
+}
+
+$tenantDeleteButton = New-Object System.Windows.Forms.Button
+$tenantDeleteButton.Tag = 'btn-secondary'
+$tenantDeleteButton.Text = Get-UiString 'TenantAppDeleteButton'
+$tenantDeleteButton.Location = New-Object System.Drawing.Point(14, 550)
+$tenantDeleteButton.Size = New-Object System.Drawing.Size(260, 32)
+$tenantDeleteButton.Enabled = $false
+$cardTenant.Controls.Add($tenantDeleteButton)
+try { if ($toolTip) { $toolTip.SetToolTip($tenantDeleteButton, (Get-UiString 'TtTenantAppDelete')) } } catch { Write-LogDebug 'tenant delete tooltip' }
+$tenantDeleteButton.Add_Click({
+  if (-not (Test-Connected)) { return }
+  if (Test-UiBusy) { return }
+  $selected = @($tenantListView.SelectedItems | ForEach-Object { $_.Tag } | Where-Object { $_ })
+  if ($selected.Count -eq 0) { Update-Status (Get-UiString 'TenantAppDeleteNoSelectionStatus'); return }
+
+  Show-Progress -Total ([Math]::Max(1, $selected.Count))
+  try {
+    # Erst FRAGEN, was Intune ueber jede App weiss - die Rueckfrage soll den Zustand nennen, nicht
+    # der Benutzer ihn erraten. Die beiden Sonden fragen bis zu drei Endpunkte ab, deshalb die
+    # Statuszeile je App.
+    $checked = [System.Collections.Generic.List[object]]::new()
+    $index = 0
+    foreach ($app in $selected) {
+      $index++
+      Set-ProgressValue ($index - 1)
+      Update-Status ((Get-UiString 'TenantAppDeleteProbingStatus') -f [string]$app.Name, $index, $selected.Count)
+      [System.Windows.Forms.Application]::DoEvents()
+      $assignmentProbe = Get-AppAssignmentProbe -AppId ([string]$app.GraphId) -AppName ([string]$app.Name)
+      $installProbe = Get-AppInstallationProbe -AppId ([string]$app.GraphId) -AppName ([string]$app.Name)
+      $checked.Add([pscustomobject]@{
+        Name           = [string]$app.Name
+        CurrentVersion = [string]$app.CurrentVersion
+        GraphId        = [string]$app.GraphId
+        ProbeSucceeded = ($assignmentProbe.Succeeded -and $installProbe.Succeeded)
+        HasAssignments = [bool]$assignmentProbe.HasAssignments
+        HasInstallations = [bool]$installProbe.HasInstallations
+      })
+    }
+
+    $plan = Get-TenantAppDeletePlan -Apps @($checked.ToArray()) -ProtectedPatterns $script:settings.ProtectedApps
+    $describe = { param($a) "  - {0} {1} ({2})" -f $a.Name, $a.CurrentVersion, $a.GraphId }
+    if (@($plan.Delete).Count -eq 0) {
+      foreach ($x in @($plan.Excluded)) {
+        Write-Log ("Delete apps: {0} {1} ({2}) was NOT deleted - {3}." -f $x.App.Name, $x.App.CurrentVersion, $x.App.GraphId, $x.Reason)
+      }
+      Update-Status (Get-UiString 'TenantAppDeleteNothingStatus')
+      return
+    }
+
+    # Die Bloecke werden hier zusammengesetzt, nicht im Textbaustein: mit zwei Platzhaltern
+    # hinterliess ein LEERER Block eine haengende Leerzeile, und die Warnueberschrift klebte ohne
+    # Abstand an der Liste darueber. Gemessen an der ausgerendeten Rueckfrage in beiden Sprachen
+    # (Wegwerf-Probe vom 03.09.2026), nicht im Kopf durchgespielt.
+    $blocks = [System.Collections.Generic.List[string]]::new()
+    $blocks.Add(((@($plan.Delete) | ForEach-Object { & $describe $_ }) -join "`r`n"))
+    if (@($plan.InUse).Count -gt 0) {
+      $blocks.Add((((Get-UiString 'TenantAppDeleteInUseWarning') -f ((@($plan.InUse) | ForEach-Object {
+        "  - {0} {1}: assignments={2}, successful installations={3}" -f $_.Name, $_.CurrentVersion, $_.HasAssignments, $_.HasInstallations
+      }) -join "`r`n")).Trim()))
+    }
+    if (@($plan.Excluded).Count -gt 0) {
+      $blocks.Add((((Get-UiString 'TenantAppDeleteExcludedNote') -f ((@($plan.Excluded) | ForEach-Object {
+        "  - {0} {1}: {2}" -f $_.App.Name, $_.App.CurrentVersion, $_.Reason
+      }) -join "`r`n")).Trim()))
+    }
+    $detailText = ($blocks -join "`r`n`r`n")
+
+    # Diese Rueckfrage haengt NICHT an SuppressChangeConfirmations - eine Loeschung ist von hier aus
+    # nicht rueckholbar. Vorgabeknopf ist "Nein".
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+      ((Get-UiString 'TenantAppDeleteConfirmDialog') -f @($plan.Delete).Count, $detailText),
+      (Get-UiString 'TenantAppDeleteConfirmTitle'),
+      [System.Windows.Forms.MessageBoxButtons]::YesNo,
+      [System.Windows.Forms.MessageBoxIcon]::Warning,
+      [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
+      Write-Log ("Delete apps: canceled by user; {0} app(s) were selected." -f @($plan.Delete).Count)
+      Update-Status (Get-UiString 'TenantAppDeleteCanceledStatus')
+      return
+    }
+
+    $removed = 0; $failed = 0
+    $done = 0
+    foreach ($app in @($plan.Delete)) {
+      Set-ProgressValue $done
+      $done++
+      Update-Status ((Get-UiString 'TenantAppDeleteProbingStatus') -f $app.Name, $done, @($plan.Delete).Count)
+      [System.Windows.Forms.Application]::DoEvents()
+      Write-Log ("Delete apps: removing {0} {1} ({2}); assignments={3}, successful installations={4}." -f
+        $app.Name, $app.CurrentVersion, $app.GraphId, $app.HasAssignments, $app.HasInstallations)
+      # Derselbe Weg wie jede andere Loeschung: Sicherung des Geltungsbereichs, Abhaengen einer
+      # Abloesebeziehung falls Intune sie verlangt, Eintrag im Leistungsnachweis.
+      if (Remove-AppWithUnlinkFallback -GraphId $app.GraphId -AppName $app.Name -Version $app.CurrentVersion) {
+        $removed++
+      } else {
+        $failed++
+      }
+    }
+    foreach ($x in @($plan.Excluded)) {
+      Write-Log ("Delete apps: {0} {1} ({2}) was NOT deleted - {3}." -f $x.App.Name, $x.App.CurrentVersion, $x.App.GraphId, $x.Reason)
+    }
+    Write-Log ("Delete apps finished: {0} deleted, {1} left alone, {2} failed." -f $removed, @($plan.Excluded).Count, $failed)
+    Update-Status ((Get-UiString 'TenantAppDeleteDoneStatus') -f $removed, @($plan.Excluded).Count, $failed)
+    # Das Inventar ist jetzt veraltet - sonst zeigt die Liste geloeschte Apps weiter an.
+    try { Clear-Win32AppsCache } catch { }
+    try {
+      $script:tenantApps = @(Get-TenantAllApps)
+      Update-TenantAppsList -Filter $tenantFilterBox.Text
+    } catch {
+      Write-Log ("Delete apps: the list could not be reloaded afterwards ({0}); press '{1}' to refresh it." -f $_.Exception.Message, (Get-UiString 'TenantAppsLoadButton'))
+    }
+  } catch {
+    Write-Log ("Delete apps failed: {0}" -f (Format-ErrorDetail -ErrorRecord $_))
+    Update-Status ((Get-UiString 'TenantAppDeleteDoneStatus') -f 0, 0, @($selected).Count)
+  } finally {
+    Hide-Progress
+  }
+})
+
 $tenantHintLabel = New-Object System.Windows.Forms.Label
 $tenantHintLabel.Text = Get-UiString 'TenantAppsHint'
-$tenantHintLabel.Location = New-Object System.Drawing.Point(14, 552)
+$tenantHintLabel.Location = New-Object System.Drawing.Point(14, 592)
 $tenantHintLabel.Size = New-Object System.Drawing.Size(698, 40)
 $cardTenant.Controls.Add($tenantHintLabel)
 
@@ -359,8 +514,12 @@ $tenantListView.Add_SelectedIndexChanged({
     $tenantDetailBox.Text = ''
     $tenantEditButton.Enabled = $false
     $tenantAssignButton.Enabled = $false
+    $tenantDeleteButton.Enabled = $false
     return
   }
+  # Loeschen gilt fuer die GANZE Auswahl, die anderen zwei Knoepfe fuer die erste Zeile - deshalb
+  # haengt nur dieser hier nicht daran, dass genau eine Zeile ausgewaehlt ist.
+  $tenantDeleteButton.Enabled = $true
   $app = $tenantListView.SelectedItems[0].Tag
   $tenantEditButton.Enabled = $true
   $tenantAssignButton.Enabled = $true
@@ -807,7 +966,10 @@ function Update-TenantAppsLayout {
       $labelH = [Math]::Max(18, $tenantDetailLabel.Height)
       $buttonH = [Math]::Max(28, $tenantAssignButton.Height)
       $hintH = [Math]::Max(20, $tenantHintLabel.Height)
-      $below = ($labelH + 4) + $tenantDetailBox.Height + 12 + $buttonH + 10 + $hintH + 16
+      # ZWEI Knopfreihen seit dem Loeschen: die drei bisherigen, darunter der Loeschknopf allein.
+      # Eine vierte Spalte in derselben Reihe passt bei 1146 px Fensterbreite nicht mehr - die
+      # Layout-Probe hätte die Ueberlappung gefunden, aber besser gar nicht erst bauen.
+      $below = ($labelH + 4) + $tenantDetailBox.Height + 12 + $buttonH + 8 + $buttonH + 10 + $hintH + 16
       $listH = $cardTenant.ClientSize.Height - 58 - 30 - $below
       if ($listH -lt 150) { $listH = 150 }
       $tenantListView.Height = $listH
@@ -819,7 +981,11 @@ function Update-TenantAppsLayout {
       foreach ($b in @($tenantAssignButton, $tenantEditButton, $tenantBulkEditButton)) {
         if ($b) { $b.Top = $tenantDetailBox.Bottom + 12 }
       }
-      if ($tenantHintLabel) { $tenantHintLabel.Top = $tenantAssignButton.Bottom + 10 }
+      if ($tenantDeleteButton) { $tenantDeleteButton.Top = $tenantAssignButton.Bottom + 8 }
+      if ($tenantHintLabel) {
+        $anchorBottom = if ($tenantDeleteButton) { $tenantDeleteButton.Bottom } else { $tenantAssignButton.Bottom }
+        $tenantHintLabel.Top = $anchorBottom + 10
+      }
     }
     # Der Hinweis bekommt die volle Breite - er steht jetzt unter der Knopfreihe, nicht daneben.
     $tenantHintLabel.Width = $inner

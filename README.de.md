@@ -112,7 +112,7 @@ Deutsche und englische Oberfläche, mehrere Darstellungsmodi sowie lokal gespeic
 | Microsoft Store | Microsoft Store und Intune | Durchsucht den Store-Katalog, zeigt Treffer zur Auswahl, stellt nach Bestätigung bereit, dazu eine Übersicht bereits bereitgestellter Store-Apps |
 | Updates | Intune, WinGet und WinTuner-Index | Vergleicht Versionen, erstellt oder verwendet eine Ziel-App und übergibt auf Wunsch die Zuweisungen. Enthält auch die Versionsbereinigung, die alte App-Objekte nur löscht, wenn die konfigurierten Sicherheitsbedingungen erfüllt sind |
 | Erkannte Apps | Intune-Inventar und WinGet | Ordnet installierte Software möglichen WinGet-Paketen zu. Der Scan selbst ist nur lesend |
-| Alle Tenant-Apps | Intune | Listet jedes App-Objekt jeden Typs. Zuweisungen werden gelesen und können geändert werden, was nach Intune schreibt |
+| Alle Tenant-Apps | Intune | Listet jedes App-Objekt jeden Typs. Zuweisungen werden gelesen und können geändert werden, was nach Intune schreibt. Ausgewählte Apps lassen sich von hier **löschen** - endgültig, nach einer Rückfrage, die jede App nennt und sagt, welche davon zugewiesen oder installiert sind |
 | Eigene Installer | Lokale Dateien und Intune | Paketiert beliebige EXE oder MSI lokal zu `.intunewin`. Das Ersetzen des Inhalts einer vorhandenen App schreibt nach Intune |
 | Lokale Pakete | WinGet und lokaler Paketordner | Pflegt Paketkopien auf diesem Rechner: gemerkte Pakete prüfen und neuere herunterladen. Legt nichts in Intune an |
 | Einstellungen | Lokale Einstellungsdatei und Intune | Paket- und Protokollordner, Sprache, Darstellung, Aufräum-Optionen und gespeicherte Gruppen-Favoriten. Hier wird der Tenant nicht selbst verändert; die Optionen entscheiden, was die anderen Bereiche dürfen |
@@ -130,6 +130,7 @@ Die Oberfläche installiert keine Software auf Endgeräten. Sie erstellt und ver
 - Kennwörter, Token und andere Geheimnisse werden weder im Skript noch in der Einstellungsdatei gespeichert. Die Authentifizierung läuft über Microsoft Entra ID und Microsoft Graph.
 - Einstellungen, zuletzt verwendete Kontonamen und Protokolle bleiben lokal, im Windows-Benutzerprofil oder neben der Anwendung.
 - Pakete entstehen standardmäßig unter `%LOCALAPPDATA%\WinTunerGUI\Packages`. Dieses Verzeichnis gehört dem angemeldeten Benutzer. Ein gemeinsam beschreibbarer Ort wie `C:\Temp` ist bewusst nicht mehr voreingestellt, weil dort jeder Benutzer des Rechners ein fertiges Paket zwischen Erstellung und Upload verändern könnte.
+- Das Löschen unter **Alle Tenant-Apps** ist endgültig und von hier aus nicht rückholbar. Jede ausgewählte App wird vorher auf Zuweisungen und erfolgreiche Installationen geprüft, und die Antwort ist Teil der Rückfrage. Zwei Klassen werden dort nie gelöscht und stattdessen benannt: Apps auf der **Schutzliste** (wer es wirklich meint, hebt zuerst den Schutz auf) und Apps, deren Zustand Intune nicht gemeldet hat - ein unbekannter Zustand ist keine Erlaubnis. Diese Rückfrage kommt immer, auch bei abgeschalteten Bestätigungen.
 - Das Ändern von Zuweisungen unter **Alle Tenant-Apps** ersetzt immer den vollständigen Zuweisungssatz einer App, denn Microsoft Graph kennt keine Teilaktualisierung. Der Dialog zeigt die zu schreibende Liste vorher an und fragt nach.
 - Das Ersetzen des Inhalts einer vorhandenen App verändert **nicht** deren Erkennungs- und Anforderungsregeln. Sie müssen zur neuen Version passen und sind vorher zu prüfen.
 - Die Selbstaktualisierung akzeptiert nur Releases mit passendem Skript-Asset, SHA-256-Prüfsumme und plausibler interner Versionsnummer. Vor dem Austausch wird eine Sicherung angelegt. Nach der Bestätigung läuft der Austausch ohne weitere Rückfragen, die beiden jüngsten Sicherungen bleiben erhalten.
@@ -187,9 +188,9 @@ Bei einem Werkzeug, das Kundentenants verwaltet, ist ein liegengebliebener Zwisc
 
 ### Wie viele Anmeldeadressen gemerkt werden
 
-Das Auswahlfeld neben dem Adressfeld bietet die zuletzt benutzten Adressen an, die neueste zuerst. Gemerkt werden standardmäßig **15**; alles darüber fällt hinten heraus. Die Liste ist reine Bequemlichkeit — sie schlägt eine Adresse vor, sie hält keine Sitzung offen.
+Das Auswahlfeld neben dem Adressfeld bietet die zuletzt benutzten Adressen an, die neueste zuerst. Gemerkt werden standardmäßig **20**; alles darüber fällt hinten heraus. Die Liste ist reine Bequemlichkeit — sie schlägt eine Adresse vor, sie hält keine Sitzung offen.
 
-Wer mehr Kunden betreut, setzt `MaxRecentLogins` in der Einstellungsdatei hoch (1 bis 50, alles außerhalb fällt auf 15 zurück):
+Wer mehr Kunden betreut, setzt `MaxRecentLogins` in der Einstellungsdatei hoch (1 bis 50, alles außerhalb fällt auf 20 zurück):
 
 ```text
 %APPDATA%\WinTunerGUI\settings.json
@@ -199,12 +200,12 @@ Wer mehr Kunden betreut, setzt `MaxRecentLogins` in der Einstellungsdatei hoch (
 # vorher die Anwendung schliessen - sie schreibt diese Datei beim Beenden
 $p = "$env:APPDATA\WinTunerGUI\settings.json"
 $s = Get-Content -Raw -LiteralPath $p | ConvertFrom-Json
-$s.MaxRecentLogins = 20
+$s.MaxRecentLogins = 30
 $s | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $p -Encoding utf8
 ```
 
 > [!NOTE]
-> In einer länger genutzten Installation kann dort noch `MaxRecentLogins = 8` stehen. Das war in früheren Versionen die Vorgabe, und eine bestehende Einstellungsdatei behält ihren Wert — eine erhöhte Vorgabe gilt nur für neue Installationen. Wenn die Liste bei acht Einträgen stehenbleibt, ist das der Grund.
+> In einer länger genutzten Installation stand dort noch `MaxRecentLogins = 8` oder `15` — die Vorgabe früherer Versionen, denn eine bestehende Einstellungsdatei behält ihren Wert. Seit 0.18.1 wird ein solcher Wert beim ersten Start **einmalig** auf die heutigen 20 angehoben; das Protokoll nennt den alten Wert. Einmalig heißt einmalig: wer die Liste danach bewusst kürzer setzt, behält seinen Wert. Ein Wert **über** 20 bleibt unangetastet.
 
 ---
 
@@ -220,6 +221,46 @@ $s | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $p -Encoding utf8
 
 > [!NOTE]
 > Lizenz- und Berechtigungsanforderungen beziehen sich immer auf den gewählten **Ziel-Tenant**. Maßgeblich ist das Konto, mit dem angemeldet wird, und dessen Berechtigungen in genau dem Tenant, dessen Intune-Apps verwaltet werden sollen.
+
+### Das WinTuner-Modul: aktuell halten, und was der Start prüft
+
+Alles, was diese Oberfläche tut — paketieren, hochladen, ablösen, löschen, anmelden —, läuft über das fremde PowerShell-Modul **`WinTuner`** (die `*-Wt*`-Cmdlets). Dessen Version ist damit genauso wichtig wie die dieser Anwendung.
+
+**Aktuell halten.** Das Modul benennt zwischen Versionen Parameter um, und eine Umbenennung zeigt sich als Fehler genau in der Funktion, die ihn benutzt:
+
+```powershell
+Install-Module WinTuner -Scope CurrentUser -Force    # oder: Update-Module WinTuner -Scope CurrentUser
+Get-Module WinTuner -ListAvailable | Select-Object Version, ModuleBase
+```
+
+**Was der Start prüft, und was er sagt:**
+
+| Prüfung | Meldung |
+|---|---|
+| Modul installiert? | Bietet die Installation an und nennt den Befehl |
+| Alle benötigten Befehle vorhanden? | Nennt die fehlenden und bricht ab |
+| Tragen diese Befehle die **Parameter**, die die Anwendung benutzt? | Nennt jeden fehlenden Parameter, sagt ab welcher Modulversion es ihn gibt, und nennt den Aktualisierungsbefehl |
+| Fehlen Befehle, die nur **einen Bereich** betreffen? | Warnt und nennt sie, ohne den Start abzubrechen. Betroffen ist *Eigene Installer*: Paket bauen, App-Inhalt ersetzen, MSI-Eigenschaften lesen |
+| Ist das Modul **mehrfach installiert** und läuft dabei eine ältere Fassung? | Warnt und nennt die geladene, die neueste und jeden Fundort mit Pfad |
+| Modulversion 2.x oder neuer? | Warnt, dass diese Oberfläche gegen die 1.x-Reihe geschrieben und damit nicht getestet ist |
+
+Die drei Warnungen unten in dieser Tabelle lassen sich mit **Diese Meldung nicht mehr anzeigen** abstellen — und zwar für genau diesen Inhalt: fehlt später ein *anderer* Parameter oder läuft eine *andere* alte Version, kommt die Meldung wieder. Ausgeblendete Meldungen stehen weiterhin im Aktivitätsprotokoll, und **Einstellungen → Rückfragen → Alle wieder anzeigen** holt sie zurück. Der **gescheiterte Modulimport** lässt sich bewusst nicht ausblenden: danach ist alles außer den Einstellungen abgeschaltet, und die Meldung ist die einzige Stelle, an der der Grund steht.
+
+Die Parameterprüfung gibt es wegen einer echten Rückmeldung: ein Klick auf **Suchen** im Bereich *WinGet Apps* endete in einem Fehlerdialog mit Stapelabbild, `A parameter cannot be found that matches parameter name 'SearchQuery'`. Dort lief Modul **1.0.4**, in dem der Suchparameter noch `-PackageId` hieß; `-SearchQuery` gibt es erst ab **1.1.0**. Der Befehl war vorhanden, also sah die alte Prüfung nichts — der Fehler kam beim Klick statt beim Start. Jetzt wird er beim Start benannt, und eine gescheiterte Suche ist eine Statuszeile statt eines Absturzbilds.
+
+> [!WARNING]
+> **Sind mehrere Modulversionen installiert, gewinnt NICHT die neueste, sondern die erste im `PSModulePath`.** Hier stand bis 0.18.1 das Gegenteil; nachgemessen am 07.09.2026 auf einem Rechner mit 1.4.1 im Benutzerprofil und 1.3.2 unter `C:\Program Files\WindowsPowerShell\Modules` lädt dieselbe Maschine je nach Pfadreihenfolge die eine oder die andere. Eine alte, **für alle Benutzer** installierte Fassung kann eine neuere im eigenen Profil also verdecken — und die Symptome sehen wie Fehler dieser Anwendung aus.
+>
+> Der Start prüft das jetzt: läuft eine ältere Fassung, obwohl eine neuere installiert ist, sagt eine Meldung beide Versionen samt Pfad. Selbst nachsehen und aufräumen:
+>
+> ```powershell
+> Get-Module WinTuner -ListAvailable | Select-Object Version, ModuleBase
+> Uninstall-Module WinTuner -RequiredVersion <die alte Version>
+> ```
+>
+> Im Protokoll stehen beide Zahlen: die höchste **installierte** in der Kopfzeile der Sitzung und die tatsächlich **geladene** in der Zeile `WinTuner module … loaded from …`.
+
+Die **eigene** Aktualisierungsprüfung der Anwendung ist davon getrennt: sie sieht beim Start bei den GitHub-Releases von WinTuner GUI nach (in den Einstellungen abschaltbar) und bietet an, das Skript zu ersetzen. Über das Modul sagt sie nichts.
 
 ---
 
@@ -321,7 +362,7 @@ Diese Muster stehen ab dem ersten Start in der Liste, weil ihr Installer etwas i
 
 | Gruppe | Muster |
 |---|---|
-| Fernwartung und RMM | `TeamViewer*`, `AnyDesk*`, `Splashtop*`, `ScreenConnect*`, `ConnectWise*`, `N-able*`, `N-central*`, `Datto*`, `NinjaOne*`, `NinjaRMM*`, `Atera*`, `Action1*`, `BeyondTrust*`, `Jamf*` |
+| Fernwartung und RMM | `TeamViewer*`, `AnyDesk*`, `Splashtop*`, `ScreenConnect*`, `ConnectWise*`, `N-able*`, `N-central*`, `Datto*`, `NinjaOne*`, `NinjaRMM*`, `Atera*`, `Action1*`, `BeyondTrust*`, `Jamf*`, `Kaseya*`, `TacticalRMM*`, `Tactical RMM*`, `Level.io*`, `Syncro`, `Syncro *`, `Pulseway*`, `ImmyBot*`, `SuperOps*`, `Naverisk*`, `CentraStage*`, `Bomgar*` |
 | Passwortmanager | `Keeper*`, `1Password*`, `Bitwarden*`, `LastPass*`, `KeePass*` |
 
 Ein Ersatz durch die nackte Herstellerfassung installiert dasselbe Produkt „leer": der Rechner meldet sich bei niemandem mehr, und ausgerechnet der Zugang, über den man das reparieren könnte, ist weg.
@@ -340,6 +381,30 @@ Zwei Eigenschaften der Liste, die im Alltag zählen:
 - **Die Liste gilt global, nicht je Kunde.** Eine Liste pro Tenant fängt in jeder neuen Umgebung leer an, und genau dort passiert der Unfall.
 
 Ein Eintrag ohne `*` oder `?` trifft den App-Namen genau; mit Platzhalter gilt er als Muster — `Zoom Rooms` schützt eine App, `Zoom*` alle.
+
+### Der zweite Riegel: wenn die Paket-Id nur geraten ist
+
+Die Schutzliste greift über den **Namen** der App. Es gibt einen zweiten Fall, der genauso teuer ist und den kein Name verrät: die App steht in Intune, aber niemand hat hinterlegt, welches WinGet-Paket zu ihr gehört.
+
+Die Anwendung sucht die Id dann in dieser Reihenfolge, und nur die ersten drei Wege sind belastbar:
+
+| Herkunft | Belastbar? |
+|---|---|
+| Sie haben die Id selbst hinterlegt (`WingetOverrides` in der `settings.json`) | ja, Ihre Angabe |
+| Die Id steht in der App selbst (WinTuner-Marke im Notizfeld) | ja, aufgeschrieben |
+| Der Anzeigename trifft einen WinGet-Namen **genau** | ja |
+| **Kein exakter Treffer, aber ein Ähnlichkeitstreffer** (Namensähnlichkeit ≥ 80 und mindestens 15 Punkte Abstand zum Zweitplatzierten) | **nein — geraten** |
+
+Im letzten Fall paketiert ein Lauf womöglich das **falsche Produkt**, löst die vorhandene App damit ab und zieht deren Zuweisungen mit. Beispiel: in Intune liegt eine selbst gebaute App *Acrobat Reader DC (netgo)*, WinGet kennt sie nicht, aber *Adobe Acrobat Reader DC* ist nah genug — und danach steht in Ihrem Tenant die nackte Herstellerfassung, während Ihr eigenes Paket abgelöst ist.
+
+Deshalb gilt seit 0.18.1:
+
+- Die Zeile in der Update-Liste sagt es **vor** dem Haken: *Paket-Id aus dem Namen geraten*, in Warnfarbe.
+- Vor dem Lauf kommt eine eigene Rückfrage, die **jede** geratene Id mit Namen und Paket-Id auflistet. Sie lässt sich mit **Rückfragen vor Änderungen in Intune überspringen** *nicht* wegdrücken — wie bei geschützten Apps.
+- Die Rückfrage hat dieselben drei Wege: **Ohne die geratenen fortfahren** (Vorgabe), **Alle aktualisieren, auch geratene**, Abbrechen.
+- Geschützte Apps werden hier nicht doppelt gefragt; für die ist die Frage eine Rückfrage vorher schon gestellt worden.
+
+Wer eine geratene Zuordnung dauerhaft richtigstellen will, hinterlegt die Id: Rechtsklick auf die Zeile in der Update-Liste, Id zuordnen. Danach gilt sie als Ihre Angabe und die Rückfrage bleibt aus.
 
 ### Empfohlene Reihenfolge für die erste Runde
 

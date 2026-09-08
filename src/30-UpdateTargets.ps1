@@ -52,7 +52,11 @@ function New-UpdateCandidateModel {
     # Set when the tenant state prevents a safe update (currently: two Intune apps share the same
     # package id AND version, so no single target can be chosen). Such a row is shown read-only:
     # dropping it silently left the user unable to see - let alone fix - the duplicate.
-    [string]$BlockedReason
+    [string]$BlockedReason,
+    # Woher die Paket-Id kommt: override | marker | exact | fuzzy | none (siehe
+    # Resolve-WingetIdForApp -Detailed). Leer, wenn der Aufrufer es nicht weiss - dann gilt die
+    # Id NICHT als geraten, weil eine erfundene Warnung schlimmer ist als keine.
+    [string]$PackageIdSource = ''
   )
   [pscustomobject]@{
     Name           = [string]$App.Name
@@ -78,6 +82,13 @@ function New-UpdateCandidateModel {
     # Lauf und die Zeilenfarbe muessen ueber DASSELBE Urteil reden. Wird die Liste waehrend der
     # Anzeige geaendert (Rechtsklick), zeichnet Update-UpdateListRows die Zeilen mit neuem Wert.
     IsProtected    = [bool](Test-IsProtectedApp -Name ([string]$App.Name) -Patterns $script:settings.ProtectedApps)
+    # Die Paket-Id wurde aus dem ANZEIGENAMEN geraten (Aehnlichkeit >= 80, 15 Punkte Abstand) - kein
+    # Override, keine Marke, kein exakter Name. Das ist der eine Fall, in dem der Lauf ein FREMDES
+    # Produkt paketieren und die vorhandene App damit abloesen kann. Deshalb steht es am Objekt und
+    # nicht nur im Protokoll: die Zeile faerbt sich danach, und die Rueckfrage vor dem Lauf laesst
+    # sich nicht wegdruecken.
+    PackageIdSource = [string]$PackageIdSource
+    PackageIdFuzzy  = [string]::Equals([string]$PackageIdSource, 'fuzzy', [System.StringComparison]::OrdinalIgnoreCase)
     Checked        = $false
   }
 }
