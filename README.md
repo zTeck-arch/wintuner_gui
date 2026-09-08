@@ -188,9 +188,9 @@ For a tool that manages customer tenants, a cache left behind on a shared techni
 
 ### How many sign-in addresses are remembered
 
-The dropdown next to the address field offers the addresses used before, most recent first. It keeps **15** of them by default; beyond that the oldest drops off the end. The list is pure convenience — it suggests an address, it holds no session open.
+The dropdown next to the address field offers the addresses used before, most recent first. It keeps **20** of them by default; beyond that the oldest drops off the end. The list is pure convenience — it suggests an address, it holds no session open.
 
-If you look after more customers than that, raise `MaxRecentLogins` in the settings file (1 to 50, anything outside falls back to 15):
+If you look after more customers than that, raise `MaxRecentLogins` in the settings file (1 to 50, anything outside falls back to 20):
 
 ```text
 %APPDATA%\WinTunerGUI\settings.json
@@ -200,12 +200,12 @@ If you look after more customers than that, raise `MaxRecentLogins` in the setti
 # close the application first - it writes this file when it exits
 $p = "$env:APPDATA\WinTunerGUI\settings.json"
 $s = Get-Content -Raw -LiteralPath $p | ConvertFrom-Json
-$s.MaxRecentLogins = 20
+$s.MaxRecentLogins = 30
 $s | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $p -Encoding utf8
 ```
 
 > [!NOTE]
-> An installation that has been in use for a while may still carry `MaxRecentLogins = 8`. That was the default in earlier versions, and an existing settings file keeps its value — a raised default only applies to new installations. If your list stops growing at eight, this is why.
+> An installation that has been in use for a while carried `MaxRecentLogins = 8` or `15` — the default of earlier versions, because an existing settings file keeps its value. Since 0.18.1 such a value is raised **once**, on the next start, to today's 20; the log names the previous value. Once means once: set the list shorter after that and your value is kept. A value **above** 20 is left alone.
 
 ---
 
@@ -240,12 +240,25 @@ Get-Module WinTuner -ListAvailable | Select-Object Version, ModuleBase
 | Module installed? | Offers to install it, and names the command |
 | All required commands present? | Names the missing ones and stops |
 | Do those commands carry the **parameters** this application binds? | Names each missing parameter, says from which module version it exists, and gives you the update command |
+| Are commands missing that affect only **one section**? | Warns and names them without stopping the start. The section is *Own installers*: building a package, replacing app content, reading MSI properties |
+| Is the module installed **more than once**, with an older copy running? | Warns and names the loaded version, the newest one, and every location with its path |
 | Module version 2.x or newer? | Warns that this interface is written against the 1.x line and has not been tested with it |
+
+The lower three warnings in this table can be switched off with **Do not show this message again** — for exactly that content: if a *different* parameter goes missing later, or a *different* old version runs, the message comes back. Hidden messages still go to the activity log, and **Settings → Confirmations → Show all again** brings them back. The **failed module import** deliberately cannot be hidden: after it, everything but Settings is switched off, and that message is the only place the reason appears.
 
 The parameter check exists because of a real report: a click on **Search** in *WinGet Apps* ended in an error dialog with a stack trace, `A parameter cannot be found that matches parameter name 'SearchQuery'`. That machine ran module **1.0.4**, where the search parameter was still called `-PackageId`; it is `-SearchQuery` from **1.1.0** on. The command existed, so the old check saw nothing — the failure surfaced at the click instead of at the start. Now it is named at the start, and a failed search is a status line rather than a crash.
 
-> [!TIP]
-> If several module versions are installed, the newest one wins. A version installed for **all users** under `C:\Program Files\WindowsPowerShell\Modules` can be old and still be found; `Get-Module WinTuner -ListAvailable` shows every copy with its path, and installing the current version for your own user is enough to take precedence.
+> [!WARNING]
+> **If several module versions are installed, the newest one does NOT win — the first one in `PSModulePath` does.** This said the opposite until 0.18.1; measured on 2026-09-07 on a machine carrying 1.4.1 in the user profile and 1.3.2 under `C:\Program Files\WindowsPowerShell\Modules`, the same machine loads either one depending on the path order. An old copy installed for **all users** can therefore mask a newer one in your own profile — and the symptoms look like bugs in this application.
+>
+> The start now checks for it: if an older copy is running while a newer one is installed, a message names both versions and every path. To look and clean up yourself:
+>
+> ```powershell
+> Get-Module WinTuner -ListAvailable | Select-Object Version, ModuleBase
+> Uninstall-Module WinTuner -RequiredVersion <the old version>
+> ```
+>
+> The log carries both numbers: the highest **installed** one in the session header, and the actually **loaded** one in the line `WinTuner module … loaded from …`.
 
 The application's **own** update check is separate from this: it looks at the GitHub releases of WinTuner GUI at start (switchable off in Settings) and offers to replace the script. It says nothing about the module.
 
@@ -349,7 +362,7 @@ These patterns are on the list from the first start, because their installers ca
 
 | Group | Patterns |
 |---|---|
-| Remote support and RMM | `TeamViewer*`, `AnyDesk*`, `Splashtop*`, `ScreenConnect*`, `ConnectWise*`, `N-able*`, `N-central*`, `Datto*`, `NinjaOne*`, `NinjaRMM*`, `Atera*`, `Action1*`, `BeyondTrust*`, `Jamf*` |
+| Remote support and RMM | `TeamViewer*`, `AnyDesk*`, `Splashtop*`, `ScreenConnect*`, `ConnectWise*`, `N-able*`, `N-central*`, `Datto*`, `NinjaOne*`, `NinjaRMM*`, `Atera*`, `Action1*`, `BeyondTrust*`, `Jamf*`, `Kaseya*`, `TacticalRMM*`, `Tactical RMM*`, `Level.io*`, `Syncro`, `Syncro *`, `Pulseway*`, `ImmyBot*`, `SuperOps*`, `Naverisk*`, `CentraStage*`, `Bomgar*` |
 | Password managers | `Keeper*`, `1Password*`, `Bitwarden*`, `LastPass*`, `KeePass*` |
 
 Replacing one of these with the plain vendor build installs the same product "empty": the machine stops reporting to anybody, and the very access you would need to repair it is the thing that is gone.
@@ -368,6 +381,30 @@ Two properties of the list that matter in day-to-day use:
 - **The list is global, not per customer.** A per-tenant list would start out empty in every new environment, and that is exactly where the accident happens.
 
 An entry without `*` or `?` matches the app name exactly; with a wildcard it is a pattern — `Zoom Rooms` protects one app, `Zoom*` protects all of them.
+
+### The second guard: when the package id is only a guess
+
+The protected list works on the app **name**. There is a second case that costs just as much and that no name reveals: the app is in Intune, but nobody recorded which WinGet package belongs to it.
+
+The application then looks for the id in this order, and only the first three are dependable:
+
+| Where the id comes from | Dependable? |
+|---|---|
+| You recorded it yourself (`WingetOverrides` in `settings.json`) | yes, your statement |
+| The id is in the app itself (WinTuner marker in the notes field) | yes, written down |
+| The display name matches a WinGet name **exactly** | yes |
+| **No exact match, only a similarity match** (name similarity ≥ 80 and at least 15 points ahead of the runner-up) | **no — a guess** |
+
+In that last case a run may package the **wrong product**, supersede the existing app with it and move its assignments. Example: Intune holds a self-built app *Acrobat Reader DC (netgo)*, WinGet does not know it, but *Adobe Acrobat Reader DC* is close enough — and afterwards your tenant carries the bare vendor build while your own package has been superseded.
+
+So since 0.18.1:
+
+- The row in the update list says so **before** you tick it: *package id guessed from the name*, in the warning colour.
+- Before the run, a separate question lists **every** guessed id with its app name and package id. It cannot be dismissed by **Skip confirmations before changes in Intune** — same as for protected apps.
+- That question offers the same three ways: **Continue without the guessed ones** (default), **Update all, guessed ids included**, Cancel.
+- Protected apps are not asked about twice here; for those the question was already asked one dialog earlier.
+
+To fix a guessed mapping for good, record the id: right-click the row in the update list and assign it. From then on it counts as your statement and the question stays away.
 
 ### Suggested order for the first round
 

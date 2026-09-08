@@ -188,9 +188,9 @@ Bei einem Werkzeug, das Kundentenants verwaltet, ist ein liegengebliebener Zwisc
 
 ### Wie viele Anmeldeadressen gemerkt werden
 
-Das Auswahlfeld neben dem Adressfeld bietet die zuletzt benutzten Adressen an, die neueste zuerst. Gemerkt werden standardmäßig **15**; alles darüber fällt hinten heraus. Die Liste ist reine Bequemlichkeit — sie schlägt eine Adresse vor, sie hält keine Sitzung offen.
+Das Auswahlfeld neben dem Adressfeld bietet die zuletzt benutzten Adressen an, die neueste zuerst. Gemerkt werden standardmäßig **20**; alles darüber fällt hinten heraus. Die Liste ist reine Bequemlichkeit — sie schlägt eine Adresse vor, sie hält keine Sitzung offen.
 
-Wer mehr Kunden betreut, setzt `MaxRecentLogins` in der Einstellungsdatei hoch (1 bis 50, alles außerhalb fällt auf 15 zurück):
+Wer mehr Kunden betreut, setzt `MaxRecentLogins` in der Einstellungsdatei hoch (1 bis 50, alles außerhalb fällt auf 20 zurück):
 
 ```text
 %APPDATA%\WinTunerGUI\settings.json
@@ -200,12 +200,12 @@ Wer mehr Kunden betreut, setzt `MaxRecentLogins` in der Einstellungsdatei hoch (
 # vorher die Anwendung schliessen - sie schreibt diese Datei beim Beenden
 $p = "$env:APPDATA\WinTunerGUI\settings.json"
 $s = Get-Content -Raw -LiteralPath $p | ConvertFrom-Json
-$s.MaxRecentLogins = 20
+$s.MaxRecentLogins = 30
 $s | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $p -Encoding utf8
 ```
 
 > [!NOTE]
-> In einer länger genutzten Installation kann dort noch `MaxRecentLogins = 8` stehen. Das war in früheren Versionen die Vorgabe, und eine bestehende Einstellungsdatei behält ihren Wert — eine erhöhte Vorgabe gilt nur für neue Installationen. Wenn die Liste bei acht Einträgen stehenbleibt, ist das der Grund.
+> In einer länger genutzten Installation stand dort noch `MaxRecentLogins = 8` oder `15` — die Vorgabe früherer Versionen, denn eine bestehende Einstellungsdatei behält ihren Wert. Seit 0.18.1 wird ein solcher Wert beim ersten Start **einmalig** auf die heutigen 20 angehoben; das Protokoll nennt den alten Wert. Einmalig heißt einmalig: wer die Liste danach bewusst kürzer setzt, behält seinen Wert. Ein Wert **über** 20 bleibt unangetastet.
 
 ---
 
@@ -240,12 +240,25 @@ Get-Module WinTuner -ListAvailable | Select-Object Version, ModuleBase
 | Modul installiert? | Bietet die Installation an und nennt den Befehl |
 | Alle benötigten Befehle vorhanden? | Nennt die fehlenden und bricht ab |
 | Tragen diese Befehle die **Parameter**, die die Anwendung benutzt? | Nennt jeden fehlenden Parameter, sagt ab welcher Modulversion es ihn gibt, und nennt den Aktualisierungsbefehl |
+| Fehlen Befehle, die nur **einen Bereich** betreffen? | Warnt und nennt sie, ohne den Start abzubrechen. Betroffen ist *Eigene Installer*: Paket bauen, App-Inhalt ersetzen, MSI-Eigenschaften lesen |
+| Ist das Modul **mehrfach installiert** und läuft dabei eine ältere Fassung? | Warnt und nennt die geladene, die neueste und jeden Fundort mit Pfad |
 | Modulversion 2.x oder neuer? | Warnt, dass diese Oberfläche gegen die 1.x-Reihe geschrieben und damit nicht getestet ist |
+
+Die drei Warnungen unten in dieser Tabelle lassen sich mit **Diese Meldung nicht mehr anzeigen** abstellen — und zwar für genau diesen Inhalt: fehlt später ein *anderer* Parameter oder läuft eine *andere* alte Version, kommt die Meldung wieder. Ausgeblendete Meldungen stehen weiterhin im Aktivitätsprotokoll, und **Einstellungen → Rückfragen → Alle wieder anzeigen** holt sie zurück. Der **gescheiterte Modulimport** lässt sich bewusst nicht ausblenden: danach ist alles außer den Einstellungen abgeschaltet, und die Meldung ist die einzige Stelle, an der der Grund steht.
 
 Die Parameterprüfung gibt es wegen einer echten Rückmeldung: ein Klick auf **Suchen** im Bereich *WinGet Apps* endete in einem Fehlerdialog mit Stapelabbild, `A parameter cannot be found that matches parameter name 'SearchQuery'`. Dort lief Modul **1.0.4**, in dem der Suchparameter noch `-PackageId` hieß; `-SearchQuery` gibt es erst ab **1.1.0**. Der Befehl war vorhanden, also sah die alte Prüfung nichts — der Fehler kam beim Klick statt beim Start. Jetzt wird er beim Start benannt, und eine gescheiterte Suche ist eine Statuszeile statt eines Absturzbilds.
 
-> [!TIP]
-> Sind mehrere Modulversionen installiert, gewinnt die neueste. Eine **für alle Benutzer** installierte Fassung unter `C:\Program Files\WindowsPowerShell\Modules` kann alt sein und trotzdem gefunden werden; `Get-Module WinTuner -ListAvailable` zeigt jede Kopie mit ihrem Pfad, und die aktuelle Version für den eigenen Benutzer zu installieren genügt, damit sie Vorrang hat.
+> [!WARNING]
+> **Sind mehrere Modulversionen installiert, gewinnt NICHT die neueste, sondern die erste im `PSModulePath`.** Hier stand bis 0.18.1 das Gegenteil; nachgemessen am 07.09.2026 auf einem Rechner mit 1.4.1 im Benutzerprofil und 1.3.2 unter `C:\Program Files\WindowsPowerShell\Modules` lädt dieselbe Maschine je nach Pfadreihenfolge die eine oder die andere. Eine alte, **für alle Benutzer** installierte Fassung kann eine neuere im eigenen Profil also verdecken — und die Symptome sehen wie Fehler dieser Anwendung aus.
+>
+> Der Start prüft das jetzt: läuft eine ältere Fassung, obwohl eine neuere installiert ist, sagt eine Meldung beide Versionen samt Pfad. Selbst nachsehen und aufräumen:
+>
+> ```powershell
+> Get-Module WinTuner -ListAvailable | Select-Object Version, ModuleBase
+> Uninstall-Module WinTuner -RequiredVersion <die alte Version>
+> ```
+>
+> Im Protokoll stehen beide Zahlen: die höchste **installierte** in der Kopfzeile der Sitzung und die tatsächlich **geladene** in der Zeile `WinTuner module … loaded from …`.
 
 Die **eigene** Aktualisierungsprüfung der Anwendung ist davon getrennt: sie sieht beim Start bei den GitHub-Releases von WinTuner GUI nach (in den Einstellungen abschaltbar) und bietet an, das Skript zu ersetzen. Über das Modul sagt sie nichts.
 
@@ -349,7 +362,7 @@ Diese Muster stehen ab dem ersten Start in der Liste, weil ihr Installer etwas i
 
 | Gruppe | Muster |
 |---|---|
-| Fernwartung und RMM | `TeamViewer*`, `AnyDesk*`, `Splashtop*`, `ScreenConnect*`, `ConnectWise*`, `N-able*`, `N-central*`, `Datto*`, `NinjaOne*`, `NinjaRMM*`, `Atera*`, `Action1*`, `BeyondTrust*`, `Jamf*` |
+| Fernwartung und RMM | `TeamViewer*`, `AnyDesk*`, `Splashtop*`, `ScreenConnect*`, `ConnectWise*`, `N-able*`, `N-central*`, `Datto*`, `NinjaOne*`, `NinjaRMM*`, `Atera*`, `Action1*`, `BeyondTrust*`, `Jamf*`, `Kaseya*`, `TacticalRMM*`, `Tactical RMM*`, `Level.io*`, `Syncro`, `Syncro *`, `Pulseway*`, `ImmyBot*`, `SuperOps*`, `Naverisk*`, `CentraStage*`, `Bomgar*` |
 | Passwortmanager | `Keeper*`, `1Password*`, `Bitwarden*`, `LastPass*`, `KeePass*` |
 
 Ein Ersatz durch die nackte Herstellerfassung installiert dasselbe Produkt „leer": der Rechner meldet sich bei niemandem mehr, und ausgerechnet der Zugang, über den man das reparieren könnte, ist weg.
@@ -368,6 +381,30 @@ Zwei Eigenschaften der Liste, die im Alltag zählen:
 - **Die Liste gilt global, nicht je Kunde.** Eine Liste pro Tenant fängt in jeder neuen Umgebung leer an, und genau dort passiert der Unfall.
 
 Ein Eintrag ohne `*` oder `?` trifft den App-Namen genau; mit Platzhalter gilt er als Muster — `Zoom Rooms` schützt eine App, `Zoom*` alle.
+
+### Der zweite Riegel: wenn die Paket-Id nur geraten ist
+
+Die Schutzliste greift über den **Namen** der App. Es gibt einen zweiten Fall, der genauso teuer ist und den kein Name verrät: die App steht in Intune, aber niemand hat hinterlegt, welches WinGet-Paket zu ihr gehört.
+
+Die Anwendung sucht die Id dann in dieser Reihenfolge, und nur die ersten drei Wege sind belastbar:
+
+| Herkunft | Belastbar? |
+|---|---|
+| Sie haben die Id selbst hinterlegt (`WingetOverrides` in der `settings.json`) | ja, Ihre Angabe |
+| Die Id steht in der App selbst (WinTuner-Marke im Notizfeld) | ja, aufgeschrieben |
+| Der Anzeigename trifft einen WinGet-Namen **genau** | ja |
+| **Kein exakter Treffer, aber ein Ähnlichkeitstreffer** (Namensähnlichkeit ≥ 80 und mindestens 15 Punkte Abstand zum Zweitplatzierten) | **nein — geraten** |
+
+Im letzten Fall paketiert ein Lauf womöglich das **falsche Produkt**, löst die vorhandene App damit ab und zieht deren Zuweisungen mit. Beispiel: in Intune liegt eine selbst gebaute App *Acrobat Reader DC (netgo)*, WinGet kennt sie nicht, aber *Adobe Acrobat Reader DC* ist nah genug — und danach steht in Ihrem Tenant die nackte Herstellerfassung, während Ihr eigenes Paket abgelöst ist.
+
+Deshalb gilt seit 0.18.1:
+
+- Die Zeile in der Update-Liste sagt es **vor** dem Haken: *Paket-Id aus dem Namen geraten*, in Warnfarbe.
+- Vor dem Lauf kommt eine eigene Rückfrage, die **jede** geratene Id mit Namen und Paket-Id auflistet. Sie lässt sich mit **Rückfragen vor Änderungen in Intune überspringen** *nicht* wegdrücken — wie bei geschützten Apps.
+- Die Rückfrage hat dieselben drei Wege: **Ohne die geratenen fortfahren** (Vorgabe), **Alle aktualisieren, auch geratene**, Abbrechen.
+- Geschützte Apps werden hier nicht doppelt gefragt; für die ist die Frage eine Rückfrage vorher schon gestellt worden.
+
+Wer eine geratene Zuordnung dauerhaft richtigstellen will, hinterlegt die Id: Rechtsklick auf die Zeile in der Update-Liste, Id zuordnen. Danach gilt sie als Ihre Angabe und die Rückfrage bleibt aus.
 
 ### Empfohlene Reihenfolge für die erste Runde
 

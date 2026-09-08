@@ -7,7 +7,7 @@ BeforeAll {
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '20-Version.ps1' -Name @(
     'Get-ComparableVersionParts', 'Test-IsNewerVersion'))))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '45-Assignments.ps1' -Name @(
-    'Save-AppScopeSnapshot', 'Get-ScopeSnapshotText'))))
+    'Save-AppScopeSnapshot', 'Get-ScopeSnapshotText', 'Split-ScopeSnapshots'))))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '70-Runtime.ps1' -Name @(
     'Get-TenantDisplayName', 'Get-TenantDisplayLabel', 'Set-TenantDisplayName',
     'Test-ChangeConfirmationsSuppressed'))))
@@ -154,6 +154,90 @@ Describe 'Save-AppScopeSnapshot' {
 
   It 'says so plainly when nothing was deleted' {
     Get-ScopeSnapshotText | Should -Be (Get-UiString 'ScopeSnapshotEmpty')
+  }
+
+  # Gemeldet am 07.09.2026: die Liste zeigte zwei Eintraege, bei beiden stand "keine Zuweisung".
+  # Das ist der REGELFALL - geloescht wird meistens eine abgeloeste Vorgaengerversion, deren
+  # Zuweisungen zu dem Zeitpunkt schon auf die neue Version verschoben sind. Ein solcher Eintrag
+  # enthaelt nichts, was von Hand wiederhergestellt werden koennte, und bei einem Aufraeumlauf
+  # ueber dreissig Versionen begraeben diese Zeilen den einen Eintrag, der wirklich zaehlt.
+  It 'merkt am Eintrag, ob es ueberhaupt etwas zu sichern gab' {
+    # Als Merker, NICHT am uebersetzten Text erkannt: 'keine Zuweisung' gegen "no assignment" zu
+    # vergleichen ist genau der Fehler, den docs/PATTERNS.md fuer diese Probe beschreibt.
+    $withScope = Save-AppScopeSnapshot -AppId 'app-6' -AppName 'Mit Scope'
+    $withScope.HasScope | Should -BeTrue
+    $global:SnapshotProbe = [pscustomobject]@{ Succeeded = $true; Signature = '<none>'; Summary = 'x'; Count = 0 }
+    (Save-AppScopeSnapshot -AppId 'app-7' -AppName 'Ohne Scope').HasScope | Should -BeFalse
+  }
+
+  It 'fasst die leeren Sicherungen zusammen, statt sie einzeln aufzufuehren' {
+    $null = Save-AppScopeSnapshot -AppId 'app-real' -AppName 'Mit Scope' -Version '1.0' -Reason 'r'
+    $global:SnapshotProbe = [pscustomobject]@{ Succeeded = $true; Signature = '<none>'; Summary = 'x'; Count = 0 }
+    foreach ($n in 1..3) { $null = Save-AppScopeSnapshot -AppId "leer-$n" -AppName "Leer $n" -Version '1.0' -Reason 'version cleanup' }
+    $text = Get-ScopeSnapshotText
+    # Der Eintrag mit Geltungsbereich steht ausfuehrlich da...
+    $text | Should -Match 'Mit Scope'
+    # ...die leeren nicht mehr einzeln...
+    $text | Should -Not -Match 'Leer 1'
+    $text | Should -Not -Match 'Leer 3'
+    # ...aber sie sind gezaehlt. Weggeworfen wird nichts.
+    $text | Should -Match '3'
+    $script:scopeSnapshots.Count | Should -Be 4
+  }
+
+  It 'sagt es ausdruecklich, wenn ALLE Sicherungen leer waren' {
+    # Sonst stuende nur die Einleitung da, und die verspricht etwas, was es dann nicht gibt.
+    $global:SnapshotProbe = [pscustomobject]@{ Succeeded = $true; Signature = '<none>'; Summary = 'x'; Count = 0 }
+    $null = Save-AppScopeSnapshot -AppId 'leer-1' -AppName 'Google Chrome' -Version '151.0' -Reason 'version cleanup'
+    $null = Save-AppScopeSnapshot -AppId 'leer-2' -AppName 'Webex' -Version '46.8' -Reason 'version cleanup'
+    $text = Get-ScopeSnapshotText
+    $text | Should -Match ([regex]::Escape(((Get-UiString 'ScopeSnapshotAllEmpty') -f 2)))
+    $text | Should -Not -Match 'Google Chrome'
+  }
+
+  It 'laesst eine NICHT LESBARE Probe immer einzeln stehen' {
+    # Der Fall, bei dem niemand weiss, ob etwas verlorenging - der darf nie in einer Zahl
+    # verschwinden, auch wenn kein Geltungsbereich gelesen werden konnte.
+    $global:SnapshotProbe = [pscustomobject]@{ Succeeded = $false; Signature = $null; Summary = $null; Count = $null }
+    $null = Save-AppScopeSnapshot -AppId 'app-unreadable' -AppName 'Unlesbar' -Version '9.9' -Reason 'r'
+    $text = Get-ScopeSnapshotText
+    $text | Should -Match 'Unlesbar'
+    $text | Should -Match ([regex]::Escape((Get-UiString 'ScopeSnapshotUnreadable')))
+  }
+}
+
+Describe 'Split-ScopeSnapshots' {
+  BeforeAll {
+    function New-Snap {
+      param([string]$Name, [bool]$HasScope, [bool]$Succeeded = $true)
+      [pscustomobject]@{ AppName = $Name; HasScope = $HasScope; Succeeded = $Succeeded; Time = Get-Date }
+    }
+  }
+
+  It 'trennt Sicherungen mit Geltungsbereich von den leeren' {
+    $split = Split-ScopeSnapshots -Snapshots @((New-Snap -Name 'A' -HasScope $true), (New-Snap -Name 'B' -HasScope $false))
+    @($split.Detailed).Count | Should -Be 1
+    @($split.Detailed)[0].AppName | Should -Be 'A'
+    @($split.Empty).Count | Should -Be 1
+  }
+
+  It 'zaehlt eine unlesbare Probe zu den ausfuehrlichen' {
+    $split = Split-ScopeSnapshots -Snapshots @((New-Snap -Name 'X' -HasScope $false -Succeeded $false))
+    @($split.Detailed).Count | Should -Be 1
+    @($split.Empty).Count | Should -Be 0
+  }
+
+  It 'behandelt einen Eintrag ohne den Merker als leer, nicht als Fehler' {
+    # Fail-safe in die harmlose Richtung: ein Eintrag ohne HasScope ist kein Grund, eine
+    # Wiederherstellung zu versprechen.
+    $old = [pscustomobject]@{ AppName = 'Alt'; Succeeded = $true; Time = Get-Date }
+    $split = Split-ScopeSnapshots -Snapshots @($old)
+    @($split.Empty).Count | Should -Be 1
+  }
+
+  It 'vertraegt eine leere Liste und Nullwerte darin' {
+    @((Split-ScopeSnapshots -Snapshots @()).Detailed).Count | Should -Be 0
+    @((Split-ScopeSnapshots -Snapshots @($null, (New-Snap -Name 'A' -HasScope $true))).Detailed).Count | Should -Be 1
   }
 }
 

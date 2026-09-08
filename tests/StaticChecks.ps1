@@ -394,6 +394,42 @@ Assert-True ($cimCalls.Count -eq 0) (
   "CIM/WMI call on the top level before the smoke gate ({0} site(s)); measured at 398-425 ms each, paid by every single start:`r`n  {1}" -f
     $cimCalls.Count, ($cimCalls -join "`r`n  "))
 
+# Keine unklammerte Rechnung im letzten Argument von New-Object Point/Size.
+#
+# In PowerShell bindet der Komma-Operator STAERKER als die Subtraktion. Damit ist
+#
+#     New-Object System.Drawing.Point($x, [int]$y - 4)
+#
+# nicht "Punkt bei x und y-4", sondern "(Array aus x und y) MINUS 4" - und das wirft zur Laufzeit
+# "[System.Object[]] does not contain a method named 'op_Subtraction'". Der Dialog stirbt also beim
+# Oeffnen, waehrend Parser, Smoke-Test und Layout-Probe gruen bleiben: keiner von ihnen oeffnet
+# Dialoge. Gefunden am 07.09.2026 in Show-StartupNoticeDialog durch eine Wegwerf-Probe, die die
+# Dialoge wirklich baut.
+#
+# Erkannt wird es am AST selbst, nicht per Textsuche: greift das Komma, ist das Argument kein
+# ArrayLiteral mit zwei Elementen mehr, sondern ein Binaerausdruck. Genau das wird hier gesucht.
+$pointArgs = [Collections.Generic.List[string]]::new()
+foreach ($call in $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+    $node.GetCommandName() -eq 'New-Object'
+  }, $true)) {
+  $typeName = ''
+  if ($call.CommandElements.Count -ge 2) { $typeName = [string]$call.CommandElements[1].Extent.Text }
+  if ($typeName -notmatch 'Drawing\.(Point|Size)$') { continue }
+  foreach ($el in ($call.CommandElements | Select-Object -Skip 2)) {
+    $inner = $el
+    while ($inner -is [System.Management.Automation.Language.ParenExpressionAst]) { $inner = $inner.Pipeline.PipelineElements[0].Expression }
+    if ($inner -is [System.Management.Automation.Language.BinaryExpressionAst] -and
+        $inner.Left -is [System.Management.Automation.Language.ArrayLiteralAst]) {
+      $pointArgs.Add(('line {0}: {1}' -f $call.Extent.StartLineNumber, ($call.Extent.Text -split "`r`n")[0].Trim()))
+    }
+  }
+}
+Assert-True ($pointArgs.Count -eq 0) (
+  "New-Object Point/Size with an unparenthesised calculation in its last argument ({0} site(s)); the comma binds TIGHTER than the minus, so this computes 'array minus n' and throws op_Subtraction when the dialog opens. Wrap it: (`$y - 4):`r`n  {1}" -f
+    $pointArgs.Count, ($pointArgs -join "`r`n  "))
+
 # Kein Netzaufruf ohne Zeitablauf.
 #
 # Ohne -TimeoutSec wartet Invoke-RestMethod in PowerShell 7 UNBEGRENZT. Gemessen am 31.08.2026:

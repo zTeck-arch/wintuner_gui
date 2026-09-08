@@ -38,7 +38,82 @@ $script:requiredModuleParameters = @(
   @{ Command = 'Update-WtIntuneApp';     Parameter = 'EnableAutoUpdate'; Since = '' }
   @{ Command = 'Connect-WtWinTuner';     Parameter = 'Username';    Since = '' }
   @{ Command = 'Connect-WtWinTuner';     Parameter = 'NoBroker';    Since = '' }
+  # Nachtrag 07.09.2026, gemessen: diese drei Befehle bindet die Anwendung ebenfalls, und sie
+  # standen weder in der Befehls- noch in der Parameterpruefung. Alle drei gehoeren zu "Eigene
+  # Installer" - fehlen sie, scheitert dort ein Klick, waehrend der Rest laeuft.
+  @{ Command = 'Deploy-WtWin32ContentVersion'; Parameter = 'IntuneWinFile'; Since = '' }
+  @{ Command = 'Deploy-WtWin32ContentVersion'; Parameter = 'AppId';         Since = '' }
+  @{ Command = 'New-IntuneWinPackage';         Parameter = 'SourcePath';    Since = '' }
+  @{ Command = 'New-IntuneWinPackage';         Parameter = 'SetupFile';     Since = '' }
+  @{ Command = 'New-IntuneWinPackage';         Parameter = 'DestinationPath'; Since = '' }
+  @{ Command = 'Show-MsiInfo';                 Parameter = 'MsiPath';       Since = '' }
 )
+
+# Befehle, die die Anwendung braucht, deren Fehlen aber NUR EINEN Bereich lahmlegt.
+#
+# Getrennt von den Pflichtbefehlen, und das ist der ganze Punkt: fehlt einer von diesen, ist die
+# richtige Antwort eine Warnung mit dem Namen des betroffenen Bereichs - nicht ein Start, der alles
+# ausser den Einstellungen abschaltet. Gemessen am 07.09.2026: alle drei fehlten in beiden
+# Startpruefungen, ihr Ausfall zeigte sich erst als gescheiterter Klick.
+$script:optionalModuleCommands = @(
+  @{ Command = 'Deploy-WtWin32ContentVersion'; Feature = 'OwnPackageReplaceContent' }
+  @{ Command = 'New-IntuneWinPackage';         Feature = 'OwnPackageBuild' }
+  @{ Command = 'Show-MsiInfo';                 Feature = 'OwnPackageMsiFallback' }
+)
+
+# Reine Rechnung: welche der optionalen Befehle fehlen? Wie Get-MissingModuleParameters mit
+# hereingegebenem Get-Command, damit ein Test eine Attrappe stellen kann.
+function Get-MissingOptionalCommands {
+  param(
+    [AllowNull()][object[]]$Required,
+    [Parameter(Mandatory)][scriptblock]$CommandLookup
+  )
+  $missing = [System.Collections.Generic.List[string]]::new()
+  foreach ($entry in @($Required)) {
+    if (-not $entry -or -not $entry.Command) { continue }
+    $command = $null
+    try { $command = & $CommandLookup $entry.Command } catch { $command = $null }
+    if (-not $command) { $missing.Add([string]$entry.Command) }
+  }
+  return @($missing.ToArray())
+}
+
+# Mehrere installierte Fassungen des WinTuner-Moduls - gemessen am 07.09.2026 auf dem
+# Entwicklungsrechner: 1.4.1 im Benutzerprofil und 1.3.2 unter
+# C:\Program Files\WindowsPowerShell\Modules.
+#
+# Der gefaehrliche Teil daran ist nicht die Doppelung, sondern WELCHE gewinnt: PowerShell nimmt das
+# erste Verzeichnis im PSModulePath, NICHT die hoechste Version. Nachgemessen mit umgedrehter
+# Pfadreihenfolge laedt derselbe Rechner 1.3.2. Und die Startzeile im Protokoll nannte bisher die
+# hoechste VERFUEGBARE Version (Get-Module -ListAvailable | Sort Version), nicht die geladene - in
+# einem Ticket stand damit eine Zahl, die nicht lief. Genau daran war der Fehlerbericht vom
+# 03.09.2026 so schwer zu deuten.
+#
+# Reine Rechnung, damit sie ohne Modul pruefbar ist: Liste der gefundenen Fassungen und die
+# geladene rein, Urteil raus.
+function Get-ModuleVersionConflict {
+  param(
+    [AllowNull()][object[]]$Available,
+    [AllowNull()][object]$Loaded
+  )
+  $entries = @($Available | Where-Object { $_ -and $_.Version })
+  $loadedVersion = if ($Loaded -and $Loaded.Version) { [string]$Loaded.Version } else { '' }
+  $highest = ''
+  if ($entries.Count -gt 0) {
+    $highest = [string](@($entries | Sort-Object Version -Descending)[0].Version)
+  }
+  return @{
+    Count          = $entries.Count
+    HasConflict    = ($entries.Count -gt 1)
+    LoadedVersion  = $loadedVersion
+    HighestVersion = $highest
+    # Die eigentliche Aussage: laeuft eine AELTERE Fassung, obwohl eine neuere installiert ist?
+    LoadedIsOlder  = ($loadedVersion -and $highest -and $loadedVersion -ne $highest)
+    Locations      = @($entries | Sort-Object Version -Descending | ForEach-Object {
+      "{0} ({1})" -f [string]$_.Version, [string]$_.ModuleBase
+    })
+  }
+}
 
 # Die reine Rechnung dazu: welche der geforderten Parameter fehlen im installierten Modul?
 #

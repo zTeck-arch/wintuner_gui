@@ -802,11 +802,44 @@ function Save-AppScopeSnapshot {
     Reason    = [string]$Reason
     Succeeded = $ok
     Scope     = [string]$scopeText
+    # Gab es ueberhaupt etwas zu sichern? Als Merker am Eintrag und NICHT spaeter am uebersetzten
+    # Text erkannt: 'keine Zuweisung' gegen "no assignment" zu vergleichen ist genau der Fehler,
+    # den docs/PATTERNS.md fuer die Zuweisungsprobe beschreibt (Summary traegt den UI-Text, nur die
+    # Signatur traegt das '<none>').
+    HasScope  = ($ok -and ([string]$probe.Signature -ne '<none>'))
   }
   [void]$script:scopeSnapshots.Add($entry)
   Write-Log ("Scope kept before removal | {0} {1} ({2}) | reason: {3} | scope: {4}" -f
     $AppName, $Version, $AppId, $Reason, $scopeText)
   return $entry
+}
+
+# Trennt die Sicherungen in die, die etwas zu erzaehlen haben, und die leeren.
+#
+# Der Grund, gemeldet am 07.09.2026: die Liste zeigte zwei Eintraege, und bei beiden stand
+# "keine Zuweisung". Das ist kein Zufall, sondern der REGELFALL - geloescht wird hier meistens eine
+# abgeloeste Vorgaengerversion, und deren Zuweisungen sind zu dem Zeitpunkt schon auf die neue
+# Version verschoben. Ein Eintrag ohne Geltungsbereich enthaelt aber nichts, was von Hand
+# wiederhergestellt werden koennte - genau das, was der Einleitungstext verspricht. Bei einem
+# Aufraeumlauf ueber dreissig Versionen begraben diese Zeilen den einen Eintrag, der wirklich
+# zaehlt.
+#
+# Weggeworfen wird deshalb NICHTS: die leeren werden gezaehlt statt einzeln aufgefuehrt, und im
+# Protokoll steht ohnehin jede einzeln mit Namen (Save-AppScopeSnapshot schreibt sie dort hin).
+# Eine nicht lesbare Probe bleibt IMMER einzeln stehen - das ist der Fall, bei dem niemand weiss,
+# ob etwas verloren ging, und der darf nicht in einer Zahl verschwinden.
+function Split-ScopeSnapshots {
+  param([AllowNull()][AllowEmptyCollection()][object[]]$Snapshots)
+  $detailed = @()
+  $empty = @()
+  foreach ($e in @($Snapshots)) {
+    if (-not $e) { continue }
+    # Nicht lesbar (-not Succeeded) gehoert zu den ausfuehrlichen, auch ohne Geltungsbereich.
+    $hasScope = [bool]($e.PSObject.Properties['HasScope'] -and $e.HasScope)
+    $unreadable = -not [bool]($e.PSObject.Properties['Succeeded'] -and $e.Succeeded)
+    if ($hasScope -or $unreadable) { $detailed += $e } else { $empty += $e }
+  }
+  return @{ Detailed = @($detailed); Empty = @($empty) }
 }
 
 # Renders the session's snapshots for the viewer dialog. Newest first - the interesting one is
@@ -816,14 +849,22 @@ function Get-ScopeSnapshotText {
   if ([string]::IsNullOrWhiteSpace($Lang)) { $Lang = $script:uiLanguage }
   $all = @(if ($script:scopeSnapshots) { $script:scopeSnapshots } else { @() })
   if ($all.Count -eq 0) { return (Get-UiString 'ScopeSnapshotEmpty') }
+  $split = Split-ScopeSnapshots -Snapshots $all
   $lines = [System.Collections.Generic.List[string]]::new()
   $lines.Add((Get-UiString 'ScopeSnapshotIntro'))
   $lines.Add("")
-  foreach ($e in @($all | Sort-Object -Property Time -Descending)) {
+  foreach ($e in @($split.Detailed | Sort-Object -Property Time -Descending)) {
     $lines.Add(("[{0:HH:mm:ss}] {1} {2}" -f $e.Time, $e.AppName, $e.Version))
     $lines.Add(("    {0}" -f $e.Scope))
     $lines.Add(("    {0} | {1}" -f $e.Reason, $e.AppId))
     $lines.Add("")
+  }
+  # Waren ALLE Sicherungen leer, steht sonst nur die Einleitung da - und die verspricht etwas, was
+  # es dann nicht gibt. Der eigene Satz sagt genau das aus.
+  if (@($split.Detailed).Count -eq 0) {
+    $lines.Add((Get-UiString 'ScopeSnapshotAllEmpty') -f @($split.Empty).Count)
+  } elseif (@($split.Empty).Count -gt 0) {
+    $lines.Add((Get-UiString 'ScopeSnapshotEmptyCount') -f @($split.Empty).Count)
   }
   return (($lines -join "`r`n").TrimEnd())
 }

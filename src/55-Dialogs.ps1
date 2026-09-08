@@ -1631,13 +1631,175 @@ function Show-TextInputDialog {
 # Folgen, sie steht nicht auf dem Standardknopf.
 #
 # Gibt 'skip' | 'all' | 'cancel' zurueck.
+# Eine Startmeldung mit "Diese Meldung nicht mehr anzeigen". Gibt $true zurueck, wenn das Haekchen
+# gesetzt war.
+#
+# Eine MessageBox kann kein Kontrollkaestchen, deshalb ein eigenes Fenster. Es bleibt bei EINEM
+# Knopf ("OK"): das hier ist eine Mitteilung, keine Frage - ein zweiter Knopf wuerde eine Wahl
+# vortaeuschen, die es nicht gibt.
+#
+# Hoehe und Knopfbreite werden GEMESSEN. Die Texte sind sehr unterschiedlich lang (eine Zeile bis
+# zwanzig), in sieben Designs mit verschiedenen Schriftarten und in zwei Sprachen; eine feste Groesse
+# haette entweder abgeschnitten oder eine halbe leere Flaeche gezeigt.
+function Show-StartupNoticeDialog {
+  param(
+    [Parameter(Mandatory)][string]$Text,
+    [Parameter(Mandatory)][string]$Title
+  )
+  $dlg = New-Object System.Windows.Forms.Form
+  $dlg.Text = $Title
+  $dlg.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+  $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+  $dlg.MinimizeBox = $false
+  $dlg.MaximizeBox = $false
+  $dlg.ShowIcon = $false
+
+  $box = New-Object System.Windows.Forms.TextBox
+  $box.Multiline = $true
+  $box.ReadOnly = $true
+  $box.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
+  $box.Text = $Text
+  $box.TabStop = $false   # sonst bekommt das Textfeld den Fokus und markiert alles blau
+  $box.Location = New-Object System.Drawing.Point(14, 14)
+  $dlg.Controls.Add($box)
+
+  $check = New-Object System.Windows.Forms.CheckBox
+  $check.Text = Get-UiString 'StartupNoticeHideCheckbox'
+  $check.AutoSize = $true
+  $dlg.Controls.Add($check)
+
+  $ok = New-Object System.Windows.Forms.Button
+  $ok.Text = Get-UiString 'OkButton'
+  $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+  $dlg.Controls.Add($ok)
+  $dlg.AcceptButton = $ok
+  # Escape schliesst wie OK: die Meldung ist gelesen oder nicht, es gibt nichts abzubrechen. Das
+  # Haekchen zaehlt dabei so, wie es steht.
+  $dlg.CancelButton = $ok
+
+  # Gemessen: die Breite aus der laengsten Zeile, die Hoehe aus der Zeilenzahl - beides begrenzt,
+  # damit ein sehr langer Text scrollt statt das Fenster ueber den Bildschirm hinaus zu ziehen.
+  $lines = @($Text -split "`r?`n")
+  $longest = 0
+  foreach ($line in $lines) {
+    $w = [System.Windows.Forms.TextRenderer]::MeasureText([string]$line, $box.Font).Width
+    if ($w -gt $longest) { $longest = $w }
+  }
+  $lineHeight = [Math]::Max(14, [System.Windows.Forms.TextRenderer]::MeasureText('Xg', $box.Font).Height)
+  $boxWidth = [Math]::Min([Math]::Max(420, $longest + 28), 900)
+  $boxHeight = [Math]::Min([Math]::Max(90, ($lines.Count + 1) * $lineHeight), 520)
+  $box.Size = New-Object System.Drawing.Size([int]$boxWidth, [int]$boxHeight)
+
+  $ok.Height = 32
+  $ok.Width = [Math]::Max(96, (Get-ControlTextWidth -Control $ok) + 28)
+  $clientWidth = [int]($boxWidth + 28)
+  $checkY = 14 + $boxHeight + 12
+  $check.Location = New-Object System.Drawing.Point(14, $checkY)
+  # Die zweite Klammer ist PFLICHT, nicht Kosmetik: in PowerShell bindet der Komma-Operator
+  # STAERKER als die Subtraktion. Ohne sie rechnet der Ausdruck ([int]x, [int]$checkY) - 4, also
+  # "Array minus 4", und der Dialog stirbt beim Oeffnen mit
+  # "[System.Object[]] does not contain a method named 'op_Subtraction'". Gefunden hat das die
+  # Wegwerf-Probe, die die Dialoge wirklich baut - Smoke-Test und Layout-Probe oeffnen keine
+  # Dialoge und waren gruen.
+  $ok.Location = New-Object System.Drawing.Point([int]($clientWidth - 14 - $ok.Width), ([int]$checkY - 4))
+  $dlg.ClientSize = New-Object System.Drawing.Size($clientWidth, [int]($checkY + 40))
+
+  Set-GuiTheme -control $dlg -theme $script:currentTheme
+  [void]$dlg.ShowDialog()
+  $hide = [bool]$check.Checked
+  $dlg.Dispose()
+  return $hide
+}
+
+# Die Produktionswarnung beim Start: Ja/Nein UND ein Kontrollkaestchen.
+#
+# Zurueck kommt @{ Accepted = <bool>; Hide = <bool> }. Getrennt, weil es zwei verschiedene Aussagen
+# sind: "ich verstehe das Risiko" und "frag mich nicht wieder". Ohne Zustimmung wird nichts
+# ausgeblendet - ein Haekchen bei "Nein" darf die Warnung nicht loswerden.
+#
+# Bisher war das eine MessageBox mit Ja/Nein, die pro VERSION einmal kam. Der Wunsch aus dem
+# Betrieb: dauerhaft abstellbar. Die Warnung selbst bleibt der Vorgabefall - das Haekchen ist eine
+# bewusste Handlung, und der Knopf "Nein" bleibt der Vorgabeknopf.
+function Show-ProductionWarningDialog {
+  $dlg = New-Object System.Windows.Forms.Form
+  $dlg.Text = Get-UiString 'ProductionWarningTitle'
+  $dlg.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+  $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+  $dlg.MinimizeBox = $false
+  $dlg.MaximizeBox = $false
+  $dlg.ShowIcon = $false
+
+  $box = New-Object System.Windows.Forms.TextBox
+  $box.Multiline = $true
+  $box.ReadOnly = $true
+  $box.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
+  $box.Text = Get-UiString 'ProductionWarningDialog'
+  $box.TabStop = $false
+  $box.Location = New-Object System.Drawing.Point(14, 14)
+  $box.Size = New-Object System.Drawing.Size(700, 380)
+  $dlg.Controls.Add($box)
+
+  $check = New-Object System.Windows.Forms.CheckBox
+  $check.Text = Get-UiString 'ProductionWarningHideCheckbox'
+  $check.AutoSize = $true
+  $check.Location = New-Object System.Drawing.Point(14, 406)
+  $dlg.Controls.Add($check)
+
+  $script:productionWarningAccepted = $false
+
+  $noButton = New-Object System.Windows.Forms.Button
+  $noButton.Tag = 'btn-secondary'
+  $noButton.Text = Get-UiString 'ProductionWarningDeclineButton'
+  $noButton.DialogResult = [System.Windows.Forms.DialogResult]::No
+  $noButton.Add_Click({ $script:productionWarningAccepted = $false })
+  $dlg.Controls.Add($noButton)
+  # "Nein" ist der Vorgabeknopf und der Escape-Weg. Eine Risikobestaetigung, die man mit der
+  # Eingabetaste erteilt, ist keine.
+  $dlg.CancelButton = $noButton
+  $dlg.AcceptButton = $noButton
+
+  $yesButton = New-Object System.Windows.Forms.Button
+  $yesButton.Text = Get-UiString 'ProductionWarningAcceptButton'
+  $yesButton.DialogResult = [System.Windows.Forms.DialogResult]::Yes
+  $yesButton.Add_Click({ $script:productionWarningAccepted = $true })
+  $dlg.Controls.Add($yesButton)
+
+  # Breiten gemessen, von rechts nach links gelegt - wie beim Lauf-Dialog daneben und aus demselben
+  # Grund: "Ja, ich verstehe das Risiko" ist in beiden Sprachen laenger als jede feste Zahl.
+  $btnY = 402
+  $right = 714
+  foreach ($b in @($noButton, $yesButton)) {
+    $b.Height = 34
+    $b.Width = [Math]::Max(110, (Get-ControlTextWidth -Control $b) + 28)
+    $right -= $b.Width
+    $b.Location = New-Object System.Drawing.Point($right, $btnY)
+    $right -= 10
+  }
+  $dlg.ClientSize = New-Object System.Drawing.Size(728, 450)
+
+  Set-GuiTheme -control $dlg -theme $script:currentTheme
+  $result = $dlg.ShowDialog()
+  $accepted = ($result -eq [System.Windows.Forms.DialogResult]::Yes) -and $script:productionWarningAccepted
+  # Ausgeblendet wird nur, was auch bestaetigt wurde.
+  $hide = $accepted -and [bool]$check.Checked
+  $dlg.Dispose()
+  return @{ Accepted = $accepted; Hide = $hide }
+}
+
+# Die Textschluessel sind Parameter, weil es ZWEI Fragen dieser Form gibt und beide dieselben drei
+# Wege brauchen: geschuetzte Apps und Apps mit geratener Paket-Id. Die Vorgaben sind die
+# geschuetzten - so bleibt jeder bestehende Aufruf unveraendert.
 function Show-ProtectedRunDialog {
   param(
     [Parameter(Mandatory)][int]$Count,
-    [string]$Preview = ''
+    [string]$Preview = '',
+    [string]$TitleKey = 'ProtectedRunConfirmTitle',
+    [string]$TextKey = 'ProtectedRunConfirmDialog',
+    [string]$SkipButtonKey = 'ProtectedRunSkipButton',
+    [string]$AllButtonKey = 'ProtectedRunAllButton'
   )
   $dlg = New-Object System.Windows.Forms.Form
-  $dlg.Text = Get-UiString 'ProtectedRunConfirmTitle'
+  $dlg.Text = Get-UiString $TitleKey
   $dlg.ClientSize = New-Object System.Drawing.Size(720, 420)
   $dlg.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
   $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
@@ -1651,7 +1813,7 @@ function Show-ProtectedRunDialog {
   $text.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
   $text.Location = New-Object System.Drawing.Point(14, 14)
   $text.Size = New-Object System.Drawing.Size(692, 324)
-  $text.Text = (Get-UiString 'ProtectedRunConfirmDialog') -f $Count, $Preview
+  $text.Text = (Get-UiString $TextKey) -f $Count, $Preview
   # Sonst bekommt das Textfeld den Fokus und markiert seinen ganzen Inhalt blau.
   $text.TabStop = $false
   $dlg.Controls.Add($text)
@@ -1661,9 +1823,7 @@ function Show-ProtectedRunDialog {
   $script:protectedRunChoice = 'cancel'
 
   $skipButton = New-Object System.Windows.Forms.Button
-  $skipButton.Text = Get-UiString 'ProtectedRunSkipButton'
-  $skipButton.Location = New-Object System.Drawing.Point(14, 352)
-  $skipButton.Size = New-Object System.Drawing.Size(290, 34)
+  $skipButton.Text = Get-UiString $SkipButtonKey
   $skipButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
   $skipButton.Add_Click({ $script:protectedRunChoice = 'skip' })
   $dlg.Controls.Add($skipButton)
@@ -1671,9 +1831,7 @@ function Show-ProtectedRunDialog {
 
   $allButton = New-Object System.Windows.Forms.Button
   $allButton.Tag = 'btn-secondary'
-  $allButton.Text = Get-UiString 'ProtectedRunAllButton'
-  $allButton.Location = New-Object System.Drawing.Point(314, 352)
-  $allButton.Size = New-Object System.Drawing.Size(268, 34)
+  $allButton.Text = Get-UiString $AllButtonKey
   $allButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
   $allButton.Add_Click({ $script:protectedRunChoice = 'all' })
   $dlg.Controls.Add($allButton)
@@ -1681,11 +1839,37 @@ function Show-ProtectedRunDialog {
   $cancelButton = New-Object System.Windows.Forms.Button
   $cancelButton.Tag = 'btn-secondary'
   $cancelButton.Text = Get-UiString 'CancelButton'
-  $cancelButton.Location = New-Object System.Drawing.Point(592, 352)
-  $cancelButton.Size = New-Object System.Drawing.Size(114, 34)
   $cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
   $cancelButton.Add_Click({ $script:protectedRunChoice = 'cancel' })
   $dlg.Controls.Add($cancelButton)
+
+  # Breiten GEMESSEN, nicht gesetzt. Vorher standen hier 290/268/114 px - Zahlen, die zu den
+  # damaligen zwei Beschriftungen passten. Mit den Texten der zweiten Frage (geratene Paket-Id) und
+  # in sieben Designs mit unterschiedlichen Schriftarten haelt keine feste Zahl; abgeschnitten waere
+  # sie genau an der Frage, deren falsche Antwort eine App abloest. Von RECHTS nach links gelegt,
+  # damit "Abbrechen" immer am Rand sitzt.
+  $gap = 10
+  $btnY = 352
+  $buttons = @($cancelButton, $allButton, $skipButton)
+  foreach ($b in $buttons) {
+    $b.Height = 34
+    $b.Width = [Math]::Max(114, (Get-ControlTextWidth -Control $b) + 28)
+  }
+  # Passen die drei nicht in die 720 px, waechst der DIALOG - nicht die Beschriftung schrumpft.
+  # Ohne diesen Schritt liefe der linke Knopf bei langen Texten (Deutsch ist laenger) einfach aus
+  # dem Fenster hinaus, und zwar unsichtbar: ein Knopf ausserhalb der Zeichenflaeche ist kein Fehler,
+  # den WinForms meldet.
+  $needed = 14 + ($buttons | Measure-Object -Property Width -Sum).Sum + ($gap * ($buttons.Count - 1)) + 14
+  if ($needed -gt $dlg.ClientSize.Width) {
+    $dlg.ClientSize = New-Object System.Drawing.Size([int]$needed, $dlg.ClientSize.Height)
+    $text.Width = $dlg.ClientSize.Width - 28
+  }
+  $right = $dlg.ClientSize.Width - 14
+  foreach ($b in $buttons) {
+    $right -= $b.Width
+    $b.Location = New-Object System.Drawing.Point($right, $btnY)
+    $right -= $gap
+  }
   # Escape und das Fensterkreuz bedeuten dasselbe wie "Abbrechen" - nie "alles aktualisieren".
   $dlg.CancelButton = $cancelButton
 

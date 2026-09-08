@@ -15,8 +15,11 @@
 BeforeAll {
   . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
   Initialize-TestAmbient
+  # Split-AppsByFlag ist der gemeinsame Kern beider Rueckfragen (geschuetzte Apps, geratene
+  # Paket-Id) und muss mitgeladen werden - Split-ProtectedApps ist nur noch der Aufruf mit
+  # 'IsProtected'.
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '70-Runtime.ps1' -Name @(
-    'Split-ProtectedApps', 'Resolve-ProtectedRunChoice'))))
+    'Split-AppsByFlag', 'Split-ProtectedApps', 'Resolve-ProtectedRunChoice'))))
 
   function New-App {
     param([string]$Name, [bool]$Protected = $false)

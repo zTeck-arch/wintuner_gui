@@ -4,8 +4,11 @@
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '10-Settings.ps1' -Name @(
     'Test-IsProtectedApp', 'Set-ProtectedAppPatterns',
     'Add-ProtectedAppPattern', 'Remove-ProtectedAppPattern'))))
+  # Split-AppsByFlag ist der gemeinsame Kern beider Lauf-Rueckfragen (geschuetzte Apps, geratene
+  # Paket-Id); Split-ProtectedApps ist nur noch der Aufruf mit 'IsProtected'.
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '70-Runtime.ps1' -Name @(
-    'Confirm-ProtectedAppsInRun', 'Split-ProtectedApps', 'Resolve-ProtectedRunChoice'))))
+    'Confirm-ProtectedAppsInRun', 'Split-AppsByFlag', 'Split-ProtectedApps',
+    'Resolve-ProtectedRunChoice'))))
 
   function New-Candidate {
     param([string]$Name, [bool]$Protected = $false, [string]$From = '1.0', [string]$To = '2.0')

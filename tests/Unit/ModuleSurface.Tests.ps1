@@ -102,7 +102,16 @@ Describe 'Die ausgelieferte Vertragsliste' {
     foreach ($e in @($script:requiredModuleParameters)) {
       $e.Command   | Should -Not -BeNullOrEmpty
       $e.Parameter | Should -Not -BeNullOrEmpty
-      $e.Command   | Should -BeLike '*-Wt*' -Because 'es geht um das fremde WinTuner-Modul'
+      # Nicht jeder Befehl des Moduls traegt das Wt-Praefix: New-IntuneWinPackage und Show-MsiInfo
+      # kommen ebenfalls von dort (gemessen am 07.09.2026 mit Get-Command ... | ModuleName). Die
+      # Regel prueft deshalb die MODULHERKUNFT, nicht die Namensform - vorher haette sie genau die
+      # zwei Nachtraege abgelehnt, die in der Startpruefung gefehlt hatten.
+      $e.Command | Should -BeIn @(
+        'Connect-WtWinTuner', 'Disconnect-WtWinTuner', 'Search-WtWinGetPackage', 'New-WtWingetPackage',
+        'Deploy-WtWin32App', 'Deploy-WtWin32ContentVersion', 'Get-WtWin32Apps', 'Remove-WtWin32App',
+        'Deploy-WtMsStoreApp', 'Update-WtIntuneApp', 'Get-WtToken', 'Resolve-WtWingetId',
+        'New-IntuneWinPackage', 'Show-MsiInfo'
+      ) -Because 'die Vertragsliste nennt Befehle des fremden WinTuner-Moduls'
     }
   }
 

@@ -132,10 +132,36 @@ function Find-TenantStoreAppMatch {
   })
 }
 
-function Resolve-WingetIdForApp {
-  param([object]$App)
+# -Detailed liefert @{ Id; Source } statt nur der Id. Source ist eine von fuenf Herkunftsangaben:
+#
+#   override  der Benutzer hat die Id in WingetOverrides hinterlegt      belastbar
+#   marker    die Id stand in der App (WinTuner-Marke im Notizfeld)      belastbar
+#   exact     der Anzeigename traf einen WinGet-Namen GENAU              belastbar
+#   fuzzy     kein exakter Name, nur ein Aehnlichkeitstreffer            GERATEN
+#   none      keine Id                                                   nichts zu tun
+#
+# Warum die Herkunft ueberhaupt mitgefuehrt wird: 'fuzzy' ist die einzige Quelle, bei der die
+# Anwendung das Produkt RAET. Trifft sie daneben, baut der Lauf ein fremdes Herstellerpaket, loest
+# die selbst paketierte App ab und zieht deren Zuweisungen mit - bei einem von Hand gebauten Paket
+# holt das kein zweiter Lauf zurueck. Mit abgeschalteten Rueckfragen lief genau dieser Fall bisher
+# ohne einen einzigen Klick durch. Die Regeln unten (exakter Name, sonst Score >= 80 mit 15 Punkten
+# Abstand) bleiben unveraendert - neu ist nur, dass der Aufrufer erfaehrt, WELCHE davon gegriffen hat.
+# Eine Stelle fuer beide Rueckgabeformen von Resolve-WingetIdForApp. Ohne das haette jeder der fuenf
+# Ausstiege dort zwei Fassungen - und die erste, die jemand vergisst, meldet eine geratene Id als
+# belastbar.
+function New-WingetIdResult {
+  param([AllowEmptyString()][string]$Id, [Parameter(Mandatory)][string]$Source, [switch]$AsObject)
+  if ($AsObject) { return @{ Id = $Id; Source = $Source } }
+  if ([string]::IsNullOrWhiteSpace($Id)) { return $null }
+  return $Id
+}
 
-  if (-not $App -or [string]::IsNullOrWhiteSpace([string]$App.Name)) { return $null }
+function Resolve-WingetIdForApp {
+  param([object]$App, [switch]$Detailed)
+
+  if (-not $App -or [string]::IsNullOrWhiteSpace([string]$App.Name)) {
+    return (New-WingetIdResult -Id '' -Source 'none' -AsObject:$Detailed)
+  }
 
   # A saved override is authoritative. This is especially useful where the Intune display name
   # differs from the WinGet package name (for example a vendor suffix or installer type).
@@ -146,14 +172,16 @@ function Resolve-WingetIdForApp {
         $overrideId = [string]$script:settings.WingetOverrides[$overrideName]
         if (-not [string]::IsNullOrWhiteSpace($overrideId)) {
           Write-Log ("Using WinGet override for {0}: {1}" -f $appName, $overrideId.Trim())
-          return $overrideId.Trim()
+          return (New-WingetIdResult -Id $overrideId.Trim() -Source 'override' -AsObject:$Detailed)
         }
       }
     }
   }
 
   $id = Resolve-WtWingetId -AppOrResult $App
-  if (-not [string]::IsNullOrWhiteSpace($id)) { return $id }
+  if (-not [string]::IsNullOrWhiteSpace($id)) {
+    return (New-WingetIdResult -Id $id -Source 'marker' -AsObject:$Detailed)
+  }
   try {
     $res = @(Search-WtWinGetPackage -SearchQuery $App.Name -ErrorAction Stop)
   } catch {
@@ -168,7 +196,7 @@ function Resolve-WingetIdForApp {
     $exact = @($res | Where-Object { $_.Name -and [string]::Equals([string]$_.Name, [string]$App.Name, [System.StringComparison]::OrdinalIgnoreCase) })
     if ($exact.Count -eq 1) {
       $exactId = Resolve-WtWingetId -AppOrResult $exact[0]
-      if ($exactId) { return $exactId }
+      if ($exactId) { return (New-WingetIdResult -Id $exactId -Source 'exact' -AsObject:$Detailed) }
     }
 
     $scored = @($res | ForEach-Object {
@@ -180,13 +208,13 @@ function Resolve-WingetIdForApp {
     if ($scored.Count -gt 0) {
       $runnerUp = if ($scored.Count -gt 1) { [int]$scored[1].Score } else { 0 }
       if ([int]$scored[0].Score -ge 80 -and ([int]$scored[0].Score - $runnerUp) -ge 15) {
-        Write-Log ("Resolved WinGet id by high-confidence name match for {0}: {1} (score {2})" -f $App.Name, $scored[0].Id, $scored[0].Score)
-        return [string]$scored[0].Id
+        Write-Log ("Resolved WinGet id by high-confidence name match for {0}: {1} (score {2}). This id is GUESSED from the display name, not taken from the app or a mapping." -f $App.Name, $scored[0].Id, $scored[0].Score)
+        return (New-WingetIdResult -Id ([string]$scored[0].Id) -Source 'fuzzy' -AsObject:$Detailed)
       }
     }
     Write-Log ("No safe WinGet match for '{0}' ({1} result(s)); add a WingetOverrides mapping instead of guessing." -f $App.Name, $res.Count)
   }
-  return $null
+  return (New-WingetIdResult -Id '' -Source 'none' -AsObject:$Detailed)
 }
 
 # Reads the "Assign to" ComboBox + optional group-id TextBox and returns the value to

@@ -104,10 +104,26 @@ Describe 'Die Werksmuster treffen, was sie treffen sollen' {
 # Diese Faelle pruefen die AUSGELIEFERTE Liste, nicht die Rechnung darueber.
 Describe 'Die ausgelieferte Werksliste' {
 
-  It 'traegt an jedem Eintrag einen Platzhalter' {
+  It 'traegt an jedem Eintrag einen Platzhalter - ausser den namentlich begruendeten' {
     # Ohne '*' trifft ein Eintrag den Anzeigenamen exakt - und genau diese Produkte treten in
     # mehreren Fassungen auf ("ConnectWise Control", "ConnectWise Automate").
-    foreach ($p in $script:realFactory) { $p | Should -BeLike '*`**' }
+    #
+    # Die Ausnahmen stehen hier NAMENTLICH, damit ein neuer Eintrag ohne Platzhalter auffaellt,
+    # statt von einer aufgeweichten Regel mitgetragen zu werden:
+    #   'Syncro'  Der RMM-Agent heisst schlicht so. 'Syncro*' waere bequemer und falsch - es faengt
+    #             "Syncrosoft eLicenser" (Steinberg) mit, ein voellig fremdes Produkt. Deshalb der
+    #             exakte Name plus 'Syncro *' fuer jede Fassung mit Zusatz.
+    $exactByDesign = @('Syncro')
+    foreach ($p in $script:realFactory) {
+      if ($p -in $exactByDesign) { continue }
+      $p | Should -BeLike '*`**' -Because "$p muesste jede Fassung des Produkts treffen"
+    }
+  }
+
+  It 'ergaenzt jeden exakten Eintrag um ein Muster fuer Fassungen mit Zusatz' {
+    # Sonst schuetzt 'Syncro' nur den Agenten, der genau so heisst, und "Syncro Agent" laeuft
+    # ungefragt durch - der Fall, den der exakte Eintrag gerade verhindern sollte.
+    $script:realFactory | Should -Contain 'Syncro *'
   }
 
   It 'enthaelt keinen Eintrag doppelt' {
@@ -127,7 +143,14 @@ Describe 'Die ausgelieferte Werksliste' {
       # Nachtrag 03.09.2026
       'NinjaOne Agent', 'NinjaRMMAgent', 'Atera Agent', 'AteraAgent', 'Action1 Agent',
       'BeyondTrust Remote Support Jump Client', 'BeyondTrust Privileged Remote Access',
-      'BeyondTrust Privilege Management for Windows')) {
+      'BeyondTrust Privilege Management for Windows',
+      # Nachtrag 07.09.2026
+      'Kaseya Agent', 'Kaseya VSA Agent', 'TacticalRMM Agent', 'Tactical RMM Agent',
+      'Level.io Agent', 'Level.io',
+      # Nachtrag 07.09.2026, zweite Runde
+      'Syncro', 'Syncro Agent', 'Pulseway', 'Pulseway Manager', 'ImmyBot Agent',
+      'SuperOps Agent', 'Naverisk Agent', 'CentraStage', 'CentraStage Agent',
+      'Bomgar Remote Support', 'Bomgar Jump Client')) {
       Test-IsProtectedApp -Name $name -Patterns $script:realFactory |
         Should -BeTrue -Because "$name traegt die Kundenzuordnung im Installer"
     }
@@ -152,9 +175,26 @@ Describe 'Die ausgelieferte Werksliste' {
       'Java 8 Update 421', 'PDF24 Creator', 'Greenshot', 'FileZilla',
       # Der Grund, aus dem 'NinjaOne*'/'NinjaRMM*' dort steht und nicht 'Ninja*': ein fremdes
       # Produkt, dessen Name genauso anfaengt. Faellt das Muster je zusammen, schlaegt dieser Fall an.
-      'NinjaTrader')) {
+      'NinjaTrader',
+      # Und derselbe Grund fuer 'Syncro' + 'Syncro *' statt 'Syncro*': "Syncrosoft eLicenser" ist
+      # Steinbergs Lizenzverwaltung und hat mit dem RMM-Agenten nichts zu tun. Wird das Muster je
+      # zu 'Syncro*' verkuerzt, schlaegt dieser Fall an.
+      'Syncrosoft eLicenser', 'Syncrosoft')) {
       Test-IsProtectedApp -Name $name -Patterns $script:realFactory |
         Should -BeFalse -Because "$name wird nicht selbst paketiert und soll ohne Rueckfrage laufen"
+    }
+  }
+
+  # Dieselbe Gegenrichtung, nur eine Ebene hoeher: die Namensprobe darueber faengt nur, was jemand
+  # als Beispiel eintraegt. Diese Pruefung nennt die Praefixe, die BEQUEM waeren und deshalb
+  # irgendwann jemand einsetzt - und die genau deshalb nicht in der Werksliste stehen duerfen. Fuer
+  # 'Ninja*' ist der Fall belegt (NinjaTrader), fuer die anderen ist es dasselbe Muster: ein
+  # Wortanfang, der in fremden Produktnamen vorkommt. Ein zu breites Muster kostet eine Rueckfrage,
+  # die sich mit abgeschalteten Rueckfragen nicht wegdruecken laesst.
+  It 'benutzt keines der bequemen, zu breiten Praefixe' {
+    foreach ($tooBroad in @('Ninja*', 'Tactical*', 'Level*', 'VSA*', 'Agent*', 'Remote*', 'Trust*',
+                            'Syncro*', 'Super*', 'Immy*', 'Pulse*', 'Central*')) {
+      $script:realFactory | Should -Not -Contain $tooBroad -Because "$tooBroad trifft auch fremde Produkte"
     }
   }
 }

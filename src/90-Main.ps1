@@ -18,9 +18,14 @@ try {
   # 78 ms. Ein falscher Betriebssystemname in einem Protokoll, das in Tickets wandert, ist schlimmer
   # als ein unhandlicher richtiger.
   $osVer  = [Environment]::OSVersion.VersionString
+  # Ausdruecklich "hoechste VERFUEGBARE", nicht "geladene": das Modul wird erst weiter unten
+  # importiert, und welche Fassung dabei gewinnt, entscheidet die Reihenfolge im PSModulePath -
+  # nicht die Versionsnummer. Die geladene Fassung protokolliert die Zeile "WinTuner module X
+  # loaded from Y" nach dem Import. Bis zum 07.09.2026 stand hier nur diese Zahl und hiess einfach
+  # "WinTuner module": in einem Ticket war das die Version, die NICHT lief.
   $wtVer  = try { (Get-Module -ListAvailable -Name WinTuner | Sort-Object Version -Descending | Select-Object -First 1).Version.ToString() } catch { 'n/a' }
   Write-Log ("=" * 78)
-  Write-Log ("Session start | WinTuner GUI {0} | PowerShell {1} | WinTuner module {2}" -f $script:appVersion, $psVer, $wtVer)
+  Write-Log ("Session start | WinTuner GUI {0} | PowerShell {1} | WinTuner module {2} (highest installed; the loaded one is logged after the import)" -f $script:appVersion, $psVer, $wtVer)
   Write-Log ("Environment   | {0} | user {1} | lang {2} | theme {3}" -f $osVer, $env:USERNAME, $script:uiLanguage, $script:themeName)
   # Die wirksamen Einstellungen gehoeren in DIESES Protokoll: ohne sie ist jede Zeile darunter nur
   # halb lesbar ("warum sucht er beim Anmelden Updates?", "warum fragt er nicht nach?").
@@ -79,9 +84,14 @@ try {
   if ($missingParameters.Count -gt 0) {
     Write-Log ("The installed WinTuner module is missing {0} parameter(s) this application binds: {1}" -f
       $missingParameters.Count, ($missingParameters -join '; '))
+    # Ausblendbar, aber am Inhalt festgemacht: fehlt spaeter ein ANDERER Parameter, ist das eine
+    # neue Aussage und die Meldung kommt wieder. Genau darum geht es hier - der Fehlerbericht vom
+    # 03.09.2026 war ein fehlender Parameter, den vorher nichts genannt hat.
     Show-StartupDialog -Text ((Get-UiString 'ModParametersMissingDialog') -f ($missingParameters -join "`r`n")) `
       -Title (Get-UiString 'ModParametersMissingTitle') `
-      -Icon ([System.Windows.Forms.MessageBoxIcon]::Warning)
+      -Icon ([System.Windows.Forms.MessageBoxIcon]::Warning) `
+      -SuppressKey 'ModParametersMissing' `
+      -SuppressFingerprint (($missingParameters | Sort-Object) -join ';')
   }
 
   # The command check above proves the cmdlets exist, not that they still behave the same way.
@@ -97,11 +107,49 @@ try {
   if ($winTunerModule) {
     Write-Log ("WinTuner module {0} loaded from {1}." -f $winTunerModule.Version, $winTunerModule.ModuleBase)
   }
+
+  # Mehr als eine installierte Fassung? Dann entscheidet die REIHENFOLGE im PSModulePath, welche
+  # laeuft - nicht die Versionsnummer (nachgemessen am 07.09.2026: mit umgedrehter Pfadreihenfolge
+  # laedt derselbe Rechner die aeltere). Solange niemand das weiss, sucht man einen
+  # Modulfehler in der Version, die man installiert hat, statt in der, die laeuft.
+  $moduleConflict = Get-ModuleVersionConflict `
+    -Available @(Get-Module -ListAvailable -Name WinTuner) -Loaded $winTunerModule
+  if ($moduleConflict.HasConflict) {
+    Write-Log ("WinTuner module is installed {0} times; PowerShell loads the FIRST one in PSModulePath, not the newest. Loaded: {1}. Found: {2}" -f `
+      $moduleConflict.Count, $moduleConflict.LoadedVersion, ($moduleConflict.Locations -join ' | '))
+    # Gewarnt wird nur, wenn wirklich eine aeltere laeuft. Zwei Installationen, von denen die
+    # neuere greift, sind unordentlich - aber kein Grund fuer einen Dialog beim Start.
+    if ($moduleConflict.LoadedIsOlder) {
+      Show-StartupDialog -Text ((Get-UiString 'ModMultipleVersionsDialog') -f `
+          $moduleConflict.LoadedVersion, $moduleConflict.HighestVersion, ($moduleConflict.Locations -join "`r`n")) `
+        -Title (Get-UiString 'ModMultipleVersionsTitle') `
+        -Icon ([System.Windows.Forms.MessageBoxIcon]::Warning) `
+        -SuppressKey 'ModMultipleVersions' `
+        -SuppressFingerprint ("{0}->{1}" -f $moduleConflict.LoadedVersion, $moduleConflict.HighestVersion)
+    }
+  }
+
+  # Befehle, deren Fehlen nur EINEN Bereich lahmlegt: benannt, aber kein Startabbruch.
+  $missingOptional = @(Get-MissingOptionalCommands -Required $script:optionalModuleCommands `
+    -CommandLookup { param($name) Get-Command $name -ErrorAction SilentlyContinue })
+  if ($missingOptional.Count -gt 0) {
+    Write-Log ("The installed WinTuner module is missing {0} optional command(s); the affected features will fail when used: {1}" -f `
+      $missingOptional.Count, ($missingOptional -join ', '))
+    Show-StartupDialog -Text ((Get-UiString 'ModOptionalMissingDialog') -f ($missingOptional -join "`r`n")) `
+      -Title (Get-UiString 'ModOptionalMissingTitle') `
+      -Icon ([System.Windows.Forms.MessageBoxIcon]::Warning) `
+      -SuppressKey 'ModOptionalMissing' `
+      -SuppressFingerprint (($missingOptional | Sort-Object) -join ',')
+  }
   if ($winTunerModule -and $winTunerModule.Version.Major -gt 1) {
     Write-Log ("WinTuner module version {0} is newer than the 1.x line this GUI was written and tested against." -f $winTunerModule.Version)
+    # Der Fingerabdruck ist die Modulversion: fuer die eine 2.x, die jemand ausblendet, bleibt es
+    # aus - die naechste kommt wieder, denn sie kann sich anders verhalten.
     Show-StartupDialog -Text ((Get-UiString 'ModVersionUntestedDialog') -f $winTunerModule.Version) `
       -Title (Get-UiString 'ModVersionUntestedTitle') `
-      -Icon ([System.Windows.Forms.MessageBoxIcon]::Warning)
+      -Icon ([System.Windows.Forms.MessageBoxIcon]::Warning) `
+      -SuppressKey 'ModVersionUntested' `
+      -SuppressFingerprint ([string]$winTunerModule.Version)
   }
 
   $script:winTunerModuleImported = $true
@@ -812,12 +860,20 @@ $updateSearchButton.Add_Click({
       }
     }
     $resolvedIds = @{}
+    # Woher jede Id kommt (override|marker|exact|fuzzy|none). Hier erhoben und nicht spaeter erneut:
+    # eine zweite Auflaesung waere eine zweite Netzsuche je App, und sie koennte anders ausfallen.
+    $resolvedIdSources = @{}
     $skippedNoWingetId = 0
+    $fuzzyResolvedCount = 0
     foreach ($a in $appsToCheck) {
       try {
-        $resolvedIds[[string]$a.GraphId] = [string](Resolve-WingetIdForApp -App $a)
+        $resolved = Resolve-WingetIdForApp -App $a -Detailed
+        $resolvedIds[[string]$a.GraphId] = [string]$resolved.Id
+        $resolvedIdSources[[string]$a.GraphId] = [string]$resolved.Source
+        if ([string]$resolved.Source -eq 'fuzzy') { $fuzzyResolvedCount++ }
       } catch {
         $resolvedIds[[string]$a.GraphId] = ''
+        $resolvedIdSources[[string]$a.GraphId] = 'none'
         Write-Log ("Could not resolve a WinGet id for '{0}' ({1}): {2}" -f $a.Name, $a.GraphId, $_.Exception.Message)
       }
       if ([string]::IsNullOrWhiteSpace([string]$resolvedIds[[string]$a.GraphId])) {
@@ -825,8 +881,8 @@ $updateSearchButton.Add_Click({
         Write-Log ("Update scan cannot check '{0}' ({1}): no WinGet package id could be resolved, so there is nothing to compare its version against." -f [string]$a.Name, [string]$a.GraphId)
       }
     }
-    Write-Log ("Update scan input: {0} app object(s) from the inventory -> {1} checkable, {2} without version/Graph id, {3} without a resolvable WinGet id; already-superseded Graph objects are excluded before this point." -f `
-      @($all).Count, $appsToCheck.Count, $skippedIncomplete, $skippedNoWingetId)
+    Write-Log ("Update scan input: {0} app object(s) from the inventory -> {1} checkable, {2} without version/Graph id, {3} without a resolvable WinGet id, {4} with a GUESSED id (name similarity, no override/marker/exact name); already-superseded Graph objects are excluded before this point." -f `
+      @($all).Count, $appsToCheck.Count, $skippedIncomplete, $skippedNoWingetId, $fuzzyResolvedCount)
 
     # Fortschritt in Prozent anzeigen. -Cancellable: die Schleife unten fragt den Merker ab. Die
     # Suche schreibt nichts, sie fragt nur Versionen ab - sie darf jederzeit zwischen zwei Apps
@@ -895,7 +951,7 @@ $updateSearchButton.Add_Click({
                 $targetName = if ($existingTarget) { [string]$existingTarget.Name } else { $null }
                 $showCandidate = (-not $existingTarget) -or (Test-RequiresExistingTargetFollowUp -SourceApp $app -ExistingTarget $existingTarget)
                 if ($showCandidate) {
-                  $candidates.Add((New-UpdateCandidateModel -App $app -LatestVersion $latest -PackageId $wingetId -ExistingTargetGraphId $targetId -ExistingTargetName $targetName))
+                  $candidates.Add((New-UpdateCandidateModel -App $app -LatestVersion $latest -PackageId $wingetId -ExistingTargetGraphId $targetId -ExistingTargetName $targetName -PackageIdSource ([string]$resolvedIdSources[[string]$app.GraphId])))
                 }
                 if ($targetId -and $showCandidate) {
                   Write-Log ("Follow-up only: {0} ({1}, GraphId {2}) has existing target {3} ({4}); no package or upload is required." -f $app.Name, $app.CurrentVersion, $app.GraphId, $latest, $targetId)
@@ -933,7 +989,7 @@ $updateSearchButton.Add_Click({
               $targetName = if ($existingTarget) { [string]$existingTarget.Name } else { $null }
               $showCandidate = (-not $existingTarget) -or (Test-RequiresExistingTargetFollowUp -SourceApp $app -ExistingTarget $existingTarget)
               if ($showCandidate) {
-                $candidates.Add((New-UpdateCandidateModel -App $app -LatestVersion $fallbackLatest -PackageId $wingetId -ExistingTargetGraphId $targetId -ExistingTargetName $targetName))
+                $candidates.Add((New-UpdateCandidateModel -App $app -LatestVersion $fallbackLatest -PackageId $wingetId -ExistingTargetGraphId $targetId -ExistingTargetName $targetName -PackageIdSource ([string]$resolvedIdSources[[string]$app.GraphId])))
               }
               if ($targetId -and $showCandidate) {
                 Write-Log ("Follow-up only (metadata fallback): {0} ({1}, GraphId {2}) has existing target {3} ({4}); no package or upload is required." -f $app.Name, $app.CurrentVersion, $app.GraphId, $fallbackLatest, $targetId)
@@ -1115,6 +1171,20 @@ $updateSelectedButton.Add_Click({
         Update-Status ((Get-UiString 'ProtectedRunSkippedStatus') -f @($protectedChoice.Skipped).Count, $checkedApps.Count)
     }
 
+    # NACH den geschuetzten und ebenfalls VOR der allgemeinen Rueckfrage: eine geratene Paket-Id kann
+    # das falsche Produkt paketieren und die vorhandene App damit abloesen. Auch diese Frage laesst
+    # sich mit abgeschalteten Rueckfragen nicht wegdruecken. Geschuetzte Apps sind hier ausgenommen,
+    # die sind eine Frage vorher schon ausdruecklich freigegeben worden.
+    $fuzzyChoice = Confirm-FuzzyMatchedAppsInRun -Apps @($checkedApps)
+    if (-not $fuzzyChoice.Proceed) {
+        Update-Status (Get-UiString $(if ($fuzzyChoice.Reason -eq 'empty') { 'FuzzyRunNothingLeftStatus' } else { 'MassUpdateCanceledStatus' }))
+        return
+    }
+    $checkedApps = @($fuzzyChoice.Apps)
+    if (@($fuzzyChoice.Skipped).Count -gt 0) {
+        Update-Status ((Get-UiString 'FuzzyRunSkippedStatus') -f @($fuzzyChoice.Skipped).Count, $checkedApps.Count)
+    }
+
     # Confirm before touching the tenant – the selection can be larger than expected (filters,
     # "check all"), and updating apps in Intune is not something to trigger by a stray click.
     $namesPreview = (@($checkedApps | Select-Object -First 15 | ForEach-Object {
@@ -1184,6 +1254,18 @@ $updateAllButton.Add_Click({
     $updatedApps = @($protectedChoice.Apps)
     if (@($protectedChoice.Skipped).Count -gt 0) {
         Update-Status ((Get-UiString 'ProtectedRunSkippedStatus') -f @($protectedChoice.Skipped).Count, $updatedApps.Count)
+    }
+
+    # Und derselbe Riegel fuer die geratenen Paket-Ids. "Alle aktualisieren" ist auch hier der Weg,
+    # auf dem eine ungesehen mitlaeuft - mit abgeschalteten Rueckfragen ohne einen einzigen Klick.
+    $fuzzyChoice = Confirm-FuzzyMatchedAppsInRun -Apps @($updatedApps)
+    if (-not $fuzzyChoice.Proceed) {
+        Update-Status (Get-UiString $(if ($fuzzyChoice.Reason -eq 'empty') { 'FuzzyRunNothingLeftStatus' } else { 'MassUpdateCanceledStatus' }))
+        return
+    }
+    $updatedApps = @($fuzzyChoice.Apps)
+    if (@($fuzzyChoice.Skipped).Count -gt 0) {
+        Update-Status ((Get-UiString 'FuzzyRunSkippedStatus') -f @($fuzzyChoice.Skipped).Count, $updatedApps.Count)
     }
 
     $rootPackageFolder = try { [System.IO.Path]::GetFullPath($pathBox.Text.Trim()) } catch {
@@ -2489,6 +2571,22 @@ $form.Add_Shown({
   try { if (Get-Command Update-ProtectedAppsList -ErrorAction SilentlyContinue) { Update-ProtectedAppsList } } catch { Write-LogDebug 'protected apps list after seeding' }
 })
 
+# Die einmalige Anhebung von MaxRecentLogins festschreiben. Wie beim Werksschutz darueber ohne
+# Dialog und ohne Test-UnattendedRun-Ausstieg: hier passiert nichts Modales, und ohne das Speichern
+# liefe die Anhebung bei jedem Start erneut - dann waere ein danach kleiner gesetzter Wert bei
+# jedem Start wieder weg.
+$form.Add_Shown({
+  if ($script:maxRecentLoginsRaisedFrom -lt 0) { return }
+  $from = [int]$script:maxRecentLoginsRaisedFrom
+  $script:maxRecentLoginsRaisedFrom = -1
+  Save-Settings
+  Write-Log ("Recent logins: the saved limit of {0} was raised once to the current default of {1}; a smaller value set from now on is kept." -f `
+    $from, [int]$script:settings.MaxRecentLogins)
+  # Kein Update-RecentLoginsUI: die Anhebung aendert nur, wie viele Adressen KUENFTIG passen. Die
+  # frueher hinten herausgefallenen sind weg und kommen nicht zurueck - das Menue zeigt schon alles,
+  # was noch da ist.
+})
+
 $form.Add_Shown({
   # Unbeaufsichtigt: nichts von hier - siehe der erste Add_Shown-Handler oben.
   if (Test-UnattendedRun) { return }
@@ -2715,18 +2813,28 @@ if ($env:WINTUNER_SMOKE -eq '1') {
 }
 
 # Run the form mit finalem Sicherheitsnetz
-if ([string]$script:settings.ProductionWarningAcceptedVersion -ne $script:appVersion) {
-  $riskAnswer = [System.Windows.Forms.MessageBox]::Show(
-    (Get-UiString 'ProductionWarningDialog'),
-    (Get-UiString 'ProductionWarningTitle'),
-    [System.Windows.Forms.MessageBoxButtons]::YesNo,
-    [System.Windows.Forms.MessageBoxIcon]::Warning,
-    [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
-  if ($riskAnswer -ne [System.Windows.Forms.DialogResult]::Yes) {
+#
+# Zwei Merker, und das ist Absicht: ProductionWarningAcceptedVersion laesst die Warnung nach einem
+# Update noch einmal kommen (jede Version kann neue Eingriffe mitbringen), das Haekchen
+# "nicht mehr anzeigen" schaltet sie dauerhaft ab. Auf Wunsch aus dem Betrieb - wer sie zwanzig Mal
+# bestaetigt hat, liest sie beim einundzwanzigsten Mal nicht mehr, und dann ist sie nur noch ein
+# Klick. Zurueckholen laesst sich das in den Einstellungen.
+$productionWarningHidden = Test-StartupNoticeSuppressed `
+  -Store $script:settings.SuppressedStartupNotices -Key 'ProductionWarning' -Fingerprint ''
+if ($productionWarningHidden) {
+  Write-FileLog 'Production-risk warning is hidden by the user (can be re-enabled under Settings); it was not shown.'
+} elseif ([string]$script:settings.ProductionWarningAcceptedVersion -ne $script:appVersion) {
+  $risk = Show-ProductionWarningDialog
+  if (-not $risk.Accepted) {
     Write-FileLog "Startup canceled: production-risk warning was not accepted."
     return
   }
   $script:settings.ProductionWarningAcceptedVersion = $script:appVersion
+  if ($risk.Hide) {
+    if ($null -eq $script:settings.SuppressedStartupNotices) { $script:settings.SuppressedStartupNotices = @{} }
+    $script:settings.SuppressedStartupNotices['ProductionWarning'] = ''
+    Write-FileLog 'Production-risk warning was accepted and hidden for future starts at the user request.'
+  }
   Save-Settings
 }
 

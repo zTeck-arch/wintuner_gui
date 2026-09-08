@@ -137,8 +137,15 @@ Log files never contain any of this. They record how many entries exist, never t
     ProtectedRunConfirmDialog = "{0} app(s) in this run are marked as self-packaged:`r`n`r`n{1}`r`n`r`nUpdating them creates a new app, supersedes the existing one and moves its assignments. For a package built by hand, that cannot be undone by re-running anything.`r`n`r`nThis question is asked even when confirmations are switched off in Settings.`r`n`r`nLeave them out and the rest of the run continues unchanged."
     ProtectedRunSkipButton = "Continue without the protected ones"
     ProtectedRunAllButton = "Update all, protected included"
+    FuzzyRunConfirmTitle = "Guessed package ids in this run"
+    FuzzyRunConfirmDialog = "For {0} app(s) in this run the WinGet package id was GUESSED from the display name - there is no saved mapping, no WinTuner marker and no exact name match:`r`n`r`n{1}`r`n`r`nIf a guess is wrong, the run packages the WRONG product, supersedes the existing app with it and moves its assignments. For an app packaged by hand, that cannot be undone by re-running anything.`r`n`r`nCheck the id next to each name. If one is wrong, leave these out and assign the correct id first (right-click the row in the update list).`r`n`r`nThis question is asked even when confirmations are switched off in Settings.`r`n`r`nLeave them out and the rest of the run continues unchanged."
+    FuzzyRunSkipButton = "Continue without the guessed ones"
+    FuzzyRunAllButton = "Update all, guessed ids included"
+    UpdateStateFuzzyId = "package id guessed from the name"
     ProtectedRunSkippedStatus = "{0} protected app(s) left out; running {1} app(s)."
     ProtectedRunNothingLeftStatus = "Only protected apps were selected - nothing left to run."
+    FuzzyRunSkippedStatus = "{0} app(s) with a guessed package id left out; running {1} app(s)."
+    FuzzyRunNothingLeftStatus = "Only apps with a guessed package id were selected - nothing left to run."
     TabAppSettings = "App settings"
     TabTenantApps = "All tenant apps"
     TabOwnPackage = "Own installers"
@@ -492,6 +499,7 @@ Which defaults apply: return codes 0/1707 count as success, 3010/1641 as restart
     HintKeepVersionCount = "Applies to the automatic clean-up above and to the ""All apps: keep newest"" button in the Updates section. The new number is used only after saving."
     HintSaveScope = "Reads an app's groups and keeps them for this session BEFORE the app is deleted, so a scope that turns out to have been needed can still be looked up under Tools > ""Kept assignments of deleted apps"". Costs one read per deletion and is the only record once the app is gone."
     SettingsCardSafety = "Confirmation prompts"
+    HintStartupNoticesReset = "Startup messages carrying a 'Do not show this message again' box - a WinTuner module that is too old, a module installed twice, the production-risk warning - stay hidden once you tick it. A hidden message still goes to the activity log. This button brings all of them back."
     HintSuppressConfirmations = "Normally every change in Intune - starting an update run, changing assignments, replacing app content - asks once before it happens. Switched off, the first click takes effect in the customer tenant. Has to be acknowledged again after each new version of this tool."
     HintSelfUpdate = "Checks GitHub for a newer version of this script and can replace it in place. Manual only - the tool never updates itself unasked. Without a repository configured in the source the button stays disabled; the update search for your Intune apps above works regardless."
     InfoCardPackaging = @"
@@ -519,6 +527,15 @@ Switching them off is meant for repetitive work you have already validated. Two 
     FirstRunCleanupTitle = "Old-version cleanup is disabled"
     FirstRunCleanupDialog = "For safety, automatically deleting assigned predecessor versions is disabled on first use.`r`n`r`nUpdates can still create supersedence and move assignments. An unassigned predecessor is removed automatically only when Intune confirms both zero assignments and zero successful installations.`r`n`r`nYou can enable deletion of assigned predecessors under Settings > 'Delete the predecessor version right after a successful update'.`r`n`r`nOpen Settings now?"
     ProductionWarningTitle = "Important warning for production environments"
+    ProductionWarningAcceptButton = "Yes, I understand the risk"
+    ProductionWarningDeclineButton = "Quit"
+    ProductionWarningHideCheckbox = "Do not show this warning again (also after an update)"
+    SettingsStartupNoticesLabel = "Hidden startup messages:"
+    SettingsStartupNoticesResetButton = "Show all again"
+    TtSettingsStartupNoticesReset = "Brings back every startup message you hid with 'Do not show this message again' - including the production-risk warning. Hidden messages still go to the activity log; this button only makes them visible again at startup."
+    SettingsStartupNoticesNoneLabel = "none hidden"
+    SettingsStartupNoticesCountLabel = "{0} hidden"
+    SettingsStartupNoticesResetStatus = "{0} hidden startup message(s) will be shown again."
     ProductionWarningDialog = "Use of WinTuner GUI in production customer environments is at your own risk.`r`n`r`nThis tool can create, assign, supersede, unassign, and delete apps in Microsoft Intune. Incorrect packages, scopes, filters, deadlines, or cleanup settings can affect users and devices.`r`n`r`nBefore production use:`r`n- validate the package plus detection and requirement rules in a test tenant or test group`r`n- review assignments, filters, notifications, deadlines, and restart behavior`r`n- verify rollback/recovery and keep the activity log`r`n`r`nNo warranty is given for effects caused by WinTuner, Microsoft Graph, WinGet packages, or tenant-specific policies.`r`n`r`nDo you understand the risk and want to continue?"
     SaveSettingsButton = "Save Settings"
     ClearCacheButton = "Clear Version Cache"
@@ -653,6 +670,38 @@ That is almost always an outdated module. Please update it and restart:
 Until then the affected functions fail at the moment you use them - for example the WinGet package search.
 "@
     ModParametersMissingTitle = "WinTuner module too old"
+    ModMultipleVersionsTitle = "WinTuner module installed more than once"
+    ModMultipleVersionsDialog = @"
+This machine has more than one copy of the WinTuner module installed, and the one that loaded is NOT the newest.
+
+Loaded: {0}
+Newest installed: {1}
+
+Installed copies:
+{2}
+
+PowerShell picks the FIRST match in PSModulePath, not the highest version - so a module you installed may not be the module that runs. Symptoms look like bugs in this application: a command exists but takes a different parameter, or behaves differently than the version number suggests.
+
+To clean this up, remove the copy you do not want:
+
+    Get-Module -ListAvailable WinTuner | Select-Object Version, ModuleBase
+    Uninstall-Module WinTuner -RequiredVersion {0} -AllVersions:$false
+
+A copy under C:\Program Files\WindowsPowerShell\Modules usually comes from Windows PowerShell 5.1 and can be removed if only this application uses it.
+"@
+    ModOptionalMissingTitle = "WinTuner module is missing optional commands"
+    ModOptionalMissingDialog = @"
+The installed WinTuner module does not offer these commands:
+
+{0}
+
+Everything else works. These belong to "Own installers": building an .intunewin package, replacing the content of an existing app and reading MSI properties. Those actions will fail at the moment you use them.
+
+Updating the module usually fixes it:
+
+    Update-Module WinTuner -Scope CurrentUser
+"@
+    StartupNoticeHideCheckbox = "Do not show this message again"
     SearchFailedStatus = "Search failed: {0}"
     TenantAppDeleteButton = "Delete selected..."
     TtTenantAppDelete = "Deletes the selected apps from Intune - permanently, and not only for this view. Multiple rows can be selected with Ctrl or Shift. Before the question, every app is checked for assignments and successful installations, and the answer is shown to you. Apps on the protected list are never deleted here, and an app whose state Intune does not report is not deleted either. This question is always asked, even with confirmations switched off."
@@ -1010,6 +1059,8 @@ What it is NOT: it does not create, update or delete apps, and it does not chang
     ScopeSnapshotUnreadable = "assignment could not be read before deletion"
     ScopeSnapshotEmpty = "Nothing has been deleted in this session, so no assignments had to be kept."
     ScopeSnapshotIntro = "Assignments of apps deleted in this session. Kept so a scope that turns out to have been needed can still be rebuilt by hand - the app object itself is gone from Intune."
+    ScopeSnapshotEmptyCount = "Plus {0} deleted app(s) that provably carried no assignment - nothing to rebuild there. They are named individually in the activity log."
+    ScopeSnapshotAllEmpty = "All {0} app(s) deleted in this session provably carried no assignment, so there is nothing to rebuild. That is the normal case for a superseded predecessor: its assignments had already been moved to the new version before it was deleted. Each one is named individually in the activity log."
     ScopeSnapshotTitle = "Kept assignments (this session)"
     MenuScopeSnapshots = "Kept assignments of deleted apps..."
     ScopeSnapshotReasonConsolidation = "consolidated into an existing target during an update"
@@ -1336,8 +1387,15 @@ In den Protokolldateien steht nichts davon. Sie halten fest, wie viele Einträge
     ProtectedRunConfirmDialog = "{0} App(s) in diesem Lauf sind als selbst paketiert markiert:`r`n`r`n{1}`r`n`r`nEin Update legt eine neue App an, löst die vorhandene ab und zieht deren Zuweisungen mit. Bei einem von Hand gebauten Paket lässt sich das durch kein erneutes Ausführen zurückholen.`r`n`r`nDiese Frage kommt auch dann, wenn Bestätigungen in den Einstellungen abgeschaltet sind.`r`n`r`nLässt man sie aus, läuft der Rest unverändert weiter."
     ProtectedRunSkipButton = "Ohne die geschützten fortfahren"
     ProtectedRunAllButton = "Alle aktualisieren, auch geschützte"
+    FuzzyRunConfirmTitle = "Geratene Paket-Ids in diesem Lauf"
+    FuzzyRunConfirmDialog = "Bei {0} App(s) in diesem Lauf wurde die WinGet-Paket-Id aus dem Anzeigenamen GERATEN - es gibt keine hinterlegte Zuordnung, keine WinTuner-Marke und keinen exakten Namenstreffer:`r`n`r`n{1}`r`n`r`nIst eine Vermutung falsch, paketiert der Lauf das FALSCHE Produkt, löst die vorhandene App damit ab und zieht deren Zuweisungen mit. Bei einer von Hand paketierten App lässt sich das durch kein erneutes Ausführen zurückholen.`r`n`r`nBitte die Id neben jedem Namen prüfen. Stimmt eine nicht, diese Apps auslassen und zuerst die richtige Id zuordnen (Rechtsklick auf die Zeile in der Update-Liste).`r`n`r`nDiese Frage kommt auch dann, wenn Bestätigungen in den Einstellungen abgeschaltet sind.`r`n`r`nLässt man sie aus, läuft der Rest unverändert weiter."
+    FuzzyRunSkipButton = "Ohne die geratenen fortfahren"
+    FuzzyRunAllButton = "Alle aktualisieren, auch geratene"
+    UpdateStateFuzzyId = "Paket-Id aus dem Namen geraten"
     ProtectedRunSkippedStatus = "{0} geschützte App(s) ausgelassen; {1} App(s) werden bearbeitet."
     ProtectedRunNothingLeftStatus = "Es waren nur geschützte Apps angehakt - es bleibt nichts zu tun."
+    FuzzyRunSkippedStatus = "{0} App(s) mit geratener Paket-Id ausgelassen; {1} App(s) werden bearbeitet."
+    FuzzyRunNothingLeftStatus = "Es waren nur Apps mit geratener Paket-Id angehakt - es bleibt nichts zu tun."
     TabAppSettings = "App-Einstellungen"
     TabTenantApps = "Alle Tenant-Apps"
     TabOwnPackage = "Eigene Installer"
@@ -1689,6 +1747,7 @@ Welche Standardwerte gelten: Rückgabewerte 0/1707 als Erfolg, 3010/1641 als Neu
     HintKeepVersionCount = "Gilt für die automatische Bereinigung darüber und für den Knopf ""Alle Apps: neueste N behalten"" im Bereich ""Updates"". Der neue Wert greift erst nach dem Speichern."
     HintSaveScope = "Liest die Gruppen einer App und merkt sie sich für diese Sitzung, BEVOR die App gelöscht wird - so lässt sich ein doch benötigter Scope später unter ""Extras > Gesicherte Zuweisungen gelöschter Apps"" nachsehen. Kostet eine Leseabfrage je Löschung und ist der einzige Nachweis, sobald die App weg ist."
     SettingsCardSafety = "Rückfragen"
+    HintStartupNoticesReset = "Startmeldungen mit einem Kontrollkästchen zum Ausblenden - ein zu altes WinTuner-Modul, ein doppelt installiertes Modul, der Produktivhinweis - bleiben weg, sobald das Häkchen gesetzt ist. Eine ausgeblendete Meldung steht weiterhin im Aktivitätsprotokoll. Dieser Knopf holt alle zurück."
     HintSuppressConfirmations = "Normalerweise fragt jede Änderung in Intune - Update-Lauf starten, Zuweisungen ändern, App-Inhalt ersetzen - einmal nach, bevor sie passiert. Abgeschaltet wirkt der erste Klick im Kundentenant. Muss nach jeder neuen Version dieses Werkzeugs erneut bestätigt werden."
     HintSelfUpdate = "Prüft auf GitHub, ob es eine neuere Version dieses Skripts gibt, und kann es an Ort und Stelle ersetzen. Nur manuell - das Werkzeug aktualisiert sich nie von selbst. Ohne im Quellcode konfiguriertes Repository bleibt der Knopf deaktiviert; die Update-Suche für Ihre Intune-Apps darüber funktioniert davon unabhängig."
     InfoCardPackaging = @"
@@ -1716,6 +1775,15 @@ Sie abzuschalten ist für wiederkehrende, bereits geprüfte Arbeit gedacht. Zwei
     FirstRunCleanupTitle = "Löschen alter Versionen ist deaktiviert"
     FirstRunCleanupDialog = "Aus Sicherheitsgründen ist das automatische Löschen zugewiesener Vorgängerversionen beim ersten Start deaktiviert.`r`n`r`nUpdates können weiterhin eine Ablösebeziehung erstellen und Zuweisungen umziehen. Ein unzugewiesener Vorgänger wird nur dann automatisch entfernt, wenn Intune sowohl null Zuweisungen als auch null erfolgreiche Installationen bestätigt.`r`n`r`nDas Löschen zugewiesener Vorgänger kann unter Einstellungen > 'Vorgänger-Version direkt nach einem erfolgreichen Update löschen' aktiviert werden.`r`n`r`nEinstellungen jetzt öffnen?"
     ProductionWarningTitle = "Wichtiger Hinweis für Produktivumgebungen"
+    ProductionWarningAcceptButton = "Ja, ich verstehe das Risiko"
+    ProductionWarningDeclineButton = "Beenden"
+    ProductionWarningHideCheckbox = "Diesen Hinweis nicht mehr anzeigen (auch nicht nach einem Update)"
+    SettingsStartupNoticesLabel = "Ausgeblendete Startmeldungen:"
+    SettingsStartupNoticesResetButton = "Alle wieder anzeigen"
+    TtSettingsStartupNoticesReset = "Holt jede Startmeldung zurück, die Sie über das Kontrollkästchen im Dialog ausgeblendet haben - einschließlich des Produktivhinweises. Ausgeblendete Meldungen stehen weiterhin im Aktivitätsprotokoll; dieser Knopf macht sie nur beim Start wieder sichtbar."
+    SettingsStartupNoticesNoneLabel = "keine ausgeblendet"
+    SettingsStartupNoticesCountLabel = "{0} ausgeblendet"
+    SettingsStartupNoticesResetStatus = "{0} ausgeblendete Startmeldung(en) werden wieder angezeigt."
     ProductionWarningDialog = "Die Nutzung von WinTuner GUI in produktiven Kundenumgebungen erfolgt auf eigene Gefahr und Verantwortung.`r`n`r`nDieses Werkzeug kann Apps in Microsoft Intune erstellen, zuweisen, ablösen, entziehen und löschen. Fehlerhafte Pakete, Scopes, Filter, Fristen oder Bereinigungseinstellungen können Benutzer und Geräte beeinträchtigen.`r`n`r`nVor dem produktiven Einsatz:`r`n- Paket sowie Erkennungs- und Anforderungsregeln in einem Test-Tenant oder einer Testgruppe prüfen`r`n- Zuweisungen, Filter, Benachrichtigungen, Fristen und Neustartverhalten kontrollieren`r`n- Rollback/Wiederherstellung verifizieren und das Aktivitätsprotokoll aufbewahren`r`n`r`nEs wird keine Gewähr für Auswirkungen durch WinTuner, Microsoft Graph, WinGet-Pakete oder tenant-spezifische Richtlinien übernommen.`r`n`r`nVerstehen Sie das Risiko und möchten Sie fortfahren?"
     SaveSettingsButton = "Einstellungen speichern"
     ClearCacheButton = "Versions-Cache leeren"
@@ -1850,6 +1918,38 @@ Das ist fast immer ein veraltetes Modul. Bitte aktualisieren und neu starten:
 Bis dahin scheitern die betroffenen Funktionen erst in dem Moment, in dem Sie sie benutzen - zum Beispiel die WinGet-Paketsuche.
 "@
     ModParametersMissingTitle = "WinTuner-Modul zu alt"
+    ModMultipleVersionsTitle = "WinTuner-Modul mehrfach installiert"
+    ModMultipleVersionsDialog = @"
+Auf diesem Rechner ist das WinTuner-Modul mehr als einmal installiert, und geladen wurde NICHT die neueste Fassung.
+
+Geladen: {0}
+Neueste installierte: {1}
+
+Gefundene Installationen:
+{2}
+
+PowerShell nimmt den ERSTEN Treffer im PSModulePath, nicht die höchste Version - das Modul, das Sie installiert haben, muss also nicht das Modul sein, das läuft. Die Symptome sehen wie Fehler dieser Anwendung aus: ein Befehl ist vorhanden, verlangt aber einen anderen Parameter, oder verhält sich anders, als die Versionsnummer vermuten lässt.
+
+Zum Aufräumen die Fassung entfernen, die nicht gebraucht wird:
+
+    Get-Module -ListAvailable WinTuner | Select-Object Version, ModuleBase
+    Uninstall-Module WinTuner -RequiredVersion {0} -AllVersions:$false
+
+Eine Fassung unter C:\Program Files\WindowsPowerShell\Modules stammt üblicherweise von Windows PowerShell 5.1 und kann weg, wenn nur diese Anwendung das Modul benutzt.
+"@
+    ModOptionalMissingTitle = "Dem WinTuner-Modul fehlen optionale Befehle"
+    ModOptionalMissingDialog = @"
+Das installierte WinTuner-Modul kennt diese Befehle nicht:
+
+{0}
+
+Alles andere funktioniert. Diese gehören zum Bereich Eigene Installer: ein .intunewin-Paket bauen, den Inhalt einer vorhandenen App ersetzen und MSI-Eigenschaften lesen. Diese Aktionen scheitern in dem Moment, in dem Sie sie benutzen.
+
+Das Modul zu aktualisieren behebt es üblicherweise:
+
+    Update-Module WinTuner -Scope CurrentUser
+"@
+    StartupNoticeHideCheckbox = "Diese Meldung nicht mehr anzeigen"
     SearchFailedStatus = "Suche fehlgeschlagen: {0}"
     TenantAppDeleteButton = "Ausgewählte löschen..."
     TtTenantAppDelete = "Löscht die ausgewählten Apps aus Intune - endgültig, und nicht nur für diese Ansicht. Mehrere Zeilen lassen sich mit Strg oder Umschalt auswählen. Vor der Rückfrage wird jede App auf Zuweisungen und erfolgreiche Installationen geprüft, und die Antwort wird Ihnen gezeigt. Apps auf der Schutzliste werden hier nie gelöscht, und eine App, deren Zustand Intune nicht meldet, ebenfalls nicht. Diese Rückfrage kommt immer, auch bei abgeschalteten Bestätigungen."
@@ -2207,6 +2307,8 @@ Was es NICHT ist: Es legt keine Apps an, aktualisiert und löscht keine, und es 
     ScopeSnapshotUnreadable = "Zuweisung war vor dem Löschen nicht lesbar"
     ScopeSnapshotEmpty = "In dieser Sitzung wurde nichts gelöscht, es musste also keine Zuweisung gesichert werden."
     ScopeSnapshotIntro = "Zuweisungen der in dieser Sitzung gelöschten Apps. Gesichert, damit ein Scope, der sich als nötig erweist, von Hand wiederhergestellt werden kann - das App-Objekt selbst ist in Intune weg."
+    ScopeSnapshotEmptyCount = "Dazu {0} gelöschte App(s), die nachweislich keine Zuweisung hatten - dort gibt es nichts wiederherzustellen. Im Aktivitätsprotokoll sind sie einzeln benannt."
+    ScopeSnapshotAllEmpty = "Alle {0} in dieser Sitzung gelöschten App(s) hatten nachweislich keine Zuweisung, es gibt also nichts wiederherzustellen. Das ist der Normalfall bei einer abgelösten Vorgängerversion: ihre Zuweisungen waren vor dem Löschen bereits auf die neue Version verschoben. Im Aktivitätsprotokoll ist jede einzeln benannt."
     ScopeSnapshotTitle = "Gesicherte Zuweisungen (diese Sitzung)"
     MenuScopeSnapshots = "Gesicherte Zuweisungen gelöschter Apps..."
     ScopeSnapshotReasonConsolidation = "beim Update in ein vorhandenes Ziel zusammengeführt"

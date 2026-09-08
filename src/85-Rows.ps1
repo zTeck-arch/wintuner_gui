@@ -47,6 +47,15 @@ function New-UpdateRow {
     }
     if (-not $alertLevel) { $alertLevel = 'warn' }
   }
+  # Eigener Block, nicht in den darueber gefaltet: "nicht von WinTuner gebaut" ist eine Aussage
+  # ueber die HERKUNFT DER APP, "Paket-Id aus dem Namen geraten" eine ueber die Herkunft der ID -
+  # und nur die zweite kann das falsche Produkt paketieren. Eine Zeile kann beides tragen, dann
+  # stehen auch beide da. Die Rueckfrage vor dem Lauf (Confirm-FuzzyMatchedAppsInRun) nennt
+  # zusaetzlich die geratene Id; hier ist kein Platz dafuer.
+  if ($App.PSObject.Properties['PackageIdFuzzy'] -and $App.PackageIdFuzzy) {
+    $noteParts.Add((Get-UiString 'UpdateStateFuzzyId'))
+    if (-not $alertLevel) { $alertLevel = 'warn' }
+  }
   # Two separate statements, because they mean different things to the reader: "the predecessors
   # really carry different assignments" versus "one of them could not be read". A predecessor with no
   # assignment at all is neither - it has nothing to hand over, so it is not mentioned here.
@@ -1631,6 +1640,50 @@ $suppressConfirmationsCheckbox.Add_CheckedChanged({
     $script:suppressConfirmSyncing = $true
     try { $suppressConfirmationsCheckbox.Checked = $false } finally { $script:suppressConfirmSyncing = $false }
   }
+})
+
+# Der Rueckweg fuer jede ausgeblendete Startmeldung. Ohne ihn waere das Kontrollkaestchen
+# "Diese Meldung nicht mehr anzeigen" eine Einbahnstrasse: die naechste Modulinkompatibilitaet stuende
+# nur noch im Protokoll, und niemand wuesste, dass es einen Schalter dafuer gibt. Er steht in DIESER
+# Karte, weil hier die Rueckfragen und Hinweise verwaltet werden.
+$startupNoticesResetButton = New-Object System.Windows.Forms.Button
+$startupNoticesResetButton.Text = Get-UiString 'SettingsStartupNoticesResetButton'
+$startupNoticesResetButton.Height = 30
+# Breite gemessen, nicht gesetzt: der deutsche Text ist laenger, und in sieben Designs traegt jede
+# Schriftart eine andere Breite.
+$startupNoticesResetButton.Width = [Math]::Max(140, (Get-ControlTextWidth -Control $startupNoticesResetButton) + 28)
+try { if ($toolTip) { $toolTip.SetToolTip($startupNoticesResetButton, (Get-UiString 'TtSettingsStartupNoticesReset')) } } catch { Write-LogDebug 'startup notices reset tooltip' }
+[void](Add-SettingRow -Card $cardSafety -Control $startupNoticesResetButton `
+  -Hint (Get-UiString 'HintStartupNoticesReset') -SpaceBefore 10)
+
+# Zeigt die Zahl im Knopfzustand, nicht in einer eigenen Zeile: ist nichts ausgeblendet, gibt es
+# nichts zurueckzuholen - dann ist der Knopf aus und sagt das auch.
+function Update-StartupNoticesResetButton {
+  if (-not $startupNoticesResetButton) { return }
+  $count = 0
+  try { $count = @($script:settings.SuppressedStartupNotices.Keys).Count } catch { $count = 0 }
+  $startupNoticesResetButton.Enabled = ($count -gt 0)
+  $text = (Get-UiString 'TtSettingsStartupNoticesReset') + ' - ' +
+    $(if ($count -gt 0) { (Get-UiString 'SettingsStartupNoticesCountLabel') -f $count }
+      else { Get-UiString 'SettingsStartupNoticesNoneLabel' })
+  try { if ($toolTip) { $toolTip.SetToolTip($startupNoticesResetButton, $text) } } catch { Write-LogDebug 'startup notices reset tooltip' }
+}
+Update-StartupNoticesResetButton
+
+$startupNoticesResetButton.Add_Click({
+  $count = 0
+  try { $count = @($script:settings.SuppressedStartupNotices.Keys).Count } catch { $count = 0 }
+  if ($count -eq 0) { return }
+  # Namentlich ins Protokoll: welche Meldungen waren ausgeblendet? Das ist die Frage, die nach
+  # einem seltsamen Verhalten gestellt wird.
+  Write-Log ("Hidden startup messages reset ({0}): {1}" -f $count, (@($script:settings.SuppressedStartupNotices.Keys) -join ', '))
+  # Auch die Version der Produktivwarnung zuruecksetzen, sonst kaeme sie trotz "wieder anzeigen"
+  # erst beim naechsten Update - und der Knopf haette scheinbar nichts getan.
+  $script:settings.SuppressedStartupNotices = @{}
+  $script:settings.ProductionWarningAcceptedVersion = ''
+  Save-Settings
+  Update-StartupNoticesResetButton
+  Update-Status ((Get-UiString 'SettingsStartupNoticesResetStatus') -f $count)
 })
 
 # --- Card 5: updates of this tool (self-update) --------------------------------------------------
