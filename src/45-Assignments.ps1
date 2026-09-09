@@ -45,6 +45,227 @@ function Get-AssignmentWriteErrorText {
   return $raw
 }
 
+# ---------------------------------------------------------------------------------------------
+# Mehrere Versionen derselben App gleichzeitig zugewiesen
+#
+# Gemeldet am 07.09.2026 mit einem Bild aus einem echten Tenant: sechs Eintraege "Google Chrome",
+# davon ZWEI zugewiesen - 152.0.7977.83 als Win32 und 152.0.7977.76 als MSI-line-of-business. Zwei
+# zugewiesene Fassungen derselben Software heisst, dass Geraete sie doppelt bekommen und niemand
+# sagen kann, welche gewinnt.
+#
+# Warum ein Update-Lauf das nicht loest: der greift nur, wenn es eine NEUERE Version zu bauen gibt.
+# Ist die neueste schon im Tenant, verschwindet die Zeile aus der Update-Liste - und der Zustand
+# bleibt unsichtbar. Deshalb eine eigene Erkennung.
+#
+# Die drei Entscheidungen dahinter (angesagt am 07.09.2026):
+#   1. "Dieselbe App" ist der gleiche ANZEIGENAME, ueber alle App-Typen. Nur so wird der zugewiesene
+#      MSI-Eintrag ueberhaupt gesehen: er traegt weder Hersteller noch WinGet-Id. Der Preis ist,
+#      dass zwei wirklich verschiedene Produkte mit identischem Namen zusammenfallen wuerden -
+#      deshalb nennt die Rueckfrage jede betroffene Fassung samt Typ und Version.
+#   2. Aufgeraeumt wird durch UEBERTRAGEN, nicht durch Entfernen: Move-AppAssignments nimmt Gruppe,
+#      Absicht, Filter und Einstellungen mit auf die neueste Version. Keine Gruppe verliert die App.
+#   3. Eine alte Version mit intent=uninstall wird AUSGELASSEN und benannt. Eine erzwungene
+#      Deinstallation gilt genau dieser Version; sie mitzunehmen wuerde die Deinstallation auf die
+#      Fassung richten, die bleiben soll.
+#
+# Reine Rechnung, ohne Graph und ohne Fenster: Liste rein, Plan raus. Genau diese Trennung macht die
+# Regeln pruefbar - eine Fehlentscheidung hier nimmt Geraeten eine App weg.
+# Ist das ein WINDOWS-App-Typ? Rein, damit die Liste der Typen an einer Stelle steht und ohne Graph
+# pruefbar ist.
+#
+# Geprueft wird gegen den rohen '@odata.type' ('#microsoft.graph.win32LobApp' und Verwandte). Ein
+# LEERER Typ gilt NICHT als Windows: lieber eine App nicht anfassen, als die Zuweisung einer
+# iOS-App auf eine Windows-App zu verschieben.
+function Test-IsWindowsAppType {
+  param([AllowNull()][string]$OdataType)
+  if ([string]::IsNullOrWhiteSpace($OdataType)) { return $false }
+  $t = ([string]$OdataType) -replace '^#?microsoft\.graph\.', ''
+  # 'win32LobApp', 'winGetApp', 'windowsMobileMSI', 'windowsUniversalAppX', 'windowsAppX',
+  # 'windowsMicrosoftEdgeApp', 'windowsStoreApp', 'officeSuiteApp', 'windowsWebApp',
+  # 'microsoftStoreForBusinessApp' - und ausdruecklich NICHT 'iosLobApp', 'androidStoreApp',
+  # 'webApp', 'macOS*'.
+  return ($t -match '^(win32|winGet|windows|officeSuite|microsoftStoreForBusiness)')
+}
+
+function Get-DuplicateAssignedPlan {
+  param(
+    [AllowNull()][AllowEmptyCollection()][object[]]$Apps,
+    # Namen der geschuetzten Muster. Eine geschuetzte App wird ausgelassen und benannt: sie ist
+    # selbst paketierte Kundensoftware, und wer ihre Zuweisungen verschieben will, hebt vorher den
+    # Schutz auf - dieselbe Regel wie beim Update und beim Loeschen.
+    [AllowNull()][object[]]$ProtectedPatterns = @()
+  )
+  $groups = @{}
+  foreach ($a in @($Apps)) {
+    if (-not $a -or [string]::IsNullOrWhiteSpace([string]$a.DisplayName)) { continue }
+    # Nur WINDOWS-Apps. "Alle Tenant-Apps" listet jeden Typ, also auch iOS-, Android- und
+    # Web-Verknuepfungen; eine Zuweisung von einer Android-App auf eine Windows-App zu verschieben
+    # waere Unsinn, selbst wenn beide gleich heissen. Fail-safe in die vorsichtige Richtung: was
+    # sich NICHT als Windows erkennen laesst, wird nicht gruppiert und damit nicht angefasst.
+    if (-not (Test-IsWindowsAppType -OdataType ([string]$a.OdataType))) { continue }
+    $key = ([string]$a.DisplayName).Trim().ToLowerInvariant()
+    if (-not $groups.ContainsKey($key)) { $groups[$key] = [System.Collections.Generic.List[object]]::new() }
+    [void]$groups[$key].Add($a)
+  }
+
+  $plans = [System.Collections.Generic.List[object]]::new()
+  $skipped = [System.Collections.Generic.List[object]]::new()
+  foreach ($key in ($groups.Keys | Sort-Object)) {
+    $members = @($groups[$key])
+    $assigned = @($members | Where-Object { $_.IsAssigned })
+    # Eine einzige zugewiesene Fassung ist der gewuenschte Zustand, nicht ein Befund.
+    if ($assigned.Count -lt 2) { continue }
+    $name = [string]$members[0].DisplayName
+
+    # Ohne vergleichbare Versionen gibt es kein "die neueste" - dann wird nicht geraten.
+    $withVersion = @($members | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.Version) })
+    if ($withVersion.Count -ne $members.Count) {
+      $skipped.Add(@{ Name = $name; Reason = 'noversion'; Apps = @($members) })
+      continue
+    }
+    if (Test-IsProtectedApp -Name $name -Patterns $ProtectedPatterns) {
+      $skipped.Add(@{ Name = $name; Reason = 'protected'; Apps = @($assigned) })
+      continue
+    }
+
+    # Ziel ist die neueste Fassung der Gruppe - auch wenn sie noch keine Zuweisung hat. Genau das
+    # ist der Auftrag: nur die aktuellste soll eine haben.
+    $target = $members[0]
+    foreach ($m in $members) {
+      if (Test-IsNewerVersion -Latest ([string]$m.Version) -Current ([string]$target.Version)) { $target = $m }
+    }
+    # Zwei Fassungen mit DERSELBEN hoechsten Version: dann ist "die neueste" nicht eindeutig, und
+    # eine davon zu waehlen waere geraten. Im gemeldeten Bild gibt es genau das (152.0.7977.76 als
+    # Win32 und als MSI) - nur eben nicht als hoechste.
+    $newest = @($members | Where-Object {
+      -not (Test-IsNewerVersion -Latest ([string]$target.Version) -Current ([string]$_.Version)) -and
+      -not (Test-IsNewerVersion -Latest ([string]$_.Version) -Current ([string]$target.Version))
+    })
+    if ($newest.Count -gt 1) {
+      $skipped.Add(@{ Name = $name; Reason = 'ambiguous'; Apps = @($newest) })
+      continue
+    }
+
+    $sources = @($assigned | Where-Object { [string]$_.Id -ne [string]$target.Id })
+    if ($sources.Count -eq 0) { continue }   # nur das Ziel ist zugewiesen: nichts zu tun
+    $plans.Add(@{
+      Name        = $name
+      Target      = $target
+      Sources     = @($sources)
+      # Typen gemischt? Gehoert in die Rueckfrage, nicht in eine stille Entscheidung: eine
+      # Zuweisung von einer MSI-App auf eine Win32-App zu verschieben ist technisch moeglich, aber
+      # nichts, was jemand beilaeufig tun sollte.
+      MixedTypes  = (@($assigned + @($target) | ForEach-Object { [string]$_.TypeLabel } | Sort-Object -Unique).Count -gt 1)
+    })
+  }
+  return @{ Plans = @($plans.ToArray()); Skipped = @($skipped.ToArray()) }
+}
+
+# Traegt diese Zuweisungssignatur eine Deinstallation?
+#
+# Rein, damit die Regel ohne Graph pruefbar ist. Gelesen wird die Signatur aus
+# Get-AppAssignmentScopeProbe: jeder Teil beginnt mit dem Intent ("uninstall|<ziel>|..."), und
+# genau darauf wird geprueft - NICHT auf ein enthaltenes Wort. Ein Gruppenname oder ein Filter, in
+# dem "uninstall" vorkommt, ist keine Deinstallation.
+function Test-ScopeSignatureHasUninstall {
+  param([AllowNull()][string]$Signature)
+  if ([string]::IsNullOrWhiteSpace($Signature)) { return $false }
+  foreach ($part in ($Signature -split ';')) {
+    if (([string]$part).Trim().StartsWith('uninstall|', [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+  }
+  return $false
+}
+
+# Verfeinert den Plan mit dem, was die Zuweisungssonden ergeben haben - VOR der Rueckfrage.
+#
+# Der Grund, aus dem das eine eigene Stufe ist: `isAssigned` von Graph sagt nur "irgendeine
+# Zuweisung existiert". Das ist auch bei einer reinen DEINSTALLATIONS-Zuweisung wahr. Ohne diese
+# Stufe kuendigte die Rueckfrage also Arbeit an ("2 Zuweisungen werden verschoben"), die in der
+# Ausfuehrung dann ausgelassen wurde - der Dialog haette etwas anderes gesagt als das Ergebnis.
+# Genau so macht es der Loeschpfad in "Alle Tenant-Apps" auch: erst fragen, was Intune weiss, dann
+# den Zustand in der Rueckfrage NENNEN.
+#
+# Rein: Sondenergebnisse kommen als Hashtable Id -> Objekt mit Succeeded/Signature herein.
+function Resolve-DuplicateAssignedProbes {
+  param(
+    [AllowNull()][AllowEmptyCollection()][object[]]$Plans,
+    [Parameter(Mandatory)][hashtable]$Probes
+  )
+  $kept = [System.Collections.Generic.List[object]]::new()
+  $skipped = [System.Collections.Generic.List[object]]::new()
+  foreach ($plan in @($Plans)) {
+    if (-not $plan -or -not $plan.Target) { continue }
+    $sources = [System.Collections.Generic.List[object]]::new()
+    foreach ($src in @($plan.Sources)) {
+      $id = [string]$src.Id
+      $probe = if ($Probes.ContainsKey($id)) { $Probes[$id] } else { $null }
+      if (-not $probe -or -not $probe.Succeeded) {
+        # "Ich weiss es nicht" ist keine Erlaubnis, Zuweisungen zu verschieben - dieselbe Regel wie
+        # beim Aufraeumen und beim Loeschen.
+        $skipped.Add(@{ Name = [string]$plan.Name; App = $src; Reason = 'unreadable' })
+        continue
+      }
+      if (Test-ScopeSignatureHasUninstall -Signature ([string]$probe.Signature)) {
+        $skipped.Add(@{ Name = [string]$plan.Name; App = $src; Reason = 'uninstall' })
+        continue
+      }
+      # Eine Quelle, die nach der Sonde GAR KEINE Zuweisung mehr hat, ist kein Befund mehr:
+      # 'isAssigned' aus dem Inventar kann veraltet sein (jemand hat sie im Portal entfernt).
+      if ([string]$probe.Signature -eq '<none>') {
+        $skipped.Add(@{ Name = [string]$plan.Name; App = $src; Reason = 'gone' })
+        continue
+      }
+      $sources.Add($src)
+    }
+    if ($sources.Count -eq 0) { continue }
+    $kept.Add(@{
+      Name       = [string]$plan.Name
+      Target     = $plan.Target
+      Sources    = @($sources.ToArray())
+      MixedTypes = [bool]$plan.MixedTypes
+    })
+  }
+  return @{ Plans = @($kept.ToArray()); Skipped = @($skipped.ToArray()) }
+}
+
+# Fuehrt den geprueften Plan aus: je Quelle die Zuweisungen auf die neueste Fassung uebertragen und
+# die Quelle leeren. Ueber Move-AppAssignments, also mit dessen Reihenfolge (erst schreiben, dann
+# leeren) und dessen Riegel gegen policy-set/geerbte Zuweisungen.
+#
+# Die Sonden sind hier schon gelaufen (Resolve-DuplicateAssignedProbes) - diese Funktion prueft
+# nicht mehr, sie schreibt. -OnProgress wird je Quelle gerufen, damit die Statuszeile und der
+# Fortschrittsbalken mitlaufen: ohne das stand das Fenster bei zwanzig Verschiebungen minutenlang
+# still, und die Anwendung sah eingefroren aus.
+function Invoke-DuplicateAssignedCleanup {
+  param(
+    [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Plans,
+    [scriptblock]$OnProgress
+  )
+  $moved = 0
+  $failed = 0
+  $done = 0
+  foreach ($plan in @($Plans)) {
+    if (-not $plan -or -not $plan.Target) { continue }
+    $targetId = [string]$plan.Target.Id
+    foreach ($src in @($plan.Sources)) {
+      $label = "{0} {1} ({2})" -f [string]$plan.Name, [string]$src.Version, [string]$src.TypeLabel
+      if ($OnProgress) {
+        try { & $OnProgress $done $label } catch { Write-LogDebug 'dedupe progress' }
+      }
+      $done++
+      Write-Log ("Duplicate-assignment cleanup: moving assignments of '{0}' to {1} {2}." -f $label, [string]$plan.Target.Version, $targetId)
+      $ok = $false
+      try { $ok = Move-AppAssignments -OldAppId ([string]$src.Id) -NewAppId $targetId -AppName ([string]$plan.Name) } catch {
+        $ok = $false
+        Write-Log ("Duplicate-assignment cleanup FAILED for '{0}': {1}" -f $label, $_.Exception.Message)
+      }
+      if ($ok) { $moved++ } else { $failed++ }
+    }
+  }
+  Write-Log ("Duplicate-assignment cleanup finished: {0} moved, {1} failed." -f $moved, $failed)
+  return @{ Moved = $moved; Failed = $failed }
+}
+
 # Moves the group assignments from the OLD (now superseded) app to the NEW one, so only the newest
 # version stays in scope. Without this both versions remain assigned and someone has to unassign the
 # predecessor by hand in the portal.

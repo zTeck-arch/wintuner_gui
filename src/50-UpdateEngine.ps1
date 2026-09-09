@@ -118,7 +118,13 @@ function Invoke-VersionCleanup {
         Update-Status ((Get-UiString 'VersionCleanupRemovingStatus') -f $g.Name, $item.Raw)
         [System.Windows.Forms.Application]::DoEvents()
         $assignmentProbe = Get-AppAssignmentProbe -AppId $item.App.GraphId -AppName $g.Name
-        $installationProbe = Get-AppInstallationProbe -AppId $item.App.GraphId -AppName $g.Name
+        # Das Aktivitaetsfenster gilt NUR beim Aufraeumen von Hand ($Silent ist der automatische
+        # Lauf nach einem Update). So ausdruecklich entschieden am 09.09.2026: automatisch heisst
+        # ohne Klick und ohne Blick - dort bleibt die vorsichtige Regel, dass jede gemeldete
+        # Installation schuetzt. Wer selbst aufraeumt, will die Karteileichen los.
+        $quietDays = if ($Silent) { 0 } else { [int]$script:settings.IgnoreDevicesQuietForDays }
+        $installationProbe = Get-AppInstallationProbe -AppId $item.App.GraphId -AppName $g.Name `
+          -IgnoreDevicesQuietForDays $quietDays
         if (-not $assignmentProbe.Succeeded -or -not $installationProbe.Succeeded -or
             $assignmentProbe.HasAssignments -or $installationProbe.HasInstallations) {
           if (-not $assignmentProbe.Succeeded -or -not $installationProbe.Succeeded) {
@@ -140,10 +146,25 @@ function Invoke-VersionCleanup {
             } else {
               Get-UiString 'CleanupKeptReasonInstalledNoCount'
             }
+            # Das ALTER dazu, wenn es bekannt ist. "behalten, weil noch installiert" ist ohne
+            # "letzter Kontakt vor 214 Tagen" keine Auskunft, mit der jemand etwas entscheiden kann -
+            # genau daran ist am 09.09.2026 die Frage entstanden, warum uralte Fassungen nie
+            # verschwinden.
+            if ($null -ne $installationProbe.NewestDaysAgo) {
+              $reasonText += ((Get-UiString 'CleanupKeptReasonNewestContact') -f [int]$installationProbe.NewestDaysAgo)
+              $reason += (" (newest device contact {0} day(s) ago)" -f [int]$installationProbe.NewestDaysAgo)
+            }
             [void]$protectedItems.Add(("{0} {1} - {2}" -f $g.Name, $item.Raw, $reasonText))
           }
           Write-Log ("Version cleanup: kept {0} {1} ({2}) because {3}." -f $g.Name, $item.Raw, $item.App.GraphId, $reason)
           continue
+        }
+        # Wird trotz gemeldeter Installationen geloescht, gehoert der Grund ins Protokoll - mit Zahl
+        # und Alter. Ohne das liest sich der Lauf wie ein Widerspruch zum Sicherheitsnetz.
+        if ($installationProbe.StaleOnly) {
+          Write-Log ("Version cleanup: {0} {1} ({2}) reports {3} installation(s), but ALL of them are on devices that have not synced within {4} day(s) (newest contact: {5}). The app object is deleted; the software stays installed on those devices - Intune only loses the reporting and the option to reinstall from this app." -f `
+            $g.Name, $item.Raw, $item.App.GraphId, [int]$installationProbe.Count, $quietDays,
+            $(if ($null -ne $installationProbe.NewestDaysAgo) { ("{0} day(s) ago" -f $installationProbe.NewestDaysAgo) } else { 'unknown' }))
         }
         if (Remove-AppWithUnlinkFallback -GraphId $item.App.GraphId -AppName $g.Name -Version $item.Raw -RecordAs 'VersionRemoved') {
           $removed++
@@ -153,6 +174,12 @@ function Invoke-VersionCleanup {
     }
     Write-Log ("Version cleanup finished: {0} removed, {1} protected by the safety checks, {2} failed." -f $removed, $protectedItems.Count, $failed)
     Update-Status ((Get-UiString 'VersionCleanupDoneStatus') -f $removed, $protectedItems.Count, $failed)
+    # Fuer die abschliessende Meldung des Stapels. Gemeldet am 08.09.2026 aus einem echten
+    # Protokoll: das Aufraeumen meldete "3 failed", und die Zeile DANACH sagte "3 successful,
+    # 0 failed" - beides richtig (zwei getrennte Bilanzen), aber die letzte sichtbare Meldung
+    # verschwieg, dass drei Loeschungen gescheitert sind. Die Statuszeile ist der Ort, an dem
+    # jemand hinsieht, nicht das Protokoll.
+    $script:lastVersionCleanupFailed = $failed
 
     # Say WHY, where the user is looking. Without this the run reads as "nothing happened" and the
     # explanation sits in a log file nobody opens mid-task.

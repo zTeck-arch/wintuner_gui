@@ -142,6 +142,28 @@ Log files never contain any of this. They record how many entries exist, never t
     FuzzyRunSkipButton = "Continue without the guessed ones"
     FuzzyRunAllButton = "Update all, guessed ids included"
     UpdateStateFuzzyId = "package id guessed from the name"
+    UpdateStateForeignNewer = "the tenant already has {0} as {1}"
+    UpdateStateForeignNewerAssigned = "the tenant already has {0} as {1} - AND THAT ONE IS ASSIGNED"
+    ForeignNewerAssignedTag = "(assigned)"
+    ForeignNewerRunConfirmTitle = "A version of another packaging type already exists"
+    ForeignNewerRunSkipButton = "Continue without these"
+    ForeignNewerRunAllButton = "Build as Win32 anyway"
+    ForeignNewerRunSkippedStatus = "{0} app(s) with an existing version of another packaging type left out; running {1} app(s)."
+    ForeignNewerRunNothingLeftStatus = "Only apps that already exist as another packaging type were selected - nothing left to run."
+    ForeignNewerRunConfirmDialog = @"
+For {0} app(s) the tenant ALREADY holds a version that is at least as new as the target - but as a packaging type this application does not build (MSI, Store, AppX):
+
+{1}
+
+This application packages Win32 only. It can neither update nor delete that other version, so building the target here does not replace it: afterwards the tenant holds BOTH. If the Win32 predecessor carried no assignment, nobody gets the new version at all - the devices keep the other one.
+
+So this is a decision, not a routine step:
+
+- "Build as Win32 anyway" makes sense when you WANT to move to Win32 packaging. The other version is left untouched; you assign the new one and retire the old one yourself (its assignment can be moved in "All tenant apps" -> "Clean up duplicate assignments").
+- "Continue without these" leaves them out and runs the rest unchanged.
+
+This question is asked even when confirmations are switched off in Settings.
+"@
     ProtectedRunSkippedStatus = "{0} protected app(s) left out; running {1} app(s)."
     ProtectedRunNothingLeftStatus = "Only protected apps were selected - nothing left to run."
     FuzzyRunSkippedStatus = "{0} app(s) with a guessed package id left out; running {1} app(s)."
@@ -432,7 +454,7 @@ Which defaults apply: return codes 0/1707 count as success, 3010/1641 as restart
     TenantAppEditFailedStatus = "Assignment settings could not be applied: {0}"
     LoginProbeFailedError = "Sign-in worked, but the first Intune query failed - so this is not an authentication problem. Microsoft Graph may be temporarily unavailable, throttling requests, or the account may lack the required permissions. Please try again in a few minutes. Details: {0}"
     LoginNoIntuneError = "Sign-in worked, but this tenant rejected the Intune query. That usually means the tenant has no active Microsoft Intune license, or your account has no Intune permissions in it. Retrying will not help - check the Intune license and your role in THIS tenant. Details: {0}"
-    UpdateStateBlocked = "conflict"
+    UpdateStateBlocked = "not possible"
     UpdateStateDuplicateTarget = "duplicate version in Intune - remove one first"
     UpdateStateNoWingetId = "no WinGet id could be matched safely - right-click to assign one"
     UpdateStateNoVersion = "Intune reports no version for this app - nothing to compare against"
@@ -703,6 +725,44 @@ Updating the module usually fixes it:
 "@
     StartupNoticeHideCheckbox = "Do not show this message again"
     SearchFailedStatus = "Search failed: {0}"
+    TenantDedupeButton = "Clean up duplicate assignments..."
+    TtTenantDedupe = "Looks through the loaded list for apps whose SAME display name exists several times with more than one assigned version - that means devices get the same software twice and nobody can say which wins. The assignments of the older versions are then moved to the newest one, keeping group, intent, filter and settings, so no group loses the app. Protected apps, versions carrying an uninstall assignment and apps whose assignments cannot be read are left alone and named. This question is always asked, even with confirmations switched off."
+    TenantDedupeNoDataStatus = "Load the app list first."
+    TenantDedupeNoneStatus = "No app has more than one assigned version."
+    TenantDedupeCanceledStatus = "Cleaning up duplicate assignments canceled - nothing was changed."
+    TenantDedupeDoneStatus = "Duplicate assignments: {0} moved, {1} failed, {2} left alone."
+    TenantDedupeConfirmTitle = "Clean up duplicate assignments"
+    TenantDedupeKeepLabel = "keep:"
+    TenantDedupeMoveLabel = "move to the version above:"
+    TenantDedupeMixedTypes = "NOTE: these versions are different app types - check whether the assignment really belongs on the newest one."
+    TenantDedupeSkip_protected = "on the protected list - lift the protection first if you really mean it"
+    TenantDedupeSkip_noversion = "at least one version is empty, so 'the newest' cannot be determined"
+    TenantDedupeSkip_ambiguous = "two versions share the same highest version number, so the target is not unique"
+    TenantDedupeSkip_uninstall = "carries an uninstall assignment, which belongs to exactly that version"
+    TenantDedupeSkip_unreadable = "its assignments could not be read - an unknown state is not permission"
+    TenantDedupeSkip_gone = "it no longer carries any assignment (the app list was out of date)"
+    TenantDedupeProbingStatus = "Reading assignments of {0} ({1}/{2})..."
+    TenantDedupeMovingStatus = "Moving assignments: {0} ({1}/{2})..."
+    TenantDedupeSkippedNote = @"
+Left alone:
+
+{0}
+"@
+    TenantDedupeConfirmDialog = @"
+{0} app(s) have more than one assigned version. {1} assignment(s) would be moved to the newest version:
+
+{2}
+
+What happens: for each older version its assignments are READ and written onto the newest version - group, intent (required/available), filter and settings included, merged with what the newest one already has. Only then is the older version cleared. No group loses the app.
+
+The apps themselves are NOT deleted, only their assignments change.
+
+Left alone, and named in the log: versions carrying an uninstall assignment (that belongs to exactly that version) and versions whose assignments cannot be read. Assignments coming from a policy set or inherited are refused as well.
+
+This question is asked even when confirmations are switched off in Settings.
+
+Move the assignments now?
+"@
     TenantAppDeleteButton = "Delete selected..."
     TtTenantAppDelete = "Deletes the selected apps from Intune - permanently, and not only for this view. Multiple rows can be selected with Ctrl or Shift. Before the question, every app is checked for assignments and successful installations, and the answer is shown to you. Apps on the protected list are never deleted here, and an app whose state Intune does not report is not deleted either. This question is always asked, even with confirmations switched off."
     TenantAppDeleteNoSelectionStatus = "Select one or more apps in the list first."
@@ -891,6 +951,7 @@ What it is NOT: it does not create, update or delete apps, and it does not chang
     NoValidAppsStatus = "No valid apps found. Try 'Search Updates' again."
     StartingUpdateStatus = "Starting update for {0} checked app(s)..."
     CheckedAppsUpdatedStatus = "Checked apps updated: {0} successful, {1} failed"
+    CheckedAppsUpdatedCleanupFailedStatus = "Checked apps updated: {0} successful, {1} failed - but the version cleanup could not remove {2} old version(s). See the activity log."
     UpdateErrorStatus = "Update error: {0}"
     UpdateConfirmDialog = "The following apps will be updated:`r`n{0}`r`n`r`n{1}`r`n`r`nContinue?"
     ConfirmTitle = "Confirm"
@@ -916,12 +977,15 @@ What it is NOT: it does not create, update or delete apps, and it does not chang
     VersionCleanupKeepLabel = "keep:"
     VersionCleanupConfirmDialog = "Up to {0} old app version(s) can be deleted from Intune (keeping the newest {1} per package):`r`n`r`n{2}`r`n`r`nA version is removed only when Intune confirms zero assignments and zero successful installations. Continue?"
     VersionCleanupCanceledStatus = "Version cleanup canceled."
-    VersionCleanupRemovingStatus = "Removing old version: {0} {1}"
+    VersionCleanupRemovingStatus = "Checking whether an old version can be removed: {0} {1}"
     VersionCleanupDoneStatus = "Version cleanup done: {0} removed, {1} deliberately kept, {2} failed."
     CleanupKeptTitle = "Versions kept on purpose"
     CleanupKeptReasonAssigned = "still has assignments"
     CleanupKeptReasonInstalled = "Intune still reports {0} device(s) with this version installed"
     CleanupKeptReasonInstalledNoCount = "Intune still reports this version as installed"
+    CleanupKeptReasonNewestContact = " - newest device contact {0} day(s) ago"
+    QuietDaysLabel = "Ignore installations on devices quiet for (days):"
+    HintQuietDays = "Only for the MANUAL version cleanup. An old version is kept as long as Intune reports it installed somewhere - and that never expires, so a device that stopped checking in months ago blocks that version forever. With a value here such an installation no longer blocks: only devices that synced within this many days count. 0 switches it off. The automatic cleanup after an update ALWAYS keeps the strict rule. Note that deleting an app object does not uninstall anything - the software stays on the device; Intune only loses the reporting, the assignment and the option to reinstall from that app. A device whose sync date is unknown always counts as active."
     CleanupKeptReasonUnknown = "assignment or installation state could not be read"
     CleanupKeptDialog = "{0} version(s) were NOT deleted. That is the safety check doing its job, not an error.`r`n`r`n{1}`r`n`r`nA version is only removed once Intune reports zero assignments AND zero installed devices for it. Deleting one that is still installed somewhere would leave that software on the devices while Intune loses track of it.`r`n`r`nThese versions disappear by themselves: once the devices have moved to the new version through supersedence, the installation count drops to zero and the next cleanup removes them. Nothing needs to be done here."
     VersionCleanupErrorStatus = "Version cleanup failed: {0}"
@@ -1392,6 +1456,28 @@ In den Protokolldateien steht nichts davon. Sie halten fest, wie viele Einträge
     FuzzyRunSkipButton = "Ohne die geratenen fortfahren"
     FuzzyRunAllButton = "Alle aktualisieren, auch geratene"
     UpdateStateFuzzyId = "Paket-Id aus dem Namen geraten"
+    UpdateStateForeignNewer = "im Tenant liegt schon {0} als {1}"
+    UpdateStateForeignNewerAssigned = "im Tenant liegt schon {0} als {1} - UND DIE IST ZUGEWIESEN"
+    ForeignNewerAssignedTag = "(zugewiesen)"
+    ForeignNewerRunConfirmTitle = "Es existiert schon eine Fassung eines anderen Paketierungstyps"
+    ForeignNewerRunSkipButton = "Ohne diese fortfahren"
+    ForeignNewerRunAllButton = "Trotzdem als Win32 bauen"
+    ForeignNewerRunSkippedStatus = "{0} App(s) mit vorhandener Fassung eines anderen Typs ausgelassen; {1} App(s) werden bearbeitet."
+    ForeignNewerRunNothingLeftStatus = "Es waren nur Apps angehakt, die schon als anderer Paketierungstyp vorliegen - es bleibt nichts zu tun."
+    ForeignNewerRunConfirmDialog = @"
+Für {0} App(s) liegt im Tenant BEREITS eine Fassung, die mindestens so neu ist wie die Zielversion - allerdings als Paketierungstyp, den diese Anwendung nicht baut (MSI, Store, AppX):
+
+{1}
+
+Diese Anwendung paketiert ausschließlich Win32. Sie kann die andere Fassung weder aktualisieren noch löschen, ein Bau hier ersetzt sie also nicht: danach liegen BEIDE im Tenant. Trug die Win32-Vorgängerversion keine Zuweisung, bekommt die neue Fassung überhaupt niemand - die Geräte behalten die andere.
+
+Das ist deshalb eine Entscheidung und kein Routineschritt:
+
+- „Trotzdem als Win32 bauen" ist sinnvoll, wenn Sie bewusst auf Win32-Paketierung wechseln wollen. Die andere Fassung bleibt unangetastet; die neue weisen Sie selbst zu und lösen die alte ab (deren Zuweisung lässt sich unter „Alle Tenant-Apps" → „Doppelte Zuweisungen aufräumen" verschieben).
+- „Ohne diese fortfahren" lässt sie aus, der Rest läuft unverändert.
+
+Diese Frage kommt auch dann, wenn Bestätigungen in den Einstellungen abgeschaltet sind.
+"@
     ProtectedRunSkippedStatus = "{0} geschützte App(s) ausgelassen; {1} App(s) werden bearbeitet."
     ProtectedRunNothingLeftStatus = "Es waren nur geschützte Apps angehakt - es bleibt nichts zu tun."
     FuzzyRunSkippedStatus = "{0} App(s) mit geratener Paket-Id ausgelassen; {1} App(s) werden bearbeitet."
@@ -1682,7 +1768,7 @@ Welche Standardwerte gelten: Rückgabewerte 0/1707 als Erfolg, 3010/1641 als Neu
     TenantAppEditFailedStatus = "Zuweisungseinstellungen konnten nicht angewendet werden: {0}"
     LoginProbeFailedError = "Die Anmeldung war erfolgreich, aber die erste Intune-Abfrage schlug fehl - es liegt also kein Anmeldeproblem vor. Microsoft Graph ist möglicherweise vorübergehend nicht erreichbar, drosselt Anfragen, oder dem Konto fehlen die nötigen Berechtigungen. Bitte in einigen Minuten erneut versuchen. Details: {0}"
     LoginNoIntuneError = "Die Anmeldung war erfolgreich, aber dieser Tenant hat die Intune-Abfrage abgelehnt. Das bedeutet meist: keine aktive Microsoft-Intune-Lizenz im Tenant, oder Ihr Konto hat dort keine Intune-Berechtigungen. Erneutes Versuchen hilft nicht - bitte Intune-Lizenz und Ihre Rolle in DIESEM Tenant prüfen. Details: {0}"
-    UpdateStateBlocked = "Konflikt"
+    UpdateStateBlocked = "nicht möglich"
     UpdateStateDuplicateTarget = "Version doppelt in Intune - erst eine entfernen"
     UpdateStateNoWingetId = "keine WinGet-Id sicher zuordenbar - per Rechtsklick zuordnen"
     UpdateStateNoVersion = "Intune meldet keine Version zu dieser App - es gibt nichts zu vergleichen"
@@ -1951,6 +2037,44 @@ Das Modul zu aktualisieren behebt es üblicherweise:
 "@
     StartupNoticeHideCheckbox = "Diese Meldung nicht mehr anzeigen"
     SearchFailedStatus = "Suche fehlgeschlagen: {0}"
+    TenantDedupeButton = "Doppelte Zuweisungen aufräumen..."
+    TtTenantDedupe = "Durchsucht die geladene Liste nach Apps, deren GLEICHER Anzeigename mehrfach vorkommt und bei denen mehr als eine Version zugewiesen ist - dann bekommen Geräte dieselbe Software doppelt, und niemand kann sagen, welche gewinnt. Die Zuweisungen der älteren Versionen werden auf die neueste verschoben, mit Gruppe, Absicht, Filter und Einstellungen, damit keine Gruppe die App verliert. Geschützte Apps, Versionen mit einer Deinstallations-Zuweisung und Apps, deren Zuweisungen nicht lesbar sind, bleiben unangetastet und werden benannt. Diese Rückfrage kommt immer, auch bei abgeschalteten Bestätigungen."
+    TenantDedupeNoDataStatus = "Bitte zuerst die App-Liste laden."
+    TenantDedupeNoneStatus = "Keine App hat mehr als eine zugewiesene Version."
+    TenantDedupeCanceledStatus = "Aufräumen der doppelten Zuweisungen abgebrochen - es wurde nichts geändert."
+    TenantDedupeDoneStatus = "Doppelte Zuweisungen: {0} verschoben, {1} fehlgeschlagen, {2} ausgelassen."
+    TenantDedupeConfirmTitle = "Doppelte Zuweisungen aufräumen"
+    TenantDedupeKeepLabel = "bleibt:"
+    TenantDedupeMoveLabel = "wird auf die Version darüber verschoben:"
+    TenantDedupeMixedTypes = "ACHTUNG: Diese Versionen haben unterschiedliche App-Typen - bitte prüfen, ob die Zuweisung wirklich auf die neueste gehört."
+    TenantDedupeSkip_protected = "steht auf der Schutzliste - wer es wirklich meint, hebt zuerst den Schutz auf"
+    TenantDedupeSkip_noversion = "mindestens eine Version ist leer, damit lässt sich die neueste nicht bestimmen"
+    TenantDedupeSkip_ambiguous = "zwei Fassungen tragen dieselbe höchste Versionsnummer, das Ziel ist damit nicht eindeutig"
+    TenantDedupeSkip_uninstall = "trägt eine Deinstallations-Zuweisung, und die gilt genau dieser Version"
+    TenantDedupeSkip_unreadable = "die Zuweisungen ließen sich nicht lesen - ein unbekannter Zustand ist keine Erlaubnis"
+    TenantDedupeSkip_gone = "trägt gar keine Zuweisung mehr (die App-Liste war nicht mehr aktuell)"
+    TenantDedupeProbingStatus = "Lese Zuweisungen von {0} ({1}/{2})..."
+    TenantDedupeMovingStatus = "Verschiebe Zuweisungen: {0} ({1}/{2})..."
+    TenantDedupeSkippedNote = @"
+Unangetastet geblieben:
+
+{0}
+"@
+    TenantDedupeConfirmDialog = @"
+Bei {0} App(s) ist mehr als eine Version zugewiesen. {1} Zuweisung(en) würden auf die neueste Version verschoben:
+
+{2}
+
+Was passiert: Für jede ältere Version werden ihre Zuweisungen GELESEN und auf die neueste Version geschrieben - mit Gruppe, Absicht (erforderlich/verfügbar), Filter und Einstellungen, zusammengeführt mit dem, was die neueste schon hat. Erst danach wird die ältere geleert. Keine Gruppe verliert die App.
+
+Die Apps selbst werden NICHT gelöscht, es ändern sich nur ihre Zuweisungen.
+
+Unangetastet bleiben, und im Protokoll benannt: Versionen mit einer Deinstallations-Zuweisung (die gilt genau dieser Version) und Versionen, deren Zuweisungen nicht lesbar sind. Zuweisungen aus einem Policy Set oder geerbte Zuweisungen werden ebenfalls abgelehnt.
+
+Diese Frage kommt auch dann, wenn Bestätigungen in den Einstellungen abgeschaltet sind.
+
+Zuweisungen jetzt verschieben?
+"@
     TenantAppDeleteButton = "Ausgewählte löschen..."
     TtTenantAppDelete = "Löscht die ausgewählten Apps aus Intune - endgültig, und nicht nur für diese Ansicht. Mehrere Zeilen lassen sich mit Strg oder Umschalt auswählen. Vor der Rückfrage wird jede App auf Zuweisungen und erfolgreiche Installationen geprüft, und die Antwort wird Ihnen gezeigt. Apps auf der Schutzliste werden hier nie gelöscht, und eine App, deren Zustand Intune nicht meldet, ebenfalls nicht. Diese Rückfrage kommt immer, auch bei abgeschalteten Bestätigungen."
     TenantAppDeleteNoSelectionStatus = "Bitte zuerst eine oder mehrere Apps in der Liste auswählen."
@@ -2139,6 +2263,7 @@ Was es NICHT ist: Es legt keine Apps an, aktualisiert und löscht keine, und es 
     NoValidAppsStatus = "Keine gültigen Apps gefunden. Bitte erneut 'Nach Updates suchen'."
     StartingUpdateStatus = "Update für {0} markierte App(s) wird gestartet..."
     CheckedAppsUpdatedStatus = "Markierte Apps aktualisiert: {0} erfolgreich, {1} fehlgeschlagen"
+    CheckedAppsUpdatedCleanupFailedStatus = "Markierte Apps aktualisiert: {0} erfolgreich, {1} fehlgeschlagen - allerdings konnte die Versionsbereinigung {2} alte Version(en) nicht entfernen. Siehe Aktivitätsprotokoll."
     UpdateErrorStatus = "Update-Fehler: {0}"
     UpdateConfirmDialog = "Die folgenden Apps werden aktualisiert:`r`n{0}`r`n`r`n{1}`r`n`r`nFortfahren?"
     ConfirmTitle = "Bestätigen"
@@ -2164,12 +2289,15 @@ Was es NICHT ist: Es legt keine Apps an, aktualisiert und löscht keine, und es 
     VersionCleanupKeepLabel = "behalten:"
     VersionCleanupConfirmDialog = "Bis zu {0} alte App-Version(en) können aus Intune gelöscht werden (die neuesten {1} je Paket bleiben):`r`n`r`n{2}`r`n`r`nEine Version wird nur entfernt, wenn Intune null Zuweisungen und null erfolgreiche Installationen bestätigt. Fortfahren?"
     VersionCleanupCanceledStatus = "Versionsbereinigung abgebrochen."
-    VersionCleanupRemovingStatus = "Alte Version wird entfernt: {0} {1}"
+    VersionCleanupRemovingStatus = "Prüfe, ob eine alte Version entfernt werden kann: {0} {1}"
     VersionCleanupDoneStatus = "Versionsbereinigung fertig: {0} entfernt, {1} bewusst behalten, {2} fehlgeschlagen."
     CleanupKeptTitle = "Bewusst behaltene Versionen"
     CleanupKeptReasonAssigned = "hat noch Zuweisungen"
     CleanupKeptReasonInstalled = "Intune meldet noch {0} Gerät(e) mit dieser Version"
     CleanupKeptReasonInstalledNoCount = "Intune meldet diese Version noch als installiert"
+    CleanupKeptReasonNewestContact = " - jüngster Gerätekontakt vor {0} Tag(en)"
+    QuietDaysLabel = "Installationen auf Geräten ignorieren, die still sind seit (Tagen):"
+    HintQuietDays = "Gilt nur für das Aufräumen VON HAND. Eine alte Version bleibt stehen, solange Intune sie irgendwo als installiert meldet - und das verfällt nie, ein Gerät, das seit Monaten nicht mehr eincheckt, blockiert diese Version also dauerhaft. Mit einem Wert hier blockiert eine solche Installation nicht mehr: es zählen nur Geräte, die innerhalb dieser Tage synchronisiert haben. 0 schaltet es ab. Das automatische Aufräumen nach einem Update behält IMMER die strenge Regel. Zur Einordnung: eine gelöschte App wird nicht deinstalliert - die Software bleibt auf dem Gerät; Intune verliert nur den Bericht, die Zuweisung und die Möglichkeit zur Neuinstallation aus diesem Objekt. Ein Gerät ohne bekanntes Synchronisationsdatum zählt immer als aktiv."
     CleanupKeptReasonUnknown = "Zuweisungs- oder Installationsstand nicht lesbar"
     CleanupKeptDialog = "{0} Version(en) wurden NICHT gelöscht. Das ist die Sicherheitsprüfung bei der Arbeit, kein Fehler.`r`n`r`n{1}`r`n`r`nEine Version wird erst entfernt, wenn Intune null Zuweisungen UND null installierte Geräte dafür meldet. Würde man eine noch installierte Version löschen, bliebe die Software auf den Geräten, während Intune die Verwaltung darüber verliert.`r`n`r`nDiese Versionen verschwinden von selbst: Sobald die Geräte über die Ablöse auf die neue Version gewechselt sind, fällt die Installationszahl auf null und der nächste Lauf entfernt sie. Hier ist nichts zu tun."
     VersionCleanupErrorStatus = "Versionsbereinigung fehlgeschlagen: {0}"

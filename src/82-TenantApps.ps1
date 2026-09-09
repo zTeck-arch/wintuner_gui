@@ -3,23 +3,10 @@
 # EXACTLY as Intune holds it - every @odata.type, including apps this GUI can never package - so
 # assignments can be reviewed and changed in one place instead of switching to the portal.
 
-# Turns "#microsoft.graph.win32LobApp" into something readable. Unknown types keep their raw name
-# rather than being hidden: an app the GUI does not understand must still be visible here.
-function Get-MobileAppTypeLabel {
-  param([string]$ODataType)
-  $bare = ([string]$ODataType).TrimStart([char]'#') -replace '^microsoft\.graph\.', ''
-  switch -Regex ($bare) {
-    '^win32LobApp$'                 { return 'Win32' }
-    '^winGetApp$'                   { return 'Store (WinGet)' }
-    '^windowsMobileMSI$'            { return 'MSI' }
-    '^windowsUniversalAppX'         { return 'UWP / MSIX' }
-    '^officeSuiteApp$'              { return 'Microsoft 365 Apps' }
-    '^windowsWebApp$|^webApp$'      { return 'Web link' }
-    '^windowsStoreApp$'             { return 'Store (legacy)' }
-    '^windowsAppX'                  { return 'AppX' }
-    default                         { return $bare }
-  }
-}
+# Get-MobileAppTypeLabel ist nach 20-Version GEWANDERT (09.09.2026): die Update-Suche in
+# 25-WinGetData braucht sie jetzt auch, um eine Fassung eines anderen Paketierungstyps benennen zu
+# koennen - und Teil 25 laedt VOR Teil 82. Ein Aufruf von hier waere ein Vorwaertsbezug ueber
+# Teilgrenzen gewesen, der im gebauten Skript erst zur Laufzeit auffaellt.
 
 # Reads the whole mobileApps collection. Get-TenantStoreApps filters this down to winGetApp; here
 # every type is kept, which is the entire point of the section.
@@ -36,6 +23,10 @@ function Get-TenantAllApps {
       Id          = [string]$app.id
       DisplayName = [string]$app.displayName
       TypeLabel   = Get-MobileAppTypeLabel ([string]$app.'@odata.type')
+      # Der ROHE Typ, nicht nur seine Beschriftung: die Suche nach doppelt zugewiesenen Versionen
+      # muss Windows-Apps von iOS/Android/Web-Verknuepfungen unterscheiden, und ein uebersetztes
+      # Etikett ist dafuer die falsche Grundlage.
+      OdataType   = [string]$app.'@odata.type'
       Version     = [string]$app.displayVersion
       Publisher   = [string]$app.publisher
       IsAssigned  = [bool]$app.isAssigned
@@ -459,6 +450,143 @@ $tenantDeleteButton.Add_Click({
   }
 })
 
+# Mehrere Versionen derselben App gleichzeitig zugewiesen - erkennen und aufraeumen.
+#
+# Bewusst KEINE Auswahl noetig: der Befund entsteht aus der ganzen Liste, nicht aus angeklickten
+# Zeilen. Wer zwei zugewiesene Fassungen von Chrome hat, sieht das in der Liste nicht ohne genaues
+# Hinsehen - genau deshalb gibt es den Knopf.
+$tenantDedupeButton = New-Object System.Windows.Forms.Button
+$tenantDedupeButton.Tag = 'btn-secondary'
+$tenantDedupeButton.Text = Get-UiString 'TenantDedupeButton'
+$tenantDedupeButton.Enabled = $false
+$cardTenant.Controls.Add($tenantDedupeButton)
+try { if ($toolTip) { $toolTip.SetToolTip($tenantDedupeButton, (Get-UiString 'TtTenantDedupe')) } } catch { Write-LogDebug 'tenant dedupe tooltip' }
+
+$tenantDedupeButton.Add_Click({
+  if (-not (Test-Connected)) { return }
+  if (Test-UiBusy) { return }
+  $all = @($script:tenantApps)
+  if ($all.Count -eq 0) { Update-Status (Get-UiString 'TenantDedupeNoDataStatus'); return }
+
+  $result = Get-DuplicateAssignedPlan -Apps $all -ProtectedPatterns $script:settings.ProtectedApps
+  $plans = @($result.Plans)
+  $skipped = @($result.Skipped)
+  if ($plans.Count -eq 0 -and $skipped.Count -eq 0) {
+    Write-Log 'Duplicate-assignment check: no app has more than one assigned version.'
+    Update-Status (Get-UiString 'TenantDedupeNoneStatus')
+    return
+  }
+
+  # Erst FRAGEN, was Intune ueber jede Quelle weiss, DANN fragen. Genau wie beim Loeschen darueber:
+  # 'isAssigned' aus dem Inventar sagt nur "irgendeine Zuweisung", auch eine Deinstallation zaehlt
+  # dort mit. Ohne diesen Schritt kuendigte die Rueckfrage Verschiebungen an, die hinterher
+  # ausgelassen wurden - der Dialog haette etwas anderes gesagt als das Ergebnis.
+  $probes = @{}
+  if ($plans.Count -gt 0) {
+    $sourceCount = @($plans | ForEach-Object { @($_.Sources).Count } | Measure-Object -Sum).Sum
+    Show-Progress -Total ([Math]::Max(1, [int]$sourceCount))
+    try {
+      $index = 0
+      foreach ($plan in $plans) {
+        foreach ($src in @($plan.Sources)) {
+          Set-ProgressValue $index
+          $index++
+          Update-Status ((Get-UiString 'TenantDedupeProbingStatus') -f [string]$plan.Name, $index, [int]$sourceCount)
+          [System.Windows.Forms.Application]::DoEvents()
+          $probes[[string]$src.Id] = Get-AppAssignmentScopeProbe -AppId ([string]$src.Id) -AppName ([string]$plan.Name)
+        }
+      }
+    } finally { Hide-Progress }
+    $refined = Resolve-DuplicateAssignedProbes -Plans $plans -Probes $probes
+    $plans = @($refined.Plans)
+    # Die Befunde der Sonde kommen zu den Ausgelassenen aus der Rechnung dazu, mit demselben
+    # Aufbau - so nennt die Rueckfrage ALLE Gruende an einer Stelle.
+    $skipped = @($skipped) + @(@($refined.Skipped) | ForEach-Object {
+      @{ Name = ("{0} {1}" -f [string]$_.Name, [string]$_.App.Version); Reason = [string]$_.Reason }
+    })
+    if ($plans.Count -eq 0 -and $skipped.Count -eq 0) {
+      Update-Status (Get-UiString 'TenantDedupeNoneStatus')
+      return
+    }
+  }
+
+  # Die Bloecke werden hier zusammengesetzt, nicht im Textbaustein - aus demselben Grund wie bei der
+  # Loeschrueckfrage darueber: ein leerer Block hinterliess dort eine haengende Leerzeile und eine
+  # Ueberschrift ohne Abstand. Ausgerendert geprueft, nicht im Kopf durchgespielt.
+  $blocks = [System.Collections.Generic.List[string]]::new()
+  foreach ($plan in $plans) {
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add(("  {0}" -f $plan.Name))
+    $lines.Add((("    {0} {1} ({2})" -f (Get-UiString 'TenantDedupeKeepLabel'), [string]$plan.Target.Version, [string]$plan.Target.TypeLabel)))
+    foreach ($src in @($plan.Sources)) {
+      $lines.Add((("    {0} {1} ({2})" -f (Get-UiString 'TenantDedupeMoveLabel'), [string]$src.Version, [string]$src.TypeLabel)))
+    }
+    if ($plan.MixedTypes) { $lines.Add(("    {0}" -f (Get-UiString 'TenantDedupeMixedTypes'))) }
+    $blocks.Add(($lines -join "`r`n"))
+  }
+  $detailText = ($blocks -join "`r`n`r`n")
+  if ($skipped.Count -gt 0) {
+    $skippedText = ((Get-UiString 'TenantDedupeSkippedNote') -f ((@($skipped) | ForEach-Object {
+      "  - {0}: {1}" -f [string]$_.Name, (Get-UiString ("TenantDedupeSkip_" + [string]$_.Reason))
+    }) -join "`r`n")).Trim()
+    # Der Trenner nur, wenn davor wirklich etwas steht. Ohne diese Bedingung begann der Text mit
+    # zwei Leerzeilen, sobald es NICHTS zu verschieben gab und nur die Ausgelassenen gezeigt wurden
+    # - dieselbe Falle wie bei der Loeschrueckfrage am 03.09.2026 (leerer Block plus Trenner).
+    $detailText = if ([string]::IsNullOrWhiteSpace($detailText)) { $skippedText }
+                  else { $detailText + "`r`n`r`n" + $skippedText }
+  }
+
+  if ($plans.Count -eq 0) {
+    # Nur Ausgelassene: es gibt nichts zu tun, aber der Grund gehoert gezeigt - sonst sieht es aus,
+    # als haette der Knopf nichts gefunden.
+    Show-StartupNoticeDialog -Text $detailText -Title (Get-UiString 'TenantDedupeConfirmTitle') | Out-Null
+    Update-Status (Get-UiString 'TenantDedupeNoneStatus')
+    return
+  }
+
+  # Nicht abschaltbar: hier werden Zuweisungen in Intune VERSCHOBEN, und danach bekommt eine andere
+  # App-Fassung die Gruppen. Vorgabeknopf ist "Nein".
+  $moveCount = @($plans | ForEach-Object { @($_.Sources).Count } | Measure-Object -Sum).Sum
+  $answer = [System.Windows.Forms.MessageBox]::Show(
+    ((Get-UiString 'TenantDedupeConfirmDialog') -f $plans.Count, $moveCount, $detailText),
+    (Get-UiString 'TenantDedupeConfirmTitle'),
+    [System.Windows.Forms.MessageBoxButtons]::YesNo,
+    [System.Windows.Forms.MessageBoxIcon]::Warning,
+    [System.Windows.Forms.MessageBoxDefaultButton]::Button2)
+  if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
+    Write-Log ("Duplicate-assignment cleanup canceled by user; {0} app(s) with {1} assignment(s) to move." -f $plans.Count, $moveCount)
+    Update-Status (Get-UiString 'TenantDedupeCanceledStatus')
+    return
+  }
+
+  Show-Progress -Total ([Math]::Max(1, [int]$moveCount))
+  try {
+    # Fortschritt je Verschiebung. Ohne diesen Rueckruf stand das Fenster bei zwanzig Quellen
+    # minutenlang still - jede Verschiebung sind mehrere Graph-Aufrufe, und die laufen auf dem
+    # UI-Faden.
+    $outcome = Invoke-DuplicateAssignedCleanup -Plans $plans -OnProgress {
+      param($done, $label)
+      Set-ProgressValue $done
+      Update-Status ((Get-UiString 'TenantDedupeMovingStatus') -f $label, ($done + 1), [int]$moveCount)
+      [System.Windows.Forms.Application]::DoEvents()
+    }
+    Update-Status ((Get-UiString 'TenantDedupeDoneStatus') -f $outcome.Moved, $outcome.Failed, @($skipped).Count)
+    # Das Inventar ist jetzt veraltet: die Zuweisungsspalte stimmt nicht mehr.
+    try { Clear-Win32AppsCache } catch { }
+    try {
+      $script:tenantApps = @(Get-TenantAllApps)
+      Update-TenantAppsList -Filter $tenantFilterBox.Text
+    } catch {
+      Write-Log ("Duplicate-assignment cleanup: the list could not be reloaded afterwards ({0})." -f $_.Exception.Message)
+    }
+  } catch {
+    Write-Log ("Duplicate-assignment cleanup failed: {0}" -f (Format-ErrorDetail -ErrorRecord $_))
+    Update-Status ((Get-UiString 'TenantDedupeDoneStatus') -f 0, $moveCount, 0)
+  } finally {
+    Hide-Progress
+  }
+})
+
 $tenantHintLabel = New-Object System.Windows.Forms.Label
 $tenantHintLabel.Text = Get-UiString 'TenantAppsHint'
 $tenantHintLabel.Location = New-Object System.Drawing.Point(14, 592)
@@ -484,6 +612,9 @@ function Update-TenantAppsList {
       [void]$tenantListView.Items.Add($row)
     }
   } finally { $tenantListView.EndUpdate() }
+  # Der Aufraeum-Knopf haengt an der GELADENEN Liste, nicht an einer Auswahl: der Befund entsteht
+  # aus allen Apps zusammen. Ohne Liste hat er nichts zu rechnen und ist aus.
+  if ($tenantDedupeButton) { $tenantDedupeButton.Enabled = (@($script:tenantApps).Count -gt 0) }
   Update-Status ((Get-UiString 'TenantAppsShownStatus') -f $tenantListView.Items.Count, $script:tenantApps.Count)
 }
 
@@ -982,8 +1113,27 @@ function Update-TenantAppsLayout {
         if ($b) { $b.Top = $tenantDetailBox.Bottom + 12 }
       }
       if ($tenantDeleteButton) { $tenantDeleteButton.Top = $tenantAssignButton.Bottom + 8 }
+      # Der Aufraeum-Knopf teilt sich die zweite Reihe mit dem Loeschknopf - dort ist Platz, und
+      # eine DRITTE Reihe wuerde der Liste weitere 36 px nehmen. Breite gemessen, nicht gesetzt:
+      # "Doppelte Zuweisungen aufraeumen..." ist in beiden Sprachen laenger als jede feste Zahl,
+      # und die Retro-Designs bringen eine andere Schriftart mit.
+      if ($tenantDedupeButton -and $tenantDeleteButton) {
+        $tenantDedupeButton.Height = $tenantDeleteButton.Height
+        $tenantDedupeButton.Width = [Math]::Max(200, (Get-ControlTextWidth -Control $tenantDedupeButton) + 28)
+        $tenantDedupeButton.Top = $tenantDeleteButton.Top
+        $tenantDedupeButton.Left = $tenantDeleteButton.Right + 8
+        # Passt er rechts nicht mehr, rutscht er unter den Loeschknopf statt aus der Karte zu
+        # laufen. Der Hinweis darunter richtet sich dann nach IHM (siehe $anchorBottom).
+        if (($tenantDedupeButton.Right + 14) -gt $cardTenant.ClientSize.Width) {
+          $tenantDedupeButton.Left = $tenantDeleteButton.Left
+          $tenantDedupeButton.Top = $tenantDeleteButton.Bottom + 8
+        }
+      }
       if ($tenantHintLabel) {
-        $anchorBottom = if ($tenantDeleteButton) { $tenantDeleteButton.Bottom } else { $tenantAssignButton.Bottom }
+        $anchorBottom = $tenantAssignButton.Bottom
+        foreach ($b in @($tenantDeleteButton, $tenantDedupeButton)) {
+          if ($b -and $b.Bottom -gt $anchorBottom) { $anchorBottom = $b.Bottom }
+        }
         $tenantHintLabel.Top = $anchorBottom + 10
       }
     }

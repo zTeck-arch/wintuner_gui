@@ -132,6 +132,7 @@ The interface does not install software on endpoints. It creates and manages app
 - Packages are built under `%LOCALAPPDATA%\WinTunerGUI\Packages` by default. That directory belongs to the signed-in user. A shared writable location such as `C:\Temp` is deliberately no longer the default, because any user of the machine could alter a finished package there between build and upload.
 - Deleting under **All tenant apps** is permanent and cannot be undone from here. Every selected app is checked for assignments and successful installations first, and the answer is part of the question. Two classes are never deleted there and are named instead: apps on the **protection list** (remove the protection first if you really mean it) and apps whose state Intune did not report - an unknown state is not permission. That question is always asked, even with confirmations switched off.
 - Changing assignments under **All tenant apps** always replaces an app's complete assignment set, because Microsoft Graph has no partial update. The dialog shows the list it is about to write and asks first.
+- **Clean up duplicate assignments** under **All tenant apps** looks for apps with **more than one assigned version** — the state where devices get the same software twice and nobody can say which one wins. Grouping is by **display name** across all app types: a copy stored as MSI line-of-business usually carries the same name but neither a publisher nor a WinGet id, and would otherwise never be found. The cleanup **moves** rather than removes: the assignments of the older versions are written onto the newest one with group, intent, filter and settings, and only then cleared on the old one, so no group loses the app. The apps themselves stay. Left alone and named: protected apps, versions carrying an **uninstall assignment**, groups where two copies share the same highest version number, apps without a readable version, and anything whose assignments cannot be read. This question cannot be dismissed either.
 - Replacing the content of an existing app does **not** touch its detection and requirement rules. They have to match the new version, so check them beforehand.
 - The built-in self-update only accepts releases with a matching script asset, SHA-256 checksum and a plausible internal version number. A backup is written before the replacement. After you confirm, the exchange runs without further prompts and the two most recent backups are kept.
 
@@ -330,6 +331,22 @@ Routine operation rests on three settings. Together they close the loop: package
 
 With these switches set and the mappings verified once, a run via **Update all** can go through without a single click (**Skip the confirmation prompts before changes in Intune**). Protected apps still ask — that one question deliberately cannot be suppressed.
 
+#### When ancient versions simply never go away
+
+An old version is kept as long as Intune reports it installed **somewhere**. That report never expires: a device that stopped checking in eight months ago blocks the version on it forever. In a tenant that has grown over years, copies pile up that nobody needs and no cleanup can remove.
+
+That is what **Ignore installations on devices quiet for (days)** is for. With a value there, an installation only counts if the device synced within that time. Four things about it are deliberately narrow:
+
+- The default is **0**, i.e. unchanged behaviour — a setting that authorises deletions does not switch itself on.
+- It applies to the **manual** cleanup only. The automatic cleanup after an update always keeps the strict rule: nothing should be deleted without a click and without a look while Intune still reports it installed.
+- A **single active device** still blocks, even next to twenty quiet ones. That is why a plain count threshold ("only block from X installations upwards") is the weaker criterion.
+- A device whose sync date is unknown always counts as **active**.
+
+> [!IMPORTANT]
+> Deleting an app does **not** uninstall it from the device. The software stays installed; Intune loses the reporting, the assignment and the option to reinstall from that app object. So the safety net protects manageability, not the devices — which is exactly why relaxing it for long-quiet devices makes sense.
+
+The log now gives the reason in both directions: when a version is kept, the newest device contact ("newest device contact 214 day(s) ago"), and when one is deleted despite reported installations, that all of them were on quiet devices.
+
 ### It gets easier once every app has gone through this tool once
 
 The mapping "which Intune app is which WinGet package" is the one thing this tool cannot guess reliably. It does not have to guess when the answer is written down — and it is written down as soon as an app has been created or superseded through WinTuner: the app's **notes** field in Intune then carries a marker of the form
@@ -381,6 +398,23 @@ Two properties of the list that matter in day-to-day use:
 - **The list is global, not per customer.** A per-tenant list would start out empty in every new environment, and that is exactly where the accident happens.
 
 An entry without `*` or `?` matches the app name exactly; with a wildcard it is a pattern — `Zoom Rooms` protects one app, `Zoom*` protects all of them.
+
+### When the same software already exists as a different packaging type
+
+This application packages **Win32** only (`.intunewin`). In a tenant that has grown over years, the same software often also exists as **MSI line-of-business**, a **Store app** or **AppX** — created long ago, by another tool, or by hand.
+
+Up to 0.18.1 the update scan did **not** see those: it discarded every app type but Win32. In the reported case that produced "Google Chrome 151.0.7922.72 → 153.0.8010.37, to be created" while the tenant held an **assigned** MSI version 152.0.7977.83. A run would have built a third copy that nobody is assigned to — the devices would have kept installing the MSI.
+
+Now:
+
+- The row says so **before** you tick it, in the warning colour: *the tenant already has 152.0.7977.83 as MSI* — and if that copy is assigned, it says that explicitly.
+- Before the run, a separate question lists every affected app with its target version, the existing version and its type. It cannot be dismissed by **Skip confirmations**.
+- Three ways: **Continue without these** (default), **Build as Win32 anyway**, Cancel.
+
+**The other copy is never touched** — neither updated nor deleted, because this application cannot take responsibility for a type it does not build. "Build as Win32 anyway" is the right choice when you deliberately want to move to Win32 packaging: the new version is created, you assign it, and the old copy's assignment can then be moved via **All tenant apps → Clean up duplicate assignments**.
+
+> [!NOTE]
+> This hint depends on the setting **Also check Win32 apps that carry no WinTuner marker**: only then is the tenant read in full, and only then can foreign packaging types be seen at all. With it off, the log says explicitly that the hint was not possible in this run — so its absence does not mean "there are none".
 
 ### The second guard: when the package id is only a guess
 

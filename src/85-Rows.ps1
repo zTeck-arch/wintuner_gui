@@ -6,6 +6,13 @@ function New-UpdateRow {
   [void]$it.SubItems.Add([string]$App.CurrentVersion)
   [void]$it.SubItems.Add([string]$App.LatestVersion)
   # A blocked row exists only to make a tenant problem visible; it must never look actionable.
+  #
+  # In der ZIELspalte stand bis zum 09.09.2026 "conflict"/"Konflikt" - und das war fuer zwei der
+  # drei Sperrgruende schlicht falsch: bei "keine WinGet-Id zuordenbar" und "Intune meldet keine
+  # Version" gibt es keinen Konflikt, sondern eine fehlende Angabe. Nur die doppelte Zielversion
+  # ist einer. Gemeldet aus einem echten Fenster, in dem sieben Zeilen "conflict" trugen, von denen
+  # keine einzige ein Konflikt war. Die Spalte beantwortet jetzt ihre eigene Frage ("was ist das
+  # Ziel in Intune?") mit "nicht moeglich"; der Grund steht daneben in der Notizspalte.
   if ($App.PSObject.Properties['IsBlocked'] -and $App.IsBlocked) {
     [void]$it.SubItems.Add((Get-UiString 'UpdateStateBlocked'))
     [void]$it.SubItems.Add([string]$App.BlockedReason)
@@ -54,6 +61,16 @@ function New-UpdateRow {
   # zusaetzlich die geratene Id; hier ist kein Platz dafuer.
   if ($App.PSObject.Properties['PackageIdFuzzy'] -and $App.PackageIdFuzzy) {
     $noteParts.Add((Get-UiString 'UpdateStateFuzzyId'))
+    if (-not $alertLevel) { $alertLevel = 'warn' }
+  }
+  # Im Tenant liegt schon eine mindestens so neue Fassung - als Typ, den diese Anwendung nicht
+  # baut. Die Zeile nennt Version und Typ, weil das die Entscheidung traegt: ein Lauf legt sonst
+  # eine zweite Fassung daneben, und war die alte Win32-Fassung unzugewiesen, bekommt sie niemand.
+  if ($App.PSObject.Properties['HasForeignNewer'] -and $App.HasForeignNewer) {
+    $key = if ($App.PSObject.Properties['ForeignNewerAssigned'] -and $App.ForeignNewerAssigned) {
+      'UpdateStateForeignNewerAssigned'
+    } else { 'UpdateStateForeignNewer' }
+    $noteParts.Add(((Get-UiString $key) -f [string]$App.ForeignNewerVersion, [string]$App.ForeignNewerType))
     if (-not $alertLevel) { $alertLevel = 'warn' }
   }
   # Two separate statements, because they mean different things to the reader: "the predecessors
@@ -1582,6 +1599,39 @@ $keepVersionRow.Controls.Add($keepVersionCountInput)
 
 [void](Add-SettingRow -Card $cardAfterUpdate -Control $keepVersionRow -Hint (Get-UiString 'HintKeepVersionCount') -Indent 32)
 
+# Stille Geraete: ab wann eine gemeldete Installation eine Loeschung NICHT mehr verhindert.
+#
+# Gemeldet am 09.09.2026: in gewachsenen Umgebungen liegen Geraete, die seit Monaten nicht mehr
+# einchecken; die uralte Fassung darauf blockierte dauerhaft. Gilt nur beim Aufraeumen VON HAND -
+# das automatische Aufraeumen nach einem Update bleibt bei "jede Installation schuetzt".
+#
+# Breite und Beschriftungsposition gemessen, nicht gesetzt: der deutsche Text ist laenger, und die
+# Retro-Designs bringen eine andere Schriftart mit.
+$quietDaysRow = New-Object System.Windows.Forms.Panel
+$quietDaysRow.Tag = 'row-host'
+$quietDaysRow.Size = New-Object System.Drawing.Size(660, 28)
+
+$quietDaysLabel = New-Object System.Windows.Forms.Label
+$quietDaysLabel.Text = Get-UiString 'QuietDaysLabel'
+$quietDaysLabel.Location = New-Object System.Drawing.Point(0,5)
+$quietDaysLabel.AutoSize = $true
+$quietDaysRow.Controls.Add($quietDaysLabel)
+
+$quietDaysInput = New-Object System.Windows.Forms.NumericUpDown
+$quietDaysInput.Minimum = 0        # 0 = aus, jede gemeldete Installation schuetzt
+$quietDaysInput.Maximum = 3650     # zehn Jahre; ein Tippfehler soll das Fenster nicht abschalten
+$quietDaysInput.Increment = 30
+$quietDaysInput.Value = [Math]::Min(3650, [Math]::Max(0, [int]$script:settings.IgnoreDevicesQuietForDays))
+$quietDaysInput.Width = 80
+# GEMESSEN hinter die Beschriftung gelegt. Die Zeile darueber traegt noch eine feste 236 aus dem
+# Altbestand; hier waere sie falsch - der deutsche Text ist laenger, und ohne Location laege das
+# Feld auf x=0 mitten in der Beschriftung. Die Layout-Probe haette das gefunden, aber besser gar
+# nicht erst bauen.
+$quietDaysInput.Location = New-Object System.Drawing.Point(([int]((Get-ControlTextWidth -Control $quietDaysLabel) + 16)), 1)
+$quietDaysRow.Controls.Add($quietDaysInput)
+
+[void](Add-SettingRow -Card $cardAfterUpdate -Control $quietDaysRow -Hint (Get-UiString 'HintQuietDays') -Indent 32)
+
 function Update-KeepVersionCountUi {
   $count = $script:keepVersionCount
   try { $autoVersionCleanupCheckbox.Text = (Get-UiString 'AutoVersionCleanupCheckbox') -f $count } catch { Write-LogDebug 'keep-count checkbox text' }
@@ -1936,6 +1986,12 @@ $saveSettingsButton.Add_Click({
       $script:settings.KeepVersionCount = $script:keepVersionCount
       Update-KeepVersionCountUi
     }
+    if ($quietDaysInput) {
+      # Beim Speichern uebernommen, nicht beim Drehen: dieselbe Regel wie bei der Anzahl behaltener
+      # Versionen daneben - eine Zahl in einer Einstellungskarte darf eine Loeschung nicht schon
+      # freigeben, bevor jemand auf Speichern geklickt hat.
+      $script:settings.IgnoreDevicesQuietForDays = [int]$quietDaysInput.Value
+    }
     # The checkboxes already exclude each other, so this normally changes nothing. It is the last
     # gate before the values are persisted: no combination that the update engine must not see can
     # reach settings.json, whatever produced it.
@@ -2109,6 +2165,16 @@ function Clear-TenantViews {
     Clear-LatestVersionCache      # kundenunabhaengig, aber beim Wechsel erwartet man frische Zahlen
     Clear-InstallProbeSource      # welche Installationsquelle antwortet, ist eine Eigenschaft DES TENANTS
     Clear-DeleteBlockedAppCache   # gemerkte App-Ids, deren Loeschung abgelehnt wurde - Ids des vorigen Kunden
+    # Der Leistungsnachweis wird NEU ERZEUGT, nicht geleert: sein Inhalt ist ohnehin tenantbezogen
+    # (Get-SessionLeistungstext filtert nach dem angemeldeten Tenant), aber im Feld steht bis zum
+    # naechsten Betreten des Bereichs noch der Text des VORIGEN Kunden - und wer den Bereich offen
+    # hat, sieht ihn weiter. Mit -Force, weil eine von Hand geaenderte Fassung hier gerade nicht
+    # bewahrt werden darf: sie beschreibt die Arbeit beim vorigen Kunden.
+    #
+    # Gemeldet am 09.09.2026 an der Knopfbeschriftung, die nach dem Wechsel weiter "Kopiert!" sagte.
+    # Ohne Get-Command-Gatter, aus demselben Grund wie die fuenf Zeilen darueber (55-Dialogs laedt
+    # vor 85-Rows, ein echter Vorwaertsbezug liegt also nicht vor).
+    Update-WorkRecordText -Force
     # Update scan
     $script:updateApps = @()
     if ($updateListBox) { $updateListBox.Items.Clear() }

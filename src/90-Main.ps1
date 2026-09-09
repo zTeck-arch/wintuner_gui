@@ -951,7 +951,8 @@ $updateSearchButton.Add_Click({
                 $targetName = if ($existingTarget) { [string]$existingTarget.Name } else { $null }
                 $showCandidate = (-not $existingTarget) -or (Test-RequiresExistingTargetFollowUp -SourceApp $app -ExistingTarget $existingTarget)
                 if ($showCandidate) {
-                  $candidates.Add((New-UpdateCandidateModel -App $app -LatestVersion $latest -PackageId $wingetId -ExistingTargetGraphId $targetId -ExistingTargetName $targetName -PackageIdSource ([string]$resolvedIdSources[[string]$app.GraphId])))
+                  $candidates.Add((New-UpdateCandidateModel -App $app -LatestVersion $latest -PackageId $wingetId -ExistingTargetGraphId $targetId -ExistingTargetName $targetName -PackageIdSource ([string]$resolvedIdSources[[string]$app.GraphId]) `
+                    -ForeignNewer (Find-NonWin32NewerVersion -Index $script:nonWin32AppIndex -Name ([string]$app.Name) -TargetVersion $latest)))
                 }
                 if ($targetId -and $showCandidate) {
                   Write-Log ("Follow-up only: {0} ({1}, GraphId {2}) has existing target {3} ({4}); no package or upload is required." -f $app.Name, $app.CurrentVersion, $app.GraphId, $latest, $targetId)
@@ -989,7 +990,11 @@ $updateSearchButton.Add_Click({
               $targetName = if ($existingTarget) { [string]$existingTarget.Name } else { $null }
               $showCandidate = (-not $existingTarget) -or (Test-RequiresExistingTargetFollowUp -SourceApp $app -ExistingTarget $existingTarget)
               if ($showCandidate) {
-                $candidates.Add((New-UpdateCandidateModel -App $app -LatestVersion $fallbackLatest -PackageId $wingetId -ExistingTargetGraphId $targetId -ExistingTargetName $targetName -PackageIdSource ([string]$resolvedIdSources[[string]$app.GraphId])))
+                # $fallbackLatest, NICHT $latest: in diesem Zweig kommt die Zielversion aus den
+                # App-Metadaten, und $latest ist hier gar nicht gesetzt. Mit der falschen Variablen
+                # waere der Vergleich gegen einen Leerstring gelaufen - und damit immer ohne Befund.
+                $candidates.Add((New-UpdateCandidateModel -App $app -LatestVersion $fallbackLatest -PackageId $wingetId -ExistingTargetGraphId $targetId -ExistingTargetName $targetName -PackageIdSource ([string]$resolvedIdSources[[string]$app.GraphId]) `
+                    -ForeignNewer (Find-NonWin32NewerVersion -Index $script:nonWin32AppIndex -Name ([string]$app.Name) -TargetVersion $fallbackLatest)))
               }
               if ($targetId -and $showCandidate) {
                 Write-Log ("Follow-up only (metadata fallback): {0} ({1}, GraphId {2}) has existing target {3} ({4}); no package or upload is required." -f $app.Name, $app.CurrentVersion, $app.GraphId, $fallbackLatest, $targetId)
@@ -1185,6 +1190,19 @@ $updateSelectedButton.Add_Click({
         Update-Status ((Get-UiString 'FuzzyRunSkippedStatus') -f @($fuzzyChoice.Skipped).Count, $checkedApps.Count)
     }
 
+    # Und die dritte Frage: liegt im Tenant schon eine mindestens so neue Fassung eines anderen
+    # Paketierungstyps? Dann ist ein Neubau als Win32 eine Abloesung, die der Administrator
+    # entscheidet - sonst liegt danach eine zweite Fassung da, die niemand zugewiesen bekommt.
+    $foreignChoice = Confirm-ForeignNewerAppsInRun -Apps @($checkedApps)
+    if (-not $foreignChoice.Proceed) {
+        Update-Status (Get-UiString $(if ($foreignChoice.Reason -eq 'empty') { 'ForeignNewerRunNothingLeftStatus' } else { 'MassUpdateCanceledStatus' }))
+        return
+    }
+    $checkedApps = @($foreignChoice.Apps)
+    if (@($foreignChoice.Skipped).Count -gt 0) {
+        Update-Status ((Get-UiString 'ForeignNewerRunSkippedStatus') -f @($foreignChoice.Skipped).Count, $checkedApps.Count)
+    }
+
     # Confirm before touching the tenant – the selection can be larger than expected (filters,
     # "check all"), and updating apps in Intune is not something to trigger by a stray click.
     $namesPreview = (@($checkedApps | Select-Object -First 15 | ForEach-Object {
@@ -1212,7 +1230,17 @@ $updateSelectedButton.Add_Click({
         Update-Status ((Get-UiString 'StartingUpdateStatus') -f $checkedApps.Count)
         $concreteApps = @(Expand-UpdateCandidateGroups -Groups @($checkedApps))
         $batchResult = Invoke-AppUpdateBatch -Apps $concreteApps -RootPackageFolder $rootPackageFolder
-        Update-Status ((Get-UiString 'CheckedAppsUpdatedStatus') -f $batchResult.SuccessCount, $batchResult.FailedList.Count)
+        # Das nachgelaufene Aufraeumen hat seine eigene Bilanz, und diese Zeile ueberschreibt sie in
+        # der Statuszeile. Ist dort etwas gescheitert, wird es hier mitgenannt - sonst endet ein
+        # Lauf mit "0 fehlgeschlagen", waehrend drei Loeschungen im Protokoll gescheitert sind
+        # (gemeldet am 08.09.2026).
+        $cleanupFailed = [int]$script:lastVersionCleanupFailed
+        if ($cleanupFailed -gt 0) {
+          Update-Status ((Get-UiString 'CheckedAppsUpdatedCleanupFailedStatus') -f `
+            $batchResult.SuccessCount, $batchResult.FailedList.Count, $cleanupFailed)
+        } else {
+          Update-Status ((Get-UiString 'CheckedAppsUpdatedStatus') -f $batchResult.SuccessCount, $batchResult.FailedList.Count)
+        }
     } catch {
         Update-Status ((Get-UiString 'UpdateErrorStatus') -f $_.Exception.Message)
         Write-Log "updateSelectedButton error: $($_.Exception.Message)"
@@ -1266,6 +1294,18 @@ $updateAllButton.Add_Click({
     $updatedApps = @($fuzzyChoice.Apps)
     if (@($fuzzyChoice.Skipped).Count -gt 0) {
         Update-Status ((Get-UiString 'FuzzyRunSkippedStatus') -f @($fuzzyChoice.Skipped).Count, $updatedApps.Count)
+    }
+
+    # Derselbe Riegel wie im Lauf ueber die markierten Zeilen: "Alle aktualisieren" ist genau der
+    # Weg, auf dem eine solche Doppelung ungesehen entsteht.
+    $foreignChoice = Confirm-ForeignNewerAppsInRun -Apps @($updatedApps)
+    if (-not $foreignChoice.Proceed) {
+        Update-Status (Get-UiString $(if ($foreignChoice.Reason -eq 'empty') { 'ForeignNewerRunNothingLeftStatus' } else { 'MassUpdateCanceledStatus' }))
+        return
+    }
+    $updatedApps = @($foreignChoice.Apps)
+    if (@($foreignChoice.Skipped).Count -gt 0) {
+        Update-Status ((Get-UiString 'ForeignNewerRunSkippedStatus') -f @($foreignChoice.Skipped).Count, $updatedApps.Count)
     }
 
     $rootPackageFolder = try { [System.IO.Path]::GetFullPath($pathBox.Text.Trim()) } catch {

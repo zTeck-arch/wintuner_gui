@@ -229,9 +229,17 @@ function Invoke-AppUpdateBatch {
     # Optional automatic version trimming: after updating, keep only the newest N versions per app.
     # Runs silently (no prompt) because the user opted in via Settings; it still refuses to touch
     # apps whose versions cannot be compared, and never removes a lone version.
+    # VOR der Bedingung zurueckgesetzt, nicht darin: laeuft das Aufraeumen diesmal nicht (abgeschaltet
+    # oder nichts erfolgreich aktualisiert), stammte die Zahl sonst aus einem FRUEHEREN Lauf und die
+    # Abschlussmeldung wuerde einen Fehlschlag melden, den es in diesem Lauf nicht gab.
+    $script:lastVersionCleanupFailed = 0
     if ($successCount -gt 0 -and $script:settings.AutoVersionCleanup) {
       try {
-        Write-Log ("Auto version cleanup starting (keeping newest {0} per app)..." -f $script:keepVersionCount)
+        # Ausdruecklich "EVERY app in the tenant": gemeldet am 08.09.2026 nach einem Lauf, in dem
+        # nur Chrome aktualisiert wurde und im Protokoll trotzdem Notepad++ auftauchte. Das
+        # Aufraeumen ist eine tenantweite Regel ("von jeder App hoechstens N Versionen") und kein
+        # Anhang an die eben aktualisierte App - im Protokoll stand das nirgends.
+        Write-Log ("Auto version cleanup starting: checking EVERY app in the tenant, keeping the newest {0} version(s) of each. Apps that were not part of this run are checked too." -f $script:keepVersionCount)
         Invoke-VersionCleanup -KeepCount $script:keepVersionCount -Silent
       } catch { Write-Log "Auto version cleanup error: $($_.Exception.Message)" }
     }

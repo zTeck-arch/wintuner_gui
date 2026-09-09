@@ -764,6 +764,91 @@ function Resolve-FuzzyRunChoice {
   }
 }
 
+# Apps, fuer die im Tenant schon eine mindestens so neue Fassung eines ANDEREN Paketierungstyps
+# liegt (MSI, Store, AppX).
+#
+# Geschuetzte Apps bleiben aussen vor - fuer die ist die Frage eine Rueckfrage vorher gestellt.
+function Split-ForeignNewerApps {
+  param([AllowNull()][AllowEmptyCollection()][object[]]$Apps)
+  $split = Split-AppsByFlag -Apps $Apps -FlagName 'HasForeignNewer' -ExcludeFlagName 'IsProtected'
+  return @{ Foreign = @($split.Matching); Rest = @($split.Rest) }
+}
+
+# Dieselben drei Wege wie bei den geschuetzten Apps und den geratenen Ids.
+function Resolve-ForeignNewerRunChoice {
+  param(
+    [AllowNull()][AllowEmptyCollection()][object[]]$Apps,
+    [ValidateSet('all', 'skip', 'cancel')][string]$Choice
+  )
+  $split = Split-ForeignNewerApps -Apps $Apps
+  switch ($Choice) {
+    'all' { return @{ Proceed = $true; Apps = @($Apps); Skipped = @(); Reason = 'all' } }
+    'skip' {
+      $kept = @($split.Rest)
+      if ($kept.Count -eq 0) {
+        return @{ Proceed = $false; Apps = @(); Skipped = @($split.Foreign); Reason = 'empty' }
+      }
+      return @{ Proceed = $true; Apps = $kept; Skipped = @($split.Foreign); Reason = 'skip' }
+    }
+    default { return @{ Proceed = $false; Apps = @(); Skipped = @(); Reason = 'cancel' } }
+  }
+}
+
+# Die dritte Rueckfrage dieser Art - und die einzige, die nicht von einem Datenverlust handelt,
+# sondern von einer DOPPELUNG.
+#
+# Der Fall, gemeldet am 09.09.2026: die Update-Liste bot "Google Chrome 151.0.7922.72 ->
+# 153.0.8010.37, neu anzulegen" an, waehrend im Tenant eine ZUGEWIESENE MSI-Fassung 152.0.7977.83
+# lag. Ein Lauf baut dann eine dritte Fassung, die niemand zugewiesen bekommt - die Geraete behalten
+# die MSI, und im Tenant liegt eine Win32-App mehr, die nichts tut.
+#
+# Diese Anwendung baut nur Win32 und kann eine MSI- oder Store-Fassung nicht aktualisieren. Ob man
+# sie durch eine Win32-Fassung ABLOEST, ist deshalb eine Entscheidung des Administrators und keine
+# Nebenwirkung eines Klicks - so ausdruecklich gewuenscht. Wie die anderen beiden Rueckfragen laesst
+# sie sich mit abgeschalteten Bestaetigungen nicht wegdruecken.
+function Confirm-ForeignNewerAppsInRun {
+  param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Apps)
+  $split = Split-ForeignNewerApps -Apps $Apps
+  $foreign = @($split.Foreign)
+  if ($foreign.Count -eq 0) {
+    return @{ Proceed = $true; Apps = @($Apps); Skipped = @(); Reason = 'none' }
+  }
+  $preview = (@($foreign | Select-Object -First 15 | ForEach-Object {
+    $assignedNote = if ($_.ForeignNewerAssigned) { Get-UiString 'ForeignNewerAssignedTag' } else { '' }
+    "- {0}: {1} -> {2}   [{3} {4} {5}]" -f [string]$_.Name, [string]$_.CurrentVersion, [string]$_.LatestVersion,
+      [string]$_.ForeignNewerType, [string]$_.ForeignNewerVersion, $assignedNote
+  }) -join "`r`n").TrimEnd()
+  if ($foreign.Count -gt 15) { $preview += "`r`n- ..." }
+  Write-Log ("Update run contains {0} app(s) for which the tenant already holds a version of another packaging type that is at least as new, asking for an explicit confirmation regardless of the suppression setting: {1}" -f `
+    $foreign.Count, ((@($foreign | ForEach-Object {
+      "{0} -> target {1}, tenant already has {2} as {3}{4}" -f [string]$_.Name, [string]$_.LatestVersion,
+        [string]$_.ForeignNewerVersion, [string]$_.ForeignNewerType,
+        $(if ($_.ForeignNewerAssigned) { ' (assigned)' } else { '' })
+    })) -join '; '))
+
+  $choice = Show-ProtectedRunDialog -Count $foreign.Count -Preview $preview `
+    -TitleKey 'ForeignNewerRunConfirmTitle' -TextKey 'ForeignNewerRunConfirmDialog' `
+    -SkipButtonKey 'ForeignNewerRunSkipButton' -AllButtonKey 'ForeignNewerRunAllButton'
+  $result = Resolve-ForeignNewerRunChoice -Apps $Apps -Choice $choice
+
+  switch ($result.Reason) {
+    'all' {
+      Write-Log ("Confirmed: {0} app(s) will be built as Win32 even though the tenant already holds a version of another packaging type. The other version is NOT touched." -f $foreign.Count)
+    }
+    'skip' {
+      Write-Log ("Left out of this run ({0}): {1}. Continuing with {2} app(s)." -f `
+        $foreign.Count, ((@($foreign | ForEach-Object { [string]$_.Name })) -join ', '), @($result.Apps).Count)
+    }
+    'empty' {
+      Write-Log 'Only apps with an existing version of another packaging type were selected and the user chose to leave them out; nothing was built or uploaded.'
+    }
+    default {
+      Write-Log 'Update run canceled at the other-packaging-type confirmation; nothing was built or uploaded.'
+    }
+  }
+  return $result
+}
+
 # Die zweite Rueckfrage, die "Rueckfragen abschalten" NICHT abschalten darf.
 #
 # Der Fall: eine App, deren WinGet-Id die Anwendung aus dem ANZEIGENAMEN geraten hat (Aehnlichkeit

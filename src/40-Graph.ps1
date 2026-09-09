@@ -431,6 +431,12 @@ function Group-UpdateCandidates {
       # dessen Id geraten ist. Ohne diese Zeile ginge der Merker genau dort verloren, wo laut
       # docs/PATTERNS.md schon IsUnmanaged, IsProtected und PackageIdFromNotes verlorengingen.
       PackageIdFuzzy        = [bool]@($members | Where-Object { $_.PSObject.Properties['PackageIdFuzzy'] -and $_.PackageIdFuzzy }).Count
+      # Auch dieser Merker muss durch die Gruppierung, aus demselben Grund wie die anderen: die
+      # Zeile und die Rueckfrage werden AUS DIESEM Objekt gebaut, nicht aus den Mitgliedern.
+      HasForeignNewer       = [bool]@($members | Where-Object { $_.PSObject.Properties['HasForeignNewer'] -and $_.HasForeignNewer }).Count
+      ForeignNewerVersion   = [string]($members | Where-Object { $_.PSObject.Properties['ForeignNewerVersion'] -and $_.ForeignNewerVersion } | Select-Object -First 1 -ExpandProperty ForeignNewerVersion)
+      ForeignNewerType      = [string]($members | Where-Object { $_.PSObject.Properties['ForeignNewerType'] -and $_.ForeignNewerType } | Select-Object -First 1 -ExpandProperty ForeignNewerType)
+      ForeignNewerAssigned  = [bool]@($members | Where-Object { $_.PSObject.Properties['ForeignNewerAssigned'] -and $_.ForeignNewerAssigned }).Count
       PackageIdSource       = [string]($members | Where-Object { $_.PSObject.Properties['PackageIdSource'] -and $_.PackageIdSource } | Select-Object -First 1 -ExpandProperty PackageIdSource)
       # Schutz gilt fuer die ganze Gruppe, sobald ein Vorgaenger geschuetzt ist: der Lauf fasst sie
       # zu einem Ziel zusammen, also darf die Rueckfrage nicht an einem Mitglied vorbeigehen.
@@ -500,14 +506,102 @@ function Clear-InstallProbeSource {
   $script:installProbeSource = $null
 }
 
+# Zaehlt eine gemeldete Installation noch, oder ist das Geraet laengst still?
+#
+# Gemeldet am 09.09.2026 aus dem Betrieb: in gewachsenen Kundenumgebungen liegen Geraete, die seit
+# Wochen oder Monaten nicht mehr einchecken. Auf ihnen ist eine uralte App-Fassung installiert, und
+# genau dieser Eintrag verhindert dauerhaft, dass die Fassung abgeloest und geloescht werden kann -
+# obwohl niemand mehr etwas davon hat.
+#
+# Fail-safe in die vorsichtige Richtung: OHNE Datum gilt die Installation als aktiv. Ein fehlendes
+# oder unlesbares 'lastSyncDateTime' darf nie zu einer Loeschung fuehren - "ich weiss nicht, wann
+# das Geraet zuletzt da war" ist keine Erlaubnis. Dasselbe gilt fuer QuietDays <= 0: dann ist das
+# Fenster ausgeschaltet und jede Installation zaehlt, also genau das Verhalten bis 0.18.1.
+#
+# Rein, damit die Regel ohne Graph und ohne Uhr pruefbar ist ($Now wird hereingegeben).
+function Test-InstallStatusStillActive {
+  param(
+    [AllowNull()][object]$Status,
+    [Parameter(Mandatory)][datetime]$Now,
+    [int]$QuietDays = 0
+  )
+  if ($QuietDays -le 0) { return $true }
+  if (-not $Status) { return $true }
+  $raw = ''
+  try { if ($Status.PSObject.Properties['lastSyncDateTime']) { $raw = [string]$Status.lastSyncDateTime } } catch { $raw = '' }
+  if ([string]::IsNullOrWhiteSpace($raw)) { return $true }
+  $parsed = [datetime]::MinValue
+  if (-not [datetime]::TryParse($raw, [System.Globalization.CultureInfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal,
+        [ref]$parsed)) {
+    return $true
+  }
+  return (($Now.ToUniversalTime() - $parsed).TotalDays -le $QuietDays)
+}
+
+# Die Bilanz ueber alle gemeldeten Zustaende einer App: wie viele melden "installiert", wie viele
+# davon sind noch aktiv, und wie lange ist der jüngste Kontakt her?
+#
+# Die Zahl der stillen Geraete und das Alter gehoeren in die Meldung: "behalten, weil noch
+# installiert" ist ohne "auf 3 Geraeten, letzter Kontakt vor 214 Tagen" keine Auskunft, mit der
+# jemand etwas entscheiden kann.
+function Measure-InstalledDeviceActivity {
+  param(
+    [AllowNull()][AllowEmptyCollection()][object[]]$Statuses,
+    [Parameter(Mandatory)][datetime]$Now,
+    [int]$QuietDays = 0
+  )
+  $installed = 0
+  $active = 0
+  $newestDaysAgo = $null
+  $withoutDate = 0
+  foreach ($status in @($Statuses)) {
+    if (-not $status) { continue }
+    $state = [string]$status.installState
+    if ([string]::IsNullOrWhiteSpace($state)) { $state = [string]$status.mobileAppInstallStatusValue }
+    if (-not [string]::Equals($state, 'installed', [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+    $installed++
+    if (Test-InstallStatusStillActive -Status $status -Now $Now -QuietDays $QuietDays) { $active++ }
+    $raw = ''
+    try { if ($status.PSObject.Properties['lastSyncDateTime']) { $raw = [string]$status.lastSyncDateTime } } catch { $raw = '' }
+    if ([string]::IsNullOrWhiteSpace($raw)) { $withoutDate++; continue }
+    $parsed = [datetime]::MinValue
+    if ([datetime]::TryParse($raw, [System.Globalization.CultureInfo]::InvariantCulture,
+          [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal,
+          [ref]$parsed)) {
+      $daysAgo = [int][Math]::Floor(($Now.ToUniversalTime() - $parsed).TotalDays)
+      if ($null -eq $newestDaysAgo -or $daysAgo -lt $newestDaysAgo) { $newestDaysAgo = $daysAgo }
+    } else { $withoutDate++ }
+  }
+  return @{
+    Installed     = $installed
+    Active        = $active
+    Stale         = ($installed - $active)
+    WithoutDate   = $withoutDate
+    NewestDaysAgo = $newestDaysAgo
+  }
+}
+
 function Get-AppInstallationProbe {
-  param([Parameter(Mandatory)][string]$AppId, [string]$AppName = '')
+  param(
+    [Parameter(Mandatory)][string]$AppId,
+    [string]$AppName = '',
+    # > 0: eine Installation zaehlt nur, wenn das Geraet innerhalb dieser Tage synchronisiert hat.
+    # 0 (Vorgabe) ist das Verhalten bis 0.18.1 - jede gemeldete Installation zaehlt. Der Aufrufer
+    # entscheidet: das AUTOMATISCHE Aufraeumen bleibt bewusst bei 0.
+    [int]$IgnoreDevicesQuietForDays = 0
+  )
 
   $out = [pscustomobject]@{
     Succeeded        = $false
     HasInstallations = $true
     Count            = $null
     ErrorMessage     = $null
+    # Nur gefuellt, wenn ueber deviceStatuses geantwortet wurde UND ein Fenster gilt: die anderen
+    # Quellen (installSummary, Statusbericht) liefern Zahlen ohne Datum.
+    StaleOnly        = $false
+    StaleCount       = 0
+    NewestDaysAgo    = $null
   }
   if (-not (Test-GuidString $AppId)) {
     $out.ErrorMessage = 'invalid app id'
@@ -534,6 +628,12 @@ function Get-AppInstallationProbe {
     # and evaluate installState client-side. Stop as soon as one successful state is found.
     $uri = "$base/deviceStatuses"
     $hasInstalledStatus = $false
+    # Mit Aktivitaetsfenster wird JEDER Zustand gesammelt, statt beim ersten "installiert"
+    # abzubrechen: sonst faende die Abkuerzung genau ein stilles Geraet und blockierte damit, was
+    # das Fenster gerade freigeben soll. Ohne Fenster (der Regelfall, und das automatische
+    # Aufraeumen) bleibt die Abkuerzung - sie spart bei grossen Tenants echte Zeit.
+    $collectAll = ($IgnoreDevicesQuietForDays -gt 0)
+    $collected = [System.Collections.Generic.List[object]]::new()
     # Bounded like every other paging loop here: an endless nextLink chain would hang the UI thread
     # in a probe whose answer decides whether an app version may be deleted.
     $statusPages = 0
@@ -542,6 +642,7 @@ function Get-AppInstallationProbe {
       if ($statusPages -gt 100) { throw "Device status pagination exceeded 100 pages for app $AppId." }
       $response = Invoke-GraphRest -Method GET -Uri $uri -Headers $headers -Context ("deviceStatuses for {0} (page {1})" -f $AppId, $statusPages)
       foreach ($status in @($response.value)) {
+        if ($collectAll) { [void]$collected.Add($status); continue }
         if ([string]::Equals([string]$status.installState, 'installed', [System.StringComparison]::OrdinalIgnoreCase) -or
             [string]::Equals([string]$status.mobileAppInstallStatusValue, 'installed', [System.StringComparison]::OrdinalIgnoreCase)) {
           $hasInstalledStatus = $true
@@ -553,7 +654,20 @@ function Get-AppInstallationProbe {
     } while (-not [string]::IsNullOrWhiteSpace($uri))
     $out.Succeeded = $true
     $script:installProbeSource = 'deviceStatuses'
-    if ($hasInstalledStatus) {
+    if ($collectAll) {
+      # Die Bilanz entscheidet: nur AKTIVE Installationen blockieren. Sind alle gemeldeten
+      # Installationen auf stillen Geraeten, wird das benannt - und zwar mit Zahl und Alter, sonst
+      # ist "trotz Installationen geloescht" eine Behauptung ohne Grundlage.
+      $activity = Measure-InstalledDeviceActivity -Statuses @($collected.ToArray()) -Now (Get-Date) -QuietDays $IgnoreDevicesQuietForDays
+      $out.Count = [int]$activity.Installed
+      $out.StaleCount = [int]$activity.Stale
+      $out.NewestDaysAgo = $activity.NewestDaysAgo
+      $out.HasInstallations = ([int]$activity.Active -gt 0)
+      $out.StaleOnly = ([int]$activity.Installed -gt 0 -and [int]$activity.Active -eq 0)
+      Write-Log ("Installation probe: '{0}' ({1}) reports {2} installation(s) on device statuses; {3} still active within {4} day(s), {5} on quiet devices, {6} without a sync date. Newest contact: {7}." -f `
+        $AppName, $AppId, $activity.Installed, $activity.Active, $IgnoreDevicesQuietForDays, $activity.Stale, $activity.WithoutDate,
+        $(if ($null -ne $activity.NewestDaysAgo) { ("{0} day(s) ago" -f $activity.NewestDaysAgo) } else { 'unknown' }))
+    } elseif ($hasInstalledStatus) {
       $out.HasInstallations = $true
       # The loop stops at the FIRST installed status, so it does not know the real device count.
       # Leaving Count $null makes the UI show a no-number message instead of the misleading "1".

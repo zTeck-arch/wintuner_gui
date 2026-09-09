@@ -1064,6 +1064,77 @@ function Get-Win32AppInventoryViaGraph {
 # Produkt paketieren und die echte App ablösen - bei einem handgebauten Paket, das niemand schnell
 # nachbaut, ist das der Totalverlust.
 #
+# Fassungen, die WinTuner NICHT bauen kann, aber im Tenant liegen.
+#
+# Gemeldet am 09.09.2026 aus einem echten Fenster: die Update-Liste bot "Google Chrome
+# 151.0.7922.72 -> 153.0.8010.37, neu anzulegen" an, waehrend im Tenant eine ZUGEWIESENE
+# "Windows MSI line-of-business"-Fassung 152.0.7977.83 lag. Ein Lauf haette also eine dritte
+# Fassung gebaut, die niemand zugewiesen bekommt, waehrend die Geraete weiter die MSI erhalten.
+#
+# Der Grund: Select-UnmanagedWin32Apps daneben verwirft JEDEN Typ ausser win32LobApp - der
+# Rohbestand kennt alle Typen (die Protokollzeile sagt "app object(s) of any type"), aber die
+# Auswahl liess sie fallen. Aktualisiert wird weiterhin nur Win32; hier wird nur GESEHEN, was
+# sonst da ist, damit die Zeile es sagen und der Lauf danach fragen kann.
+#
+# Rein: Rohbestand rein, Nachschlagetabelle raus (normalisierter Name -> Fassungen).
+function Get-NonWin32AppIndex {
+  param([AllowNull()][object[]]$RawApps)
+  $index = @{}
+  foreach ($app in @($RawApps)) {
+    if (-not $app -or -not $app.id) { continue }
+    $odataType = [string]$app.'@odata.type'
+    # Genau die Umkehrung der Auswahl daneben: Win32 gehoert dorthin, alles andere hierher.
+    if ([string]::Equals($odataType.TrimStart([char]'#'), 'microsoft.graph.win32LobApp', [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+    $name = ([string]$app.displayName).Trim()
+    if ([string]::IsNullOrWhiteSpace($name)) { continue }
+    # Ohne Versionsangabe ist die Fassung fuer einen Vergleich unbrauchbar. Store- und Web-Apps
+    # tragen meist keine - die gehoeren hier nicht hinein, sonst warnte die Zeile bei jeder
+    # gleichnamigen Store-App ohne etwas sagen zu koennen.
+    $version = ([string]$app.displayVersion).Trim()
+    if ([string]::IsNullOrWhiteSpace($version)) { continue }
+    $key = $name.ToLowerInvariant()
+    if (-not $index.ContainsKey($key)) { $index[$key] = [System.Collections.Generic.List[object]]::new() }
+    [void]$index[$key].Add([pscustomobject]@{
+      Name       = $name
+      Version    = $version
+      GraphId    = [string]$app.id
+      OdataType  = $odataType
+      TypeLabel  = Get-MobileAppTypeLabel $odataType
+      IsAssigned = [bool]$app.isAssigned
+    })
+  }
+  return $index
+}
+
+# Liegt fuer diese App schon eine Fassung eines ANDEREN Paketierungstyps vor, die mindestens so neu
+# ist wie die Zielversion? Dann ist ein Neubau als Win32 eine Entscheidung, keine Selbstverstaendlichkeit.
+#
+# Gibt das jüngste solche Objekt zurueck (oder $null). Eine ZUGEWIESENE Fassung gewinnt bei
+# gleicher Version, weil sie die ist, die auf den Geraeten landet - und damit die, die in der
+# Rueckfrage stehen muss.
+function Find-NonWin32NewerVersion {
+  param(
+    [Parameter(Mandatory)][hashtable]$Index,
+    [Parameter(Mandatory)][AllowEmptyString()][string]$Name,
+    [AllowEmptyString()][string]$TargetVersion
+  )
+  if ([string]::IsNullOrWhiteSpace($Name) -or [string]::IsNullOrWhiteSpace($TargetVersion)) { return $null }
+  $key = ([string]$Name).Trim().ToLowerInvariant()
+  if (-not $Index.ContainsKey($key)) { return $null }
+  $best = $null
+  foreach ($candidate in @($Index[$key])) {
+    # "mindestens so neu": eine gleich hohe Fassung ist genau der gemeldete Fall - dann wuerde der
+    # Lauf dasselbe zweimal in den Tenant legen.
+    if (Test-IsNewerVersion -Latest ([string]$TargetVersion) -Current ([string]$candidate.Version)) { continue }
+    if (-not $best) { $best = $candidate; continue }
+    if (Test-IsNewerVersion -Latest ([string]$candidate.Version) -Current ([string]$best.Version)) { $best = $candidate; continue }
+    # Gleiche Version: die zugewiesene gewinnt.
+    if (-not (Test-IsNewerVersion -Latest ([string]$best.Version) -Current ([string]$candidate.Version)) -and
+        $candidate.IsAssigned -and -not $best.IsAssigned) { $best = $candidate }
+  }
+  return $best
+}
+
 # Rein gehalten, damit die Auswahl ohne Tenant pruefbar ist.
 function Select-UnmanagedWin32Apps {
   param(
@@ -1101,8 +1172,14 @@ function Select-UnmanagedWin32Apps {
 }
 
 function Get-UnmanagedWin32Apps {
-  param([switch]$Superseded)
-  $apps = @(Select-UnmanagedWin32Apps -RawApps (Get-RawWin32AppsFromGraph) -Superseded:$Superseded)
+  param(
+    [switch]$Superseded,
+    # Vorhandene Rohdaten weiterverwenden, statt Graph ein zweites Mal zu lesen. Genutzt von
+    # Get-ScanInventory, das aus DEMSELBEN Rohbestand auch den Nicht-Win32-Index baut.
+    [AllowNull()][object[]]$RawApps
+  )
+  $raw = if ($null -ne $RawApps) { @($RawApps) } else { @(Get-RawWin32AppsFromGraph) }
+  $apps = @(Select-UnmanagedWin32Apps -RawApps $raw -Superseded:$Superseded)
   $fromNotes = @($apps | Where-Object { $_.PSObject.Properties['PackageIdFromNotes'] -and $_.PackageIdFromNotes })
   Write-Log ("Paged Graph inventory: {0} {1} Win32 app(s) WITHOUT a WinTuner marker; {2} of them carry a WinGet id in the notes text anyway." -f `
     $apps.Count, $(if ($Superseded) { 'superseded' } else { 'active' }), $fromNotes.Count)
@@ -1137,10 +1214,28 @@ function Merge-UnmanagedInventory {
 # beiden nicht wieder verschiedene Fragen beantworten - genau dafuer gibt es Measure-AvailableUpdates.
 function Get-ScanInventory {
   param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$ManagedApps)
-  if (-not $script:settings.ScanUnmanagedWin32Apps) { return @($ManagedApps) }
+  # Zurueckgesetzt, damit ein Lauf nie den Index des vorigen benutzt - der Tenant kann inzwischen
+  # ein anderer sein.
+  $script:nonWin32AppIndex = @{}
+  if (-not $script:settings.ScanUnmanagedWin32Apps) {
+    # Ohne diesen Schalter wird der Rohbestand gar nicht gelesen, also gibt es auch keinen Index -
+    # und damit keinen Hinweis auf eine Fassung anderen Typs. Bewusst KEIN zusaetzlicher
+    # Graph-Lauf nur dafuer: das waere ein Lesevorgang ueber alle Apps, den niemand bestellt hat.
+    # Gesagt wird die Luecke trotzdem, sonst haelt jemand das Ausbleiben fuer ein "es gibt keine".
+    Write-Log 'Update scan: only WinTuner-marked apps are read (the setting for unmarked Win32 apps is off), so a version of another packaging type cannot be detected in this run.'
+    return @($ManagedApps)
+  }
   $unmanaged = @()
   try {
-    $unmanaged = @(Get-UnmanagedWin32Apps)
+    # EIN Lesevorgang, zwei Ergebnisse: die unmarkierten Win32-Apps und der Index der Fassungen,
+    # die diese Anwendung nicht baut (MSI, Store, AppX). Der Rohbestand enthaelt ohnehin jeden Typ.
+    $raw = @(Get-RawWin32AppsFromGraph)
+    $script:nonWin32AppIndex = Get-NonWin32AppIndex -RawApps $raw
+    $indexed = @($script:nonWin32AppIndex.Keys).Count
+    if ($indexed -gt 0) {
+      Write-Log ("Update scan: {0} app name(s) also exist in the tenant as a packaging type this application does not build (MSI, Store, AppX); a version of those that is newer than the target will be named on the row and asked about before a run." -f $indexed)
+    }
+    $unmanaged = @(Get-UnmanagedWin32Apps -RawApps $raw)
   } catch {
     # Kein Abbruch: die markierten Apps sind vollstaendig gelesen, und eine kuerzere Suche ist besser
     # als gar keine. Gesagt wird es trotzdem, sonst sieht niemand die Luecke.

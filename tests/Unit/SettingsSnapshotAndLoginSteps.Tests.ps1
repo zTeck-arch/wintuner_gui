@@ -47,7 +47,12 @@ Describe 'Abdruck der Einstellungen im Protokoll' {
     $text = (Get-SettingsSnapshotLines -Settings $script:demoSettings) -join "`n"
     $text | Should -Match 'moveAssignments=True'
     $text | Should -Match 'versionCleanup=True keepNewest=2'
-    $text | Should -Match "confirmations suppressed=True \(accepted for version '0\.16\.0'\)"
+    # Nicht mehr nur der Schalter: die Zeile sagt seit dem 08.09.2026 auch, ob er WIRKT. Die
+    # Beispieleinstellungen haben das Risiko fuer '0.16.0' bestaetigt - laeuft eine andere Version,
+    # kommen die Rueckfragen trotzdem, und genau das muss dort stehen. Die Faelle dazu stehen in
+    # RunReportHonesty.Tests.ps1.
+    $text | Should -Match 'confirmations suppressed=True'
+    $text | Should -Match "(IN EFFECT|NOT in effect - accepted for '0\.16\.0')"
   }
 
   It 'schreibt KEINE Kundendaten - nur Anzahlen' {
