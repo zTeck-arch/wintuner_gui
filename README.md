@@ -206,7 +206,7 @@ $s | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $p -Encoding utf8
 ```
 
 > [!NOTE]
-> An installation that has been in use for a while carried `MaxRecentLogins = 8` or `15` — the default of earlier versions, because an existing settings file keeps its value. Since 0.18.1 such a value is raised **once**, on the next start, to today's 20; the log names the previous value. Once means once: set the list shorter after that and your value is kept. A value **above** 20 is left alone.
+> An installation that has been in use for a while carried `MaxRecentLogins = 8` or `15` — the default of earlier versions, because an existing settings file keeps its value. Since 0.19.0 such a value is raised **once**, on the next start, to today's 20; the log names the previous value. Once means once: set the list shorter after that and your value is kept. A value **above** 20 is left alone.
 
 ---
 
@@ -431,7 +431,7 @@ The application then looks for the id in this order, and only the first three ar
 
 In that last case a run may package the **wrong product**, supersede the existing app with it and move its assignments. Example: Intune holds a self-built app *Acrobat Reader DC (netgo)*, WinGet does not know it, but *Adobe Acrobat Reader DC* is close enough — and afterwards your tenant carries the bare vendor build while your own package has been superseded.
 
-So since 0.18.1:
+So since 0.19.0:
 
 - The row in the update list says so **before** you tick it: *package id guessed from the name*, in the warning colour.
 - Before the run, a separate question lists **every** guessed id with its app name and package id. It cannot be dismissed by **Skip confirmations before changes in Intune** — same as for protected apps.
