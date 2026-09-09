@@ -206,7 +206,7 @@ $s | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $p -Encoding utf8
 ```
 
 > [!NOTE]
-> In einer länger genutzten Installation stand dort noch `MaxRecentLogins = 8` oder `15` — die Vorgabe früherer Versionen, denn eine bestehende Einstellungsdatei behält ihren Wert. Seit 0.18.1 wird ein solcher Wert beim ersten Start **einmalig** auf die heutigen 20 angehoben; das Protokoll nennt den alten Wert. Einmalig heißt einmalig: wer die Liste danach bewusst kürzer setzt, behält seinen Wert. Ein Wert **über** 20 bleibt unangetastet.
+> In einer länger genutzten Installation stand dort noch `MaxRecentLogins = 8` oder `15` — die Vorgabe früherer Versionen, denn eine bestehende Einstellungsdatei behält ihren Wert. Seit 0.19.0 wird ein solcher Wert beim ersten Start **einmalig** auf die heutigen 20 angehoben; das Protokoll nennt den alten Wert. Einmalig heißt einmalig: wer die Liste danach bewusst kürzer setzt, behält seinen Wert. Ein Wert **über** 20 bleibt unangetastet.
 
 ---
 
@@ -431,7 +431,7 @@ Die Anwendung sucht die Id dann in dieser Reihenfolge, und nur die ersten drei W
 
 Im letzten Fall paketiert ein Lauf womöglich das **falsche Produkt**, löst die vorhandene App damit ab und zieht deren Zuweisungen mit. Beispiel: in Intune liegt eine selbst gebaute App *Acrobat Reader DC (netgo)*, WinGet kennt sie nicht, aber *Adobe Acrobat Reader DC* ist nah genug — und danach steht in Ihrem Tenant die nackte Herstellerfassung, während Ihr eigenes Paket abgelöst ist.
 
-Deshalb gilt seit 0.18.1:
+Deshalb gilt seit 0.19.0:
 
 - Die Zeile in der Update-Liste sagt es **vor** dem Haken: *Paket-Id aus dem Namen geraten*, in Warnfarbe.
 - Vor dem Lauf kommt eine eigene Rückfrage, die **jede** geratene Id mit Namen und Paket-Id auflistet. Sie lässt sich mit **Rückfragen vor Änderungen in Intune überspringen** *nicht* wegdrücken — wie bei geschützten Apps.
