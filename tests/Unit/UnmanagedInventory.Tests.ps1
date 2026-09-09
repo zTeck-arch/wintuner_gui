@@ -223,15 +223,26 @@ Describe 'Get-ScanInventory' {
   BeforeEach {
     $global:TestLog.Clear()
     $global:UnmanagedCalls = 0
+    # -RawApps seit dem 09.09.2026: Get-ScanInventory liest den Rohbestand EINMAL und baut daraus
+    # zwei Ergebnisse - die unmarkierten Win32-Apps und den Index der Fassungen anderer
+    # Paketierungstypen. Eine Attrappe ohne diesen Parameter scheitert an der Bindung, und der
+    # catch-Zweig gab dann stillschweigend nur die markierten Apps zurueck.
     Set-Item -Path function:global:Get-UnmanagedWin32Apps -Value {
+      param([switch]$Superseded, [AllowNull()][object[]]$RawApps)
       $global:UnmanagedCalls++
       if ($global:UnmanagedThrows) { throw 'Graph read failed' }
       return @([pscustomobject]@{ Name = 'Docker Desktop'; GraphId = 'u1'; PackageId = ''; IsUnmanaged = $true })
     }
+    Set-Item -Path function:global:Get-RawWin32AppsFromGraph -Value { @() }
+    Set-Item -Path function:global:Get-NonWin32AppIndex -Value { param([AllowNull()][object[]]$RawApps) @{} }
     $global:UnmanagedThrows = $false
   }
 
-  AfterAll { Remove-Item -Path function:global:Get-UnmanagedWin32Apps -ErrorAction SilentlyContinue }
+  AfterAll {
+    Remove-Item -Path function:global:Get-UnmanagedWin32Apps -ErrorAction SilentlyContinue
+    Remove-Item -Path function:global:Get-RawWin32AppsFromGraph -ErrorAction SilentlyContinue
+    Remove-Item -Path function:global:Get-NonWin32AppIndex -ErrorAction SilentlyContinue
+  }
 
   It 'returns the module inventory unchanged when the setting is off' {
     # Und liest den Tenant dann auch nicht: die Graph-Abfrage ist ein Seitendurchlauf, der ohne die
@@ -263,7 +274,10 @@ Describe 'Get-ScanInventory' {
 
   It 'does not claim a widened scope when the tenant has no unmarked apps' {
     $script:settings = @{ ScanUnmanagedWin32Apps = $true }
-    Set-Item -Path function:global:Get-UnmanagedWin32Apps -Value { @() }
+    Set-Item -Path function:global:Get-UnmanagedWin32Apps -Value {
+      param([switch]$Superseded, [AllowNull()][object[]]$RawApps)
+      @()
+    }
     $result = @(Get-ScanInventory -ManagedApps @([pscustomobject]@{ Name = 'Chrome'; GraphId = 'm1' }))
     $result.Count | Should -Be 1
     ($global:TestLog -join "`n") | Should -Not -Match 'unmarked Win32 app'

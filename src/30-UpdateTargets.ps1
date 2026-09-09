@@ -56,7 +56,10 @@ function New-UpdateCandidateModel {
     # Woher die Paket-Id kommt: override | marker | exact | fuzzy | none (siehe
     # Resolve-WingetIdForApp -Detailed). Leer, wenn der Aufrufer es nicht weiss - dann gilt die
     # Id NICHT als geraten, weil eine erfundene Warnung schlimmer ist als keine.
-    [string]$PackageIdSource = ''
+    [string]$PackageIdSource = '',
+    # Eine im Tenant liegende Fassung eines ANDEREN Paketierungstyps, die mindestens so neu ist wie
+    # die Zielversion (siehe Find-NonWin32NewerVersion). $null, wenn es keine gibt.
+    [AllowNull()][object]$ForeignNewer = $null
   )
   [pscustomobject]@{
     Name           = [string]$App.Name
@@ -89,6 +92,16 @@ function New-UpdateCandidateModel {
     # sich nicht wegdruecken.
     PackageIdSource = [string]$PackageIdSource
     PackageIdFuzzy  = [string]::Equals([string]$PackageIdSource, 'fuzzy', [System.StringComparison]::OrdinalIgnoreCase)
+    # Im Tenant liegt schon eine mindestens so neue Fassung - aber als anderer Paketierungstyp
+    # (MSI, Store, AppX), den diese Anwendung nicht baut. Ein Lauf legt dann eine ZWEITE Fassung
+    # daneben, und wenn die alte Win32-Fassung unzugewiesen war, bekommt sie niemand: die Geraete
+    # behalten die andere. Gemeldet am 09.09.2026 an einem Chrome, dessen MSI-Fassung 152.0.7977.83
+    # zugewiesen war, waehrend die Liste 151.0.7922.72 -> 153.0.8010.37 anbot.
+    ForeignNewer        = $ForeignNewer
+    HasForeignNewer     = [bool]$ForeignNewer
+    ForeignNewerVersion = if ($ForeignNewer) { [string]$ForeignNewer.Version } else { '' }
+    ForeignNewerType    = if ($ForeignNewer) { [string]$ForeignNewer.TypeLabel } else { '' }
+    ForeignNewerAssigned = [bool]($ForeignNewer -and $ForeignNewer.IsAssigned)
     Checked        = $false
   }
 }

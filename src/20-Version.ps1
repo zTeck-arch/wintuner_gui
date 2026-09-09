@@ -581,3 +581,26 @@ function Invoke-UpdateCheckFeedback {
   }
 }
 
+
+# Macht aus "#microsoft.graph.win32LobApp" etwas Lesbares. Unbekannte Typen behalten ihren rohen
+# Namen statt versteckt zu werden: eine App, die diese Oberflaeche nicht versteht, muss trotzdem
+# sichtbar bleiben.
+#
+# Stand bis zum 09.09.2026 in 82-TenantApps. Umgezogen, weil die Update-Suche (25-WinGetData) sie
+# jetzt ebenfalls braucht - dort wird eine im Tenant liegende Fassung eines ANDEREN
+# Paketierungstyps benannt, und Teil 25 laedt vor Teil 82.
+function Get-MobileAppTypeLabel {
+  param([string]$ODataType)
+  $bare = ([string]$ODataType).TrimStart([char]'#') -replace '^microsoft\.graph\.', ''
+  switch -Regex ($bare) {
+    '^win32LobApp$'                 { return 'Win32' }
+    '^winGetApp$'                   { return 'Store (WinGet)' }
+    '^windowsMobileMSI$'            { return 'MSI' }
+    '^windowsUniversalAppX'         { return 'UWP / MSIX' }
+    '^officeSuiteApp$'              { return 'Microsoft 365 Apps' }
+    '^windowsWebApp$|^webApp$'      { return 'Web link' }
+    '^windowsStoreApp$'             { return 'Store (legacy)' }
+    '^windowsAppX'                  { return 'AppX' }
+    default                         { return $bare }
+  }
+}

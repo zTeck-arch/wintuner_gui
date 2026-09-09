@@ -1167,6 +1167,13 @@ function Update-WorkRecordText {
     $ui.Box.Text = $text
     $ui.LastGenerated = $text
     if ($ui.Header) { $ui.Header.Text = Get-SessionLeistungsHeader }
+    # Der Knopf zurueck auf "Kopieren".
+    #
+    # Gemeldet am 09.09.2026: nach dem Wechsel zum naechsten Kunden stand dort weiter "Kopiert!" -
+    # eine Aussage ueber einen Text, den es nicht mehr gibt. Der Klick setzt die Beschriftung, und
+    # nichts nahm sie je zurueck; der Bereich wird beim Betreten nicht neu gebaut, sondern nur
+    # nachgezogen. Hier ist die richtige Stelle: wenn der Text neu ist, ist "Kopiert!" falsch.
+    if ($ui.CopyButton) { $ui.CopyButton.Text = Get-UiString 'LeistungCopyButton' }
   } catch { Write-LogDebug 'work record text' }
 }
 

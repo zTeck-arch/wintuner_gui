@@ -111,6 +111,19 @@ $script:settings = @{
   # NEWEST version may stay in scope, otherwise the predecessor has to be unassigned by hand.
   MoveAssignmentsOnUpdate = $true
   KeepVersionCount = 2
+  # Aufraeumen von Hand: eine gemeldete Installation zaehlt nur, wenn das Geraet innerhalb dieser
+  # Tage synchronisiert hat. 0 = aus, also jede gemeldete Installation schuetzt (Verhalten bis
+  # 0.18.1).
+  #
+  # Gemeldet am 09.09.2026: in gewachsenen Umgebungen liegen Geraete, die seit Monaten nicht mehr
+  # einchecken. Auf ihnen ist eine uralte Fassung installiert, und genau dieser Eintrag verhindert
+  # dauerhaft ihre Ablöse - obwohl niemand mehr etwas davon hat. Wichtig fuer die Einordnung: eine
+  # geloeschte App wird auf dem Geraet NICHT deinstalliert; Intune verliert nur Bericht, Zuweisung
+  # und die Moeglichkeit zur Neuinstallation aus diesem Objekt.
+  #
+  # Vorgabe bewusst 0: eine Einstellung, die Loeschungen freigibt, schaltet sich nicht selbst ein.
+  # Das AUTOMATISCHE Aufraeumen ignoriert diesen Wert ohnehin immer.
+  IgnoreDevicesQuietForDays = 0
   ThemeName = "Light"
   Language = "en"
   RecentLogins = @()   # most-recent-first list of previously used UPNs, for quick re-selection
@@ -262,9 +275,27 @@ function Get-SettingsSnapshotLines {
   $lines.Add(("{0} | update run: moveAssignments={1} removePredecessor={2} versionCleanup={3} keepNewest={4} saveScopeBeforeRemoval={5}" -f `
     $Prefix, (& $val 'MoveAssignmentsOnUpdate' $false), (& $val 'AutoRemoveSuperseded' $false),
     (& $val 'AutoVersionCleanup' $false), (& $val 'KeepVersionCount' 0), (& $val 'SaveScopeBeforeRemoval' $false)))
-  $lines.Add(("{0} | confirmations suppressed={1} (accepted for version '{2}') | production warning accepted for version '{3}'" -f `
-    $Prefix, (& $val 'SuppressChangeConfirmations' $false), (& $val 'ChangeConfirmationRiskAcceptedVersion' ''),
-    (& $val 'ProductionWarningAcceptedVersion' '')))
+  # Ausgeschrieben, weil der Wert Loeschungen freigibt: 0 heisst "jede gemeldete Installation
+  # schuetzt", und das automatische Aufraeumen ignoriert den Wert immer.
+  $quietDays = [int](& $val 'IgnoreDevicesQuietForDays' 0)
+  $lines.Add(("{0} | manual version cleanup: {1}" -f $Prefix,
+    $(if ($quietDays -gt 0) {
+        ("installations on devices quiet for more than {0} day(s) do NOT block a deletion (automatic cleanup still blocks on any installation)" -f $quietDays)
+      } else { 'every reported installation blocks a deletion (IgnoreDevicesQuietForDays=0)' })))
+  # Der Schalter allein sagt nicht, was WIRKT: das Unterdruecken gilt nur, wenn das Risiko fuer
+  # GENAU DIESE Version bestaetigt wurde (Test-ChangeConfirmationsSuppressed). Gemeldet am
+  # 08.09.2026 aus einem echten Protokoll: dort stand "suppressed=True (accepted for version
+  # '0.16.0')" bei laufender 0.18.1 - also kamen die Rueckfragen sehr wohl, waehrend die Zeile das
+  # Gegenteil zu behaupten schien. Die Wirkung wird deshalb ausgeschrieben.
+  $suppressSaved = [bool](& $val 'SuppressChangeConfirmations' $false)
+  $suppressAcceptedFor = [string](& $val 'ChangeConfirmationRiskAcceptedVersion' '')
+  $suppressInEffect = ($suppressSaved -and
+    [string]::Equals($suppressAcceptedFor, [string]$script:appVersion, [System.StringComparison]::OrdinalIgnoreCase))
+  $suppressNote = if ($suppressInEffect) { 'IN EFFECT' }
+    elseif ($suppressSaved) { ("NOT in effect - accepted for '{0}', running '{1}', so confirmations DO appear" -f $suppressAcceptedFor, $script:appVersion) }
+    else { 'off' }
+  $lines.Add(("{0} | confirmations suppressed={1} ({2}) | production warning accepted for version '{3}'" -f `
+    $Prefix, $suppressSaved, $suppressNote, (& $val 'ProductionWarningAcceptedVersion' '')))
   # Nur Anzahlen: Namen, Adressen und Gruppen-IDs sind Kundendaten.
   $lines.Add(("{0} | counts only (customer data is deliberately not logged): favourites={1} recentLogins={2} groupFavouriteTenants={3} tenantDisplayNames={4} wingetOverrides={5} protectedApps={6}" -f `
     $Prefix, (& $count 'WingetFavorites'), (& $count 'RecentLogins'), (& $count 'GroupFavorites'),
@@ -636,6 +667,10 @@ function Load-Settings {
         # A missing/invalid KeepVersionCount only resets THAT value - it must never silently
         # re-enable the auto-removal opt-in the user just turned off.
         $script:settings.KeepVersionCount        = Get-SettingValue -Source $o -Name 'KeepVersionCount'        -Type Int  -Default 2 -Minimum 1
+        # Obergrenze 3650 (zehn Jahre): ein Tippfehler wie 99999 wuerde das Fenster praktisch
+        # abschalten und damit stillschweigend das alte Verhalten herstellen - das faellt niemandem
+        # auf. Untergrenze 0, weil 0 ausdruecklich "aus" bedeutet.
+        $script:settings.IgnoreDevicesQuietForDays = Get-SettingValue -Source $o -Name 'IgnoreDevicesQuietForDays' -Type Int -Default 0 -Minimum 0 -Maximum 3650
         $script:settings.ThemeName               = Get-SettingValue -Source $o -Name 'ThemeName'               -Type String -Default 'Light'
         $script:settings.Language                = Get-SettingValue -Source $o -Name 'Language'                -Type String -Default 'en'
         $script:settings.RecentLogins            = Get-SettingValue -Source $o -Name 'RecentLogins'            -Type StringArray -Default @()

@@ -132,6 +132,7 @@ Die Oberfläche installiert keine Software auf Endgeräten. Sie erstellt und ver
 - Pakete entstehen standardmäßig unter `%LOCALAPPDATA%\WinTunerGUI\Packages`. Dieses Verzeichnis gehört dem angemeldeten Benutzer. Ein gemeinsam beschreibbarer Ort wie `C:\Temp` ist bewusst nicht mehr voreingestellt, weil dort jeder Benutzer des Rechners ein fertiges Paket zwischen Erstellung und Upload verändern könnte.
 - Das Löschen unter **Alle Tenant-Apps** ist endgültig und von hier aus nicht rückholbar. Jede ausgewählte App wird vorher auf Zuweisungen und erfolgreiche Installationen geprüft, und die Antwort ist Teil der Rückfrage. Zwei Klassen werden dort nie gelöscht und stattdessen benannt: Apps auf der **Schutzliste** (wer es wirklich meint, hebt zuerst den Schutz auf) und Apps, deren Zustand Intune nicht gemeldet hat - ein unbekannter Zustand ist keine Erlaubnis. Diese Rückfrage kommt immer, auch bei abgeschalteten Bestätigungen.
 - Das Ändern von Zuweisungen unter **Alle Tenant-Apps** ersetzt immer den vollständigen Zuweisungssatz einer App, denn Microsoft Graph kennt keine Teilaktualisierung. Der Dialog zeigt die zu schreibende Liste vorher an und fragt nach.
+- **Doppelte Zuweisungen aufräumen** unter **Alle Tenant-Apps** sucht Apps, bei denen **mehr als eine Version zugewiesen** ist — der Zustand, in dem Geräte dieselbe Software doppelt bekommen und niemand sagen kann, welche gewinnt. Gruppiert wird über den **Anzeigenamen**, über alle App-Typen hinweg: eine als MSI-line-of-business hinterlegte Fassung heißt oft genauso, trägt aber weder Hersteller noch WinGet-Id und wäre sonst nicht zu finden. Aufgeräumt wird durch **Verschieben**, nicht durch Entfernen: die Zuweisungen der älteren Versionen werden mit Gruppe, Absicht, Filter und Einstellungen auf die neueste geschrieben und erst danach an der alten geleert, sodass keine Gruppe die App verliert. Die Apps selbst bleiben. Unangetastet und benannt bleiben: geschützte Apps, Versionen mit einer **Deinstallations-Zuweisung**, Gruppen mit zwei gleich hohen Versionsnummern, Apps ohne lesbare Version und alles, dessen Zuweisungen sich nicht lesen lassen. Auch diese Rückfrage lässt sich nicht wegdrücken.
 - Das Ersetzen des Inhalts einer vorhandenen App verändert **nicht** deren Erkennungs- und Anforderungsregeln. Sie müssen zur neuen Version passen und sind vorher zu prüfen.
 - Die Selbstaktualisierung akzeptiert nur Releases mit passendem Skript-Asset, SHA-256-Prüfsumme und plausibler interner Versionsnummer. Vor dem Austausch wird eine Sicherung angelegt. Nach der Bestätigung läuft der Austausch ohne weitere Rückfragen, die beiden jüngsten Sicherungen bleiben erhalten.
 
@@ -330,6 +331,22 @@ Der Regelbetrieb hängt an drei Einstellungen. Zusammen ergeben sie eine geschlo
 
 Sind diese Schalter gesetzt und die Zuordnungen einmal geprüft, kann ein Lauf über **Alle aktualisieren** ohne einen einzigen Klick durchlaufen (**Rückfragen vor Änderungen in Intune überspringen**). Geschützte Apps fragen weiterhin nach — diese eine Rückfrage lässt sich bewusst nicht wegdrücken.
 
+#### Wenn uralte Versionen einfach nicht verschwinden
+
+Eine alte Version bleibt stehen, solange Intune sie **irgendwo** als installiert meldet. Diese Meldung verfällt nicht: ein Gerät, das seit acht Monaten nicht mehr eincheckt, blockiert die Version darauf dauerhaft. In gewachsenen Umgebungen sammeln sich so Fassungen, die niemand mehr braucht und die kein Aufräumen loswird.
+
+Dafür gibt es **Installationen auf Geräten ignorieren, die still sind seit (Tagen)**. Mit einem Wert dort zählt eine Installation nur, wenn das Gerät innerhalb dieser Zeit synchronisiert hat. Vier Dinge sind daran bewusst eng gezogen:
+
+- Die Vorgabe ist **0**, also unverändertes Verhalten — eine Einstellung, die Löschungen freigibt, schaltet sich nicht selbst ein.
+- Es gilt **nur für das Aufräumen von Hand**. Das automatische Aufräumen nach einem Update behält immer die strenge Regel: ohne Klick und ohne Blick soll nichts gelöscht werden, was Intune noch als installiert meldet.
+- Ein **einzelnes aktives Gerät** blockiert weiterhin, auch neben zwanzig stillen. Deshalb ist eine reine Anzahl-Schwelle („erst ab X Installationen blockieren") das schlechtere Kriterium.
+- Ein Gerät, dessen Synchronisationsdatum unbekannt ist, zählt **immer als aktiv**.
+
+> [!IMPORTANT]
+> Eine gelöschte App wird auf dem Gerät **nicht deinstalliert**. Die Software bleibt installiert; Intune verliert den Bericht, die Zuweisung und die Möglichkeit, sie aus diesem App-Objekt neu zu installieren. Das Sicherheitsnetz schützt also die Verwaltbarkeit, nicht die Geräte — und genau deshalb ist es sinnvoll, es für längst stille Geräte zu lockern.
+
+Das Protokoll nennt jetzt in beiden Richtungen den Grund: beim Behalten den jüngsten Gerätekontakt („letzter Kontakt vor 214 Tagen"), und bei einer Löschung trotz gemeldeter Installationen ausdrücklich, dass alle davon auf stillen Geräten lagen.
+
 ### Es wird leichter, sobald jede App einmal durch dieses Werkzeug gelaufen ist
 
 Die Zuordnung „welche Intune-App ist welches WinGet-Paket" ist das eine, was dieses Werkzeug nicht verlässlich raten kann. Es muss auch nicht raten, wenn die Antwort aufgeschrieben ist — und sie ist aufgeschrieben, sobald eine App über WinTuner angelegt oder abgelöst wurde: im **Notizfeld** der App in Intune steht dann eine Marke der Form
@@ -381,6 +398,23 @@ Zwei Eigenschaften der Liste, die im Alltag zählen:
 - **Die Liste gilt global, nicht je Kunde.** Eine Liste pro Tenant fängt in jeder neuen Umgebung leer an, und genau dort passiert der Unfall.
 
 Ein Eintrag ohne `*` oder `?` trifft den App-Namen genau; mit Platzhalter gilt er als Muster — `Zoom Rooms` schützt eine App, `Zoom*` alle.
+
+### Wenn dieselbe Software schon als anderer Paketierungstyp im Tenant liegt
+
+Diese Anwendung paketiert ausschließlich **Win32** (`.intunewin`). In einem gewachsenen Tenant liegt dieselbe Software aber oft zusätzlich als **MSI line-of-business**, **Store-App** oder **AppX** — angelegt vor Jahren, von einem anderen Werkzeug oder von Hand.
+
+Bis 0.18.1 sah die Update-Suche diese Fassungen **nicht**: sie verwarf jeden App-Typ außer Win32. Ergebnis im gemeldeten Fall: die Liste bot „Google Chrome 151.0.7922.72 → 153.0.8010.37, neu anzulegen" an, obwohl im Tenant eine **zugewiesene** MSI-Fassung 152.0.7977.83 lag. Ein Lauf hätte eine dritte Fassung gebaut, die niemand zugewiesen bekommt — die Geräte hätten weiter die MSI installiert.
+
+Jetzt gilt:
+
+- Die Zeile sagt es **vor** dem Haken, in Warnfarbe: *im Tenant liegt schon 152.0.7977.83 als MSI* — und wenn diese Fassung zugewiesen ist, steht das ausdrücklich dabei.
+- Vor dem Lauf kommt eine eigene Rückfrage, die jede betroffene App mit Zielversion, vorhandener Fassung und Typ auflistet. Sie lässt sich mit **Rückfragen überspringen** *nicht* wegdrücken.
+- Drei Wege: **Ohne diese fortfahren** (Vorgabe), **Trotzdem als Win32 bauen**, Abbrechen.
+
+**Angefasst wird die andere Fassung nie** — sie wird weder aktualisiert noch gelöscht, denn diese Anwendung kann das für einen fremden Typ nicht verantworten. „Trotzdem als Win32 bauen" ist der richtige Weg, wenn Sie bewusst auf Win32-Paketierung wechseln wollen: die neue Fassung entsteht, Sie weisen sie zu, und die Zuweisung der alten lässt sich anschließend über **Alle Tenant-Apps → Doppelte Zuweisungen aufräumen** verschieben.
+
+> [!NOTE]
+> Der Hinweis hängt an der Einstellung **Auch Win32-Apps ohne WinTuner-Marke prüfen**: nur dann wird der Tenant vollständig gelesen, und nur dann können fremde Paketierungstypen überhaupt gesehen werden. Ist sie aus, sagt das Protokoll ausdrücklich, dass der Hinweis in diesem Lauf nicht möglich war — ein Ausbleiben heißt dort also nicht „es gibt keine".
 
 ### Der zweite Riegel: wenn die Paket-Id nur geraten ist
 
