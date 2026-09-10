@@ -19,8 +19,13 @@
 BeforeAll {
   . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
   Initialize-TestAmbient
+  # Die Rueckfrage selbst steht seit 0.19.1 nicht mehr hier: sie ist mit den beiden anderen nicht
+  # wegdrueckbaren Fragen zu EINER zusammengefasst (RiskyRunConfirm.Tests.ps1). Diese Datei prueft
+  # den Weg DORTHIN - woher die Id stammt, ob der Merker gesetzt und durch die Gruppierung
+  # getragen wird.
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '70-Runtime.ps1' -Name @(
-    'Split-AppsByFlag', 'Split-FuzzyMatchedApps', 'Resolve-FuzzyRunChoice'))))
+    'Get-RunRiskFindings'))))
+  $script:runRiskClasses = @('protected', 'fuzzy', 'foreign')
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '25-WinGetData.ps1' -Name 'New-WingetIdResult')))
 
   function New-App {
@@ -154,68 +159,27 @@ Describe 'New-UpdateCandidateModel: PackageIdFuzzy' {
   }
 }
 
-Describe 'Split-FuzzyMatchedApps' {
-  It 'trennt geratene von uebrigen Apps' {
-    $split = Split-FuzzyMatchedApps -Apps @((New-App 'Chrome'), (New-App 'Acrobat (netgo)' -Fuzzy $true), (New-App '7-Zip'))
-    @($split.Fuzzy).Count | Should -Be 1
-    @($split.Fuzzy)[0].Name | Should -Be 'Acrobat (netgo)'
-    @($split.Rest).Count | Should -Be 2
+Describe 'Die Einordnung sieht den Merker' {
+
+  It 'fuehrt eine App mit geratener Id als Befund' {
+    $f = Get-RunRiskFindings -Apps @((New-App 'Chrome'), (New-App 'Acrobat (netgo)' -Fuzzy $true), (New-App '7-Zip'))
+    @($f.Fuzzy).Count | Should -Be 1
+    @($f.Fuzzy)[0].Name | Should -Be 'Acrobat (netgo)'
+    @($f.Rest).Count | Should -Be 2
   }
 
-  It 'laesst eine GESCHUETZTE App aus - fuer die ist die Frage schon gestellt' {
-    # Sonst kaemen zwei Dialoge fuer dieselbe App, und der zweite brachte kein neues Urteil.
-    $split = Split-FuzzyMatchedApps -Apps @((New-App 'TeamViewer' -Fuzzy $true -Protected $true))
-    @($split.Fuzzy).Count | Should -Be 0
-    @($split.Rest).Count | Should -Be 1
+  It 'fragt eine GESCHUETZTE App mit geratener Id nicht zweimal' {
+    # Sonst stuende dieselbe App zweimal in der Liste, und die zweite Zeile brachte kein neues
+    # Urteil. Sie steht unter dem ernsteren Grund - genannt wird die geratene Id trotzdem.
+    $f = Get-RunRiskFindings -Apps @((New-App 'TeamViewer' -Fuzzy $true -Protected $true))
+    $f.Total | Should -Be 1
+    @($f.Fuzzy).Count | Should -Be 0
+    @($f.Protected).Count | Should -Be 1
   }
 
   It 'behandelt eine App ohne die Eigenschaft als NICHT geraten' {
     $plain = [pscustomobject]@{ Name = 'Chrome'; CurrentVersion = '1'; LatestVersion = '2' }
-    @((Split-FuzzyMatchedApps -Apps @($plain)).Fuzzy).Count | Should -Be 0
-  }
-
-  It 'vertraegt eine leere Auswahl und Nullwerte darin' {
-    @((Split-FuzzyMatchedApps -Apps @()).Fuzzy).Count | Should -Be 0
-    @((Split-FuzzyMatchedApps -Apps @($null, (New-App 'A' -Fuzzy $true))).Fuzzy).Count | Should -Be 1
-  }
-}
-
-Describe 'Resolve-FuzzyRunChoice' {
-  BeforeAll {
-    $script:mixed = @((New-App 'Chrome'), (New-App 'Acrobat (netgo)' -Fuzzy $true), (New-App '7-Zip'))
-  }
-
-  It "'all' laesst die Liste unveraendert" {
-    $r = Resolve-FuzzyRunChoice -Apps $script:mixed -Choice 'all'
-    $r.Proceed | Should -BeTrue
-    @($r.Apps).Count | Should -Be 3
-    @($r.Skipped).Count | Should -Be 0
-  }
-
-  It "'skip' entfernt GENAU die geratenen und laesst den Rest laufen" {
-    # Der stille Fehler, den dieser Fall verhindert: der Benutzer waehlt "ohne die geratenen", und
-    # der Lauf rechnet trotzdem mit der alten Liste weiter - dann baut er genau das Paket, das
-    # gerade abgewaehlt wurde.
-    $r = Resolve-FuzzyRunChoice -Apps $script:mixed -Choice 'skip'
-    $r.Proceed | Should -BeTrue
-    @($r.Apps).Count | Should -Be 2
-    @($r.Apps | Where-Object { $_.PackageIdFuzzy }).Count | Should -Be 0
-    @($r.Skipped).Count | Should -Be 1
-  }
-
-  It "'cancel' laesst nichts laufen" {
-    $r = Resolve-FuzzyRunChoice -Apps $script:mixed -Choice 'cancel'
-    $r.Proceed | Should -BeFalse
-    @($r.Apps).Count | Should -Be 0
-  }
-
-  It "unterscheidet 'nichts mehr uebrig' von 'abgebrochen'" {
-    # Waren AUSSCHLIESSLICH geratene Apps angehakt, ist "skip" kein Abbruch durch den Benutzer -
-    # er hat gewaehlt, es gab nur nichts mehr zu tun. Die Meldung darf nicht wie ein Fehler klingen.
-    $r = Resolve-FuzzyRunChoice -Apps @((New-App 'Acrobat (netgo)' -Fuzzy $true)) -Choice 'skip'
-    $r.Proceed | Should -BeFalse
-    $r.Reason | Should -Be 'empty'
-    @($r.Skipped).Count | Should -Be 1
+    (Get-RunRiskFindings -Apps @($plain)).Total | Should -Be 0
   }
 }
 
@@ -253,40 +217,14 @@ Describe 'Group-UpdateCandidates traegt den Merker mit' {
   }
 }
 
-Describe 'Verdrahtung: die Rueckfrage haengt in BEIDEN Laeufen' {
-  BeforeAll { $script:main = Get-SourcePartText -Part '90-Main.ps1' }
+Describe 'Verdrahtung: die geratene Id kommt bis in die Rueckfrage' {
 
-  It 'fragt in "Ausgewaehlte aktualisieren" UND in "Alle aktualisieren"' {
-    ([regex]::Matches($script:main, 'Confirm-FuzzyMatchedAppsInRun')).Count | Should -Be 2
-  }
-
-  It 'rechnet mit der Liste AUS DEM ERGEBNIS weiter' {
-    # Ohne diese Zuweisung waere der ganze Riegel wirkungslos - und zwar lautlos.
-    $script:main | Should -Match '\$checkedApps = @\(\$fuzzyChoice\.Apps\)'
-    $script:main | Should -Match '\$updatedApps = @\(\$fuzzyChoice\.Apps\)'
-  }
-
-  It 'meldet die ausgelassenen Apps in der Statuszeile' {
-    ([regex]::Matches($script:main, 'FuzzyRunSkippedStatus')).Count | Should -Be 2
-    ([regex]::Matches($script:main, 'FuzzyRunNothingLeftStatus')).Count | Should -Be 2
-  }
-
-  It 'geht NICHT durch Confirm-ChangeAction - diese Frage ist nicht abschaltbar' {
-    # Der Kern des Auftrags: SuppressChangeConfirmations darf diese Frage nicht wegdruecken.
-    # Nur Code-Zeilen ansehen, damit die Begruendung im Kommentar stehen bleiben darf.
-    $fn = Get-SourceFunctionText -Part '70-Runtime.ps1' -Name 'Confirm-FuzzyMatchedAppsInRun'
-    $code = @($fn -split "`r?`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
-    $code | Should -Not -Match 'Confirm-ChangeAction'
-    $code | Should -Not -Match 'Test-ChangeConfirmationsSuppressed'
-    $code | Should -Match 'Show-ProtectedRunDialog'
-  }
-
-  It 'nennt die geratene Id im Dialog und im Protokoll' {
+  It 'nennt die geratene Id in der Vorschau der Rueckfrage' {
     # "3 Apps mit geratener Id" beantwortet die eine Frage nicht, die zaehlt: WELCHES Paket haette
     # er genommen? Ohne die Id ist die Rueckfrage nicht entscheidbar.
-    $fn = Get-SourceFunctionText -Part '70-Runtime.ps1' -Name 'Confirm-FuzzyMatchedAppsInRun'
-    $fn | Should -Match '\$_\.PackageId'
-    $fn | Should -Match 'Write-Log'
+    $fn = Get-SourceFunctionText -Part '70-Runtime.ps1' -Name 'Get-RunRiskAppLine'
+    $fn | Should -Match '\$App\.PackageId'
+    $fn | Should -Match 'RiskyRunNoteGuessedId'
   }
 
   It 'zeigt es auch in der Zeile, vor dem Haken' {
@@ -295,25 +233,11 @@ Describe 'Verdrahtung: die Rueckfrage haengt in BEIDEN Laeufen' {
     $rows | Should -Match 'UpdateStateFuzzyId'
   }
 
-  It 'hat jeden neuen Text in BEIDEN Sprachbloecken' {
-    # Die Paritaet aller Schluessel prueft StaticChecks; hier geht es um diese sieben - ein Text,
-    # der nur auf Englisch existiert, faellt im deutschen Fenster als leerer Dialog auf.
+  It 'hat den Zeilentext in BEIDEN Sprachbloecken' {
     $strings = Get-SourcePartText -Part '15-Strings.ps1'
-    foreach ($key in @('FuzzyRunConfirmTitle', 'FuzzyRunConfirmDialog', 'FuzzyRunSkipButton',
-                       'FuzzyRunAllButton', 'FuzzyRunSkippedStatus', 'FuzzyRunNothingLeftStatus',
-                       'UpdateStateFuzzyId')) {
+    foreach ($key in @('UpdateStateFuzzyId', 'RiskyRunNoteGuessedId', 'RiskyRunHeadGuessed')) {
       ([regex]::Matches($strings, ("(?m)^\s*{0}\s*=" -f [regex]::Escape($key)))).Count |
         Should -Be 2 -Because "$key muss einmal in EN und einmal in DE stehen"
     }
-  }
-
-  It 'nennt in beiden Sprachen, dass die Frage nicht abschaltbar ist' {
-    # Wer die Rueckfragen abgeschaltet hat und trotzdem gefragt wird, soll im Dialog lesen, warum -
-    # sonst sieht es wie ein Fehler der Einstellung aus.
-    . ([scriptblock]::Create((Get-UiStringsText)))
-    $script:uiLanguage = 'en'
-    (Get-UiString 'FuzzyRunConfirmDialog') | Should -Match 'switched off'
-    $script:uiLanguage = 'de'
-    (Get-UiString 'FuzzyRunConfirmDialog') | Should -Match 'abgeschaltet'
   }
 }

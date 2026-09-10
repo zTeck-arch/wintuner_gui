@@ -386,9 +386,12 @@ Ein Ersatz durch die nackte Herstellerfassung installiert dasselbe Produkt „le
 
 **Geschützt heißt nicht gesperrt.** Die App bleibt in der Update-Liste sichtbar, bleibt anhakbar und zeigt weiterhin, dass es eine neuere Version gibt. Anders ist nur: ein Lauf fragt bei ihr ausdrücklich nach — und diese Frage kommt auch dann, wenn **Rückfragen vor Änderungen in Intune überspringen** eingeschaltet ist.
 
+> [!NOTE]
+> **Es ist eine Rückfrage, nicht drei.** Dieser Abschnitt und die beiden folgenden beschreiben drei Arten von Befund — als selbst paketiert markiert, Paket-Id nur geraten, im Tenant liegt schon eine Fassung eines anderen Paketierungstyps. Vor einem Lauf kommen sie **zusammen in einem Dialog**, nach Art gruppiert, jede App mit Version und allen zutreffenden Gründen. Bis 0.19.0 waren es drei Dialoge nacheinander; eine App mit zwei Befunden wurde dabei zweimal gefragt. Die drei Wege und die Tatsache, dass sich diese Frage nicht abschalten lässt, sind unverändert.
+
 Drei Wege daran vorbei, vom kurzlebigsten zum dauerhaftesten:
 
-1. **Für diesen einen Lauf:** die Rückfrage bietet **Alle aktualisieren, auch geschützte** an. Die anderen Knöpfe sind **Ohne die geschützten fortfahren** (der Vorgabeknopf) und Abbrechen. Ein weggeklickter Dialog bedeutet immer Abbruch, nie „alle aktualisieren".
+1. **Für diesen einen Lauf:** die Rückfrage bietet **Trotzdem alle bearbeiten** an. Die anderen Knöpfe sind **Ohne diese fortfahren** (der Vorgabeknopf) und Abbrechen. Ein weggeklickter Dialog bedeutet immer Abbruch, nie „alle bearbeiten".
 2. **Für diese eine App, dauerhaft:** Rechtsklick auf ihre Zeile in der Update-Liste und den Schutz aufheben. Die Statuszeile bestätigt mit **Schutz aufgehoben: …**.
 3. **Für ein ganzes Muster:** **Geschützte Apps…** in der Update-Ansicht, oder dieselbe Liste unter **Einstellungen → Selbst paketierte Apps**. Eintrag auswählen, **Ausgewählten entfernen**. Änderungen wirken sofort und werden sofort gespeichert; der Knopf **Einstellungen speichern** ist dafür nicht zuständig.
 
@@ -408,10 +411,10 @@ Bis 0.18.1 sah die Update-Suche diese Fassungen **nicht**: sie verwarf jeden App
 Jetzt gilt:
 
 - Die Zeile sagt es **vor** dem Haken, in Warnfarbe: *im Tenant liegt schon 152.0.7977.83 als MSI* — und wenn diese Fassung zugewiesen ist, steht das ausdrücklich dabei.
-- Vor dem Lauf kommt eine eigene Rückfrage, die jede betroffene App mit Zielversion, vorhandener Fassung und Typ auflistet. Sie lässt sich mit **Rückfragen überspringen** *nicht* wegdrücken.
-- Drei Wege: **Ohne diese fortfahren** (Vorgabe), **Trotzdem als Win32 bauen**, Abbrechen.
+- Vor dem Lauf nennt die Rückfrage jede betroffene App mit Zielversion, vorhandener Fassung und Typ. Sie lässt sich mit **Rückfragen überspringen** *nicht* wegdrücken.
+- Drei Wege: **Ohne diese fortfahren** (Vorgabe), **Trotzdem alle bearbeiten**, Abbrechen.
 
-**Angefasst wird die andere Fassung nie** — sie wird weder aktualisiert noch gelöscht, denn diese Anwendung kann das für einen fremden Typ nicht verantworten. „Trotzdem als Win32 bauen" ist der richtige Weg, wenn Sie bewusst auf Win32-Paketierung wechseln wollen: die neue Fassung entsteht, Sie weisen sie zu, und die Zuweisung der alten lässt sich anschließend über **Alle Tenant-Apps → Doppelte Zuweisungen aufräumen** verschieben.
+**Angefasst wird die andere Fassung nie** — sie wird weder aktualisiert noch gelöscht, denn diese Anwendung kann das für einen fremden Typ nicht verantworten. „Trotzdem alle bearbeiten" ist der richtige Weg, wenn Sie bewusst auf Win32-Paketierung wechseln wollen: die neue Fassung entsteht, Sie weisen sie zu, und die Zuweisung der alten lässt sich anschließend über **Alle Tenant-Apps → Doppelte Zuweisungen aufräumen** verschieben.
 
 > [!NOTE]
 > Der Hinweis hängt an der Einstellung **Auch Win32-Apps ohne WinTuner-Marke prüfen**: nur dann wird der Tenant vollständig gelesen, und nur dann können fremde Paketierungstypen überhaupt gesehen werden. Ist sie aus, sagt das Protokoll ausdrücklich, dass der Hinweis in diesem Lauf nicht möglich war — ein Ausbleiben heißt dort also nicht „es gibt keine".
@@ -434,9 +437,9 @@ Im letzten Fall paketiert ein Lauf womöglich das **falsche Produkt**, löst die
 Deshalb gilt seit 0.19.0:
 
 - Die Zeile in der Update-Liste sagt es **vor** dem Haken: *Paket-Id aus dem Namen geraten*, in Warnfarbe.
-- Vor dem Lauf kommt eine eigene Rückfrage, die **jede** geratene Id mit Namen und Paket-Id auflistet. Sie lässt sich mit **Rückfragen vor Änderungen in Intune überspringen** *nicht* wegdrücken — wie bei geschützten Apps.
-- Die Rückfrage hat dieselben drei Wege: **Ohne die geratenen fortfahren** (Vorgabe), **Alle aktualisieren, auch geratene**, Abbrechen.
-- Geschützte Apps werden hier nicht doppelt gefragt; für die ist die Frage eine Rückfrage vorher schon gestellt worden.
+- Vor dem Lauf nennt die Rückfrage **jede** geratene Id mit Namen und Paket-Id. Sie lässt sich mit **Rückfragen vor Änderungen in Intune überspringen** *nicht* wegdrücken — wie bei geschützten Apps.
+- Dieselben drei Wege: **Ohne diese fortfahren** (Vorgabe), **Trotzdem alle bearbeiten**, Abbrechen.
+- Keine App wird zweimal gefragt. Trägt sie mehrere Befunde, steht sie einmal in der Liste — unter dem schwerwiegendsten — und ihre Zeile nennt alle Gründe.
 
 Wer eine geratene Zuordnung dauerhaft richtigstellen will, hinterlegt die Id: Rechtsklick auf die Zeile in der Update-Liste, Id zuordnen. Danach gilt sie als Ihre Angabe und die Rückfrage bleibt aus.
 

@@ -1,5 +1,15 @@
 ﻿# Changelog
 
+## 0.19.1 – Eine Rückfrage statt vier
+
+**Nachtrag zu 0.19.0 (10.09.2026)**
+
+0.19.0 hat an drei Stellen Rückfragen eingeführt, die sich nicht wegdrücken lassen, und jede war für sich richtig. Zusammen waren sie es nicht: vor einem Lauf konnten **vier** solche Dialoge nacheinander stehen, und wer „Rückfragen überspringen" gesetzt hat, tut das gerade, weil er klickfrei arbeiten will. Vier nicht abschaltbare Fragen hintereinander erziehen genau zu dem Durchklicken, das sie verhindern sollen.
+
+- **Alle Befunde eines Laufs stehen jetzt in EINER Rückfrage.** Sie nennt jede betroffene App mit Version und **allen** zutreffenden Gründen, gruppiert nach dem, was den Befund auslöst: als selbst paketiert markiert, Paket-Id aus dem Namen geraten, im Tenant liegt schon eine mindestens so neue Fassung eines anderen Paketierungstyps. Die drei Wege sind unverändert — „Ohne diese fortfahren" (Vorgabe), „Trotzdem alle bearbeiten", Abbrechen — und ebenso, dass „Rückfragen überspringen" sie nicht abschaltet. Ohne Befund kostet ein Lauf weiterhin keinen zusätzlichen Klick.
+- **Behoben: eine App mit zwei Befunden wurde zweimal gefragt.** Die Prüfung auf „geratene Paket-Id" und die auf „Fassung anderen Typs vorhanden" schlossen beide nur geschützte Apps aus, **nicht sich gegenseitig**. Eine App, die beides trug, stand deshalb in zwei aufeinanderfolgenden Dialogen — mit denselben drei Knöpfen und ohne neue Aussage. Jetzt gehört jede App zu genau einer Gruppe (nach Gewicht: geschützt vor geratener Id vor fremdem Typ), ihre Zeile nennt aber weiterhin alle Gründe.
+- **Behoben: „direkt mit erhöhten Rechten anmelden" meldete sich bei jedem Aufruf neu an.** Die Prüfung „trägt die Graph-Sitzung die Berechtigungen schon?" verglich die beiden angeforderten Berechtigungen als **eine** zusammengefügte Zeichenkette gegen die Liste der tatsächlich erteilten. Bei mehr als einer Berechtigung schlug sie damit immer fehl. Ursache war eine lokale Variable, die sich vom Parameter nur in der Groß-/Kleinschreibung unterschied — für PowerShell derselbe Behälter, weshalb die Liste durch die Zeichenkette ersetzt wurde. Eine neue statische Prüfregel fängt diese Klasse von Fehler künftig vor dem ersten Lauf; sie hat den Fall selbst gefunden.
+
 ## 0.19.0 – Fragen, wo bisher stillschweigend gehandelt wurde
 
 **Aus dem Betrieb (07.–09.09.2026)**

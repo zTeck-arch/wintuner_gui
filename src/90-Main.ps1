@@ -1162,45 +1162,23 @@ $updateSelectedButton.Add_Click({
     }
 
     # VOR der allgemeinen Rueckfrage: die hier ist die ernstere, und sie ist die einzige, die auch
-    # bei abgeschalteten Bestaetigungen kommt. Ohne geschuetzte App kostet sie keinen Klick.
-    # Drei moegliche Antworten, nicht zwei: die geschuetzten koennen AUSGELASSEN werden, dann laeuft
+    # bei abgeschalteten Bestaetigungen kommt. Ohne Befund kostet sie keinen Klick.
+    # Drei moegliche Antworten, nicht zwei: die auffaelligen koennen AUSGELASSEN werden, dann laeuft
     # der Rest. Weitergerechnet wird mit der Liste AUS DEM ERGEBNIS - wer hier weiter $checkedApps
     # nimmt, baut genau die App, die der Benutzer gerade abgewaehlt hat.
-    $protectedChoice = Confirm-ProtectedAppsInRun -Apps @($checkedApps)
-    if (-not $protectedChoice.Proceed) {
-        Update-Status (Get-UiString $(if ($protectedChoice.Reason -eq 'empty') { 'ProtectedRunNothingLeftStatus' } else { 'MassUpdateCanceledStatus' }))
+    #
+    # Bis 0.19.0 standen hier DREI solche Bloecke hintereinander (geschuetzt, geratene Id, fremder
+    # Paketierungstyp). Sie sind zu einem zusammengefasst - nicht aus Bequemlichkeit, sondern weil
+    # drei nicht wegdrueckbare Dialoge hintereinander zum Durchklicken erziehen und eine App, die
+    # zwei Befunde trug, zweimal gefragt wurde.
+    $riskChoice = Confirm-RiskyAppsInRun -Apps @($checkedApps)
+    if (-not $riskChoice.Proceed) {
+        Update-Status (Get-UiString $(if ($riskChoice.Reason -eq 'empty') { 'RiskyRunNothingLeftStatus' } else { 'MassUpdateCanceledStatus' }))
         return
     }
-    $checkedApps = @($protectedChoice.Apps)
-    if (@($protectedChoice.Skipped).Count -gt 0) {
-        Update-Status ((Get-UiString 'ProtectedRunSkippedStatus') -f @($protectedChoice.Skipped).Count, $checkedApps.Count)
-    }
-
-    # NACH den geschuetzten und ebenfalls VOR der allgemeinen Rueckfrage: eine geratene Paket-Id kann
-    # das falsche Produkt paketieren und die vorhandene App damit abloesen. Auch diese Frage laesst
-    # sich mit abgeschalteten Rueckfragen nicht wegdruecken. Geschuetzte Apps sind hier ausgenommen,
-    # die sind eine Frage vorher schon ausdruecklich freigegeben worden.
-    $fuzzyChoice = Confirm-FuzzyMatchedAppsInRun -Apps @($checkedApps)
-    if (-not $fuzzyChoice.Proceed) {
-        Update-Status (Get-UiString $(if ($fuzzyChoice.Reason -eq 'empty') { 'FuzzyRunNothingLeftStatus' } else { 'MassUpdateCanceledStatus' }))
-        return
-    }
-    $checkedApps = @($fuzzyChoice.Apps)
-    if (@($fuzzyChoice.Skipped).Count -gt 0) {
-        Update-Status ((Get-UiString 'FuzzyRunSkippedStatus') -f @($fuzzyChoice.Skipped).Count, $checkedApps.Count)
-    }
-
-    # Und die dritte Frage: liegt im Tenant schon eine mindestens so neue Fassung eines anderen
-    # Paketierungstyps? Dann ist ein Neubau als Win32 eine Abloesung, die der Administrator
-    # entscheidet - sonst liegt danach eine zweite Fassung da, die niemand zugewiesen bekommt.
-    $foreignChoice = Confirm-ForeignNewerAppsInRun -Apps @($checkedApps)
-    if (-not $foreignChoice.Proceed) {
-        Update-Status (Get-UiString $(if ($foreignChoice.Reason -eq 'empty') { 'ForeignNewerRunNothingLeftStatus' } else { 'MassUpdateCanceledStatus' }))
-        return
-    }
-    $checkedApps = @($foreignChoice.Apps)
-    if (@($foreignChoice.Skipped).Count -gt 0) {
-        Update-Status ((Get-UiString 'ForeignNewerRunSkippedStatus') -f @($foreignChoice.Skipped).Count, $checkedApps.Count)
+    $checkedApps = @($riskChoice.Apps)
+    if (@($riskChoice.Skipped).Count -gt 0) {
+        Update-Status ((Get-UiString 'RiskyRunSkippedStatus') -f @($riskChoice.Skipped).Count, $checkedApps.Count)
     }
 
     # Confirm before touching the tenant – the selection can be larger than expected (filters,
@@ -1273,39 +1251,16 @@ $updateAllButton.Add_Click({
     }
 
     # Derselbe Riegel wie im Lauf ueber die markierten Zeilen: "Alle aktualisieren" ist genau der
-    # Weg, auf dem eine geschuetzte App ungesehen mitlaeuft.
-    $protectedChoice = Confirm-ProtectedAppsInRun -Apps @($updatedApps)
-    if (-not $protectedChoice.Proceed) {
-        Update-Status (Get-UiString $(if ($protectedChoice.Reason -eq 'empty') { 'ProtectedRunNothingLeftStatus' } else { 'MassUpdateCanceledStatus' }))
+    # Weg, auf dem eine geschuetzte App, eine geratene Paket-Id oder eine schon vorhandene Fassung
+    # eines anderen Typs ungesehen mitlaeuft.
+    $riskChoice = Confirm-RiskyAppsInRun -Apps @($updatedApps)
+    if (-not $riskChoice.Proceed) {
+        Update-Status (Get-UiString $(if ($riskChoice.Reason -eq 'empty') { 'RiskyRunNothingLeftStatus' } else { 'MassUpdateCanceledStatus' }))
         return
     }
-    $updatedApps = @($protectedChoice.Apps)
-    if (@($protectedChoice.Skipped).Count -gt 0) {
-        Update-Status ((Get-UiString 'ProtectedRunSkippedStatus') -f @($protectedChoice.Skipped).Count, $updatedApps.Count)
-    }
-
-    # Und derselbe Riegel fuer die geratenen Paket-Ids. "Alle aktualisieren" ist auch hier der Weg,
-    # auf dem eine ungesehen mitlaeuft - mit abgeschalteten Rueckfragen ohne einen einzigen Klick.
-    $fuzzyChoice = Confirm-FuzzyMatchedAppsInRun -Apps @($updatedApps)
-    if (-not $fuzzyChoice.Proceed) {
-        Update-Status (Get-UiString $(if ($fuzzyChoice.Reason -eq 'empty') { 'FuzzyRunNothingLeftStatus' } else { 'MassUpdateCanceledStatus' }))
-        return
-    }
-    $updatedApps = @($fuzzyChoice.Apps)
-    if (@($fuzzyChoice.Skipped).Count -gt 0) {
-        Update-Status ((Get-UiString 'FuzzyRunSkippedStatus') -f @($fuzzyChoice.Skipped).Count, $updatedApps.Count)
-    }
-
-    # Derselbe Riegel wie im Lauf ueber die markierten Zeilen: "Alle aktualisieren" ist genau der
-    # Weg, auf dem eine solche Doppelung ungesehen entsteht.
-    $foreignChoice = Confirm-ForeignNewerAppsInRun -Apps @($updatedApps)
-    if (-not $foreignChoice.Proceed) {
-        Update-Status (Get-UiString $(if ($foreignChoice.Reason -eq 'empty') { 'ForeignNewerRunNothingLeftStatus' } else { 'MassUpdateCanceledStatus' }))
-        return
-    }
-    $updatedApps = @($foreignChoice.Apps)
-    if (@($foreignChoice.Skipped).Count -gt 0) {
-        Update-Status ((Get-UiString 'ForeignNewerRunSkippedStatus') -f @($foreignChoice.Skipped).Count, $updatedApps.Count)
+    $updatedApps = @($riskChoice.Apps)
+    if (@($riskChoice.Skipped).Count -gt 0) {
+        Update-Status ((Get-UiString 'RiskyRunSkippedStatus') -f @($riskChoice.Skipped).Count, $updatedApps.Count)
     }
 
     $rootPackageFolder = try { [System.IO.Path]::GetFullPath($pathBox.Text.Trim()) } catch {

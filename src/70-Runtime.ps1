@@ -660,289 +660,184 @@ function Confirm-ChangeAction {
   return ($answer -eq [System.Windows.Forms.DialogResult]::Yes)
 }
 
-# Die eine Rueckfrage, die "Rueckfragen abschalten" NICHT abschalten darf.
+# --- EINE Rueckfrage fuer alle Befunde eines Laufs ---------------------------------------------
 #
-# Geschuetzte Apps sind selbst paketierte Kundensoftware. Ein Update loest sie ab und zieht die
-# Zuweisungen mit - bei einem Paket, das niemand schnell nachbaut, ist ein Fehlgriff der
-# Totalverlust. Wer "Bestaetigungen unterdruecken" gesetzt hat, hat das fuer den Alltag getan
-# (zwei Chrome-Updates), nicht fuer diesen Fall; deshalb -AlwaysAsk.
+# Bis 0.19.0 gab es hier DREI eigene Rueckfragen - geschuetzte Apps, geratene Paket-Id, vorhandene
+# Fassung eines anderen Paketierungstyps - und jede war fuer sich richtig. Zusammen waren sie es
+# nicht: vor einem Lauf konnten vier nicht wegdrueckbare Dialoge nacheinander stehen (die vierte
+# ist die Zusammenlegung), und wer 'Rueckfragen ueberspringen' gesetzt hat, tut das gerade, weil er
+# klickfrei arbeiten will.
 #
-# Trennt eine Auswahl in geschuetzte und uebrige Apps. Eine Stelle fuer die Frage "ist diese App
-# geschuetzt?", damit Rueckfrage, Protokoll und die tatsaechlich laufende Liste nie auseinandergehen.
-function Split-ProtectedApps {
-  param([AllowNull()][AllowEmptyCollection()][object[]]$Apps)
-  $split = Split-AppsByFlag -Apps $Apps -FlagName 'IsProtected'
-  return @{ Protected = @($split.Matching); Unprotected = @($split.Rest) }
-}
+# Damit untergruben die Riegel ihren eigenen Zweck. Das Projekt sagt es an anderer Stelle selbst:
+# eine Rueckfrage, die den naheliegenden Ausgang nicht anbietet, erzieht zum Wegklicken - und vier
+# hintereinander erziehen zum Durchklicken. Gemessen am 10.09.2026 bei der Gesamtdurchsicht.
+#
+# Dazu kam ein echter Fehler: Split-FuzzyMatchedApps und Split-ForeignNewerApps schlossen beide nur
+# 'IsProtected' aus, NICHT sich gegenseitig. Eine App mit geratener Id UND einer neueren Fassung
+# anderen Typs wurde deshalb zweimal gefragt, mit denselben drei Knoepfen.
+#
+# Jetzt: eine Frage, alle Befunde benannt, eine Entscheidung. Jede App gehoert zu GENAU EINER
+# Klasse (Rangfolge unten), ihre Zeile nennt aber alle zutreffenden Gruende.
 
-# Der gemeinsame Kern: Auswahl in "traegt den Merker" und "Rest" teilen.
+# Die Klassen in der Reihenfolge ihres Gewichts. Die erste, die zutrifft, gewinnt - so steht jede
+# App genau einmal in der Liste, und zwar unter ihrem ernstesten Grund.
 #
-# Einmal geschrieben, weil es zwei Rueckfragen dieser Art gibt (geschuetzte Apps, geratene Paket-Id)
-# und beide dieselbe Falle haben: die Frage, das Protokoll und die tatsaechlich laufende Liste
-# muessen ueber DASSELBE Urteil reden. Zwei Kopien derselben Schleife laufen genau darin auseinander.
-#
-# -ExcludeFlagName laesst Apps aus, die schon ueber eine ANDERE Rueckfrage gelaufen sind: eine
-# geschuetzte App mit geratener Id wurde eben ausdruecklich freigegeben, und eine zweite Frage zur
-# selben App bringt kein neues Urteil - sie lehrt nur, Rueckfragen wegzuklicken.
-function Split-AppsByFlag {
-  param(
-    [AllowNull()][AllowEmptyCollection()][object[]]$Apps,
-    [Parameter(Mandatory)][string]$FlagName,
-    [string]$ExcludeFlagName = ''
-  )
-  $matching = @()
-  $rest = @()
+#   protected  selbst paketierte Kundensoftware; ein Update loest sie ab und zieht die Zuweisungen
+#              mit. Bei einem handgebauten Paket ist ein Fehlgriff der Totalverlust.
+#   fuzzy      die Paket-Id ist aus dem Anzeigenamen GERATEN. Trifft sie daneben, paketiert der
+#              Lauf ein fremdes Produkt und loest die vorhandene App damit ab.
+#   foreign    im Tenant liegt schon eine mindestens so neue Fassung eines Typs, den diese
+#              Anwendung nicht baut. Ein Bau legt eine zweite Fassung daneben, statt zu ersetzen.
+$script:runRiskClasses = @('protected', 'fuzzy', 'foreign')
+
+# Reine Rechnung: Auswahl rein, Befunde je Klasse und der unauffaellige Rest raus.
+function Get-RunRiskFindings {
+  param([AllowNull()][AllowEmptyCollection()][object[]]$Apps)
+  $byClass = [ordered]@{}
+  foreach ($c in $script:runRiskClasses) { $byClass[$c] = [System.Collections.Generic.List[object]]::new() }
+  $rest = [System.Collections.Generic.List[object]]::new()
   foreach ($a in @($Apps)) {
     if (-not $a) { continue }
-    $hasFlag = [bool]($a.PSObject.Properties[$FlagName] -and $a.$FlagName)
-    if ($hasFlag -and $ExcludeFlagName) {
-      if ($a.PSObject.Properties[$ExcludeFlagName] -and $a.$ExcludeFlagName) { $hasFlag = $false }
-    }
-    if ($hasFlag) { $matching += $a } else { $rest += $a }
+    $flag = { param($n) [bool]($a.PSObject.Properties[$n] -and $a.$n) }
+    $class = ''
+    if (& $flag 'IsProtected')     { $class = 'protected' }
+    elseif (& $flag 'PackageIdFuzzy')  { $class = 'fuzzy' }
+    elseif (& $flag 'HasForeignNewer') { $class = 'foreign' }
+    if ($class) { $byClass[$class].Add($a) } else { $rest.Add($a) }
   }
-  return @{ Matching = @($matching); Rest = @($rest) }
+  $total = 0
+  foreach ($c in $script:runRiskClasses) { $total += $byClass[$c].Count }
+  return @{
+    Protected = @($byClass['protected'].ToArray())
+    Fuzzy     = @($byClass['fuzzy'].ToArray())
+    Foreign   = @($byClass['foreign'].ToArray())
+    Rest      = @($rest.ToArray())
+    Total     = $total
+  }
 }
 
-# Apps, deren Paket-Id aus einem AEHNLICHKEITSTREFFER auf den Anzeigenamen stammt - kein Override,
-# keine WinTuner-Marke, kein exakter Name (siehe Resolve-WingetIdForApp -Detailed).
+# Was aus der Antwort folgt - als reine Rechnung, ohne Fenster.
 #
-# Geschuetzte Apps bleiben hier aussen vor: fuer die ist die Frage schon gestellt worden, und zwar
-# die ernstere.
-function Split-FuzzyMatchedApps {
-  param([AllowNull()][AllowEmptyCollection()][object[]]$Apps)
-  $split = Split-AppsByFlag -Apps $Apps -FlagName 'PackageIdFuzzy' -ExcludeFlagName 'IsProtected'
-  return @{ Fuzzy = @($split.Matching); Rest = @($split.Rest) }
-}
-
-# Was aus der Antwort des Benutzers folgt - als reine Rechnung, ohne Fenster.
-#
-# 'all'    alles laeuft, geschuetzte eingeschlossen
-# 'skip'   die geschuetzten fallen raus, der Rest laeuft
+# 'all'    alles laeuft, die auffaelligen eingeschlossen
+# 'skip'   die auffaelligen fallen raus, der Rest laeuft
 # 'cancel' nichts laeuft
 #
-# Der Sonderfall, der sonst als "abgebrochen" durchginge: waren AUSSCHLIESSLICH geschuetzte Apps
+# Der Sonderfall, der sonst als "abgebrochen" durchginge: waren AUSSCHLIESSLICH auffaellige Apps
 # angehakt, bleibt bei 'skip' nichts uebrig. Das ist kein Abbruch durch den Benutzer, und die
 # Meldung darf nicht so tun - er hat gewaehlt, es gab nur nichts mehr zu tun.
-function Resolve-ProtectedRunChoice {
+function Resolve-RiskyRunChoice {
   param(
     [AllowNull()][AllowEmptyCollection()][object[]]$Apps,
     [ValidateSet('all', 'skip', 'cancel')][string]$Choice
   )
-  $split = Split-ProtectedApps -Apps $Apps
+  $findings = Get-RunRiskFindings -Apps $Apps
+  $risky = @(@($findings.Protected) + @($findings.Fuzzy) + @($findings.Foreign))
   switch ($Choice) {
     'all' { return @{ Proceed = $true; Apps = @($Apps); Skipped = @(); Reason = 'all' } }
     'skip' {
-      $kept = @($split.Unprotected)
+      $kept = @($findings.Rest)
       if ($kept.Count -eq 0) {
-        return @{ Proceed = $false; Apps = @(); Skipped = @($split.Protected); Reason = 'empty' }
+        return @{ Proceed = $false; Apps = @(); Skipped = $risky; Reason = 'empty' }
       }
-      return @{ Proceed = $true; Apps = $kept; Skipped = @($split.Protected); Reason = 'skip' }
+      return @{ Proceed = $true; Apps = $kept; Skipped = $risky; Reason = 'skip' }
     }
     default { return @{ Proceed = $false; Apps = @(); Skipped = @(); Reason = 'cancel' } }
   }
 }
 
-# Dasselbe fuer die geratene Paket-Id. Getrennt von Resolve-ProtectedRunChoice, weil die
-# ausgelassene Menge eine andere ist (geschuetzte Apps sind hier ausgenommen) - aber mit derselben
-# Bedeutung von 'all', 'skip' und 'cancel' und demselben Sonderfall 'empty'.
-function Resolve-FuzzyRunChoice {
-  param(
-    [AllowNull()][AllowEmptyCollection()][object[]]$Apps,
-    [ValidateSet('all', 'skip', 'cancel')][string]$Choice
-  )
-  $split = Split-FuzzyMatchedApps -Apps $Apps
-  switch ($Choice) {
-    'all' { return @{ Proceed = $true; Apps = @($Apps); Skipped = @(); Reason = 'all' } }
-    'skip' {
-      $kept = @($split.Rest)
-      if ($kept.Count -eq 0) {
-        return @{ Proceed = $false; Apps = @(); Skipped = @($split.Fuzzy); Reason = 'empty' }
-      }
-      return @{ Proceed = $true; Apps = $kept; Skipped = @($split.Fuzzy); Reason = 'skip' }
-    }
-    default { return @{ Proceed = $false; Apps = @(); Skipped = @(); Reason = 'cancel' } }
+# Die eine Zeile je App - mit ALLEN zutreffenden Gruenden, auch wenn die App nur unter ihrem
+# ernstesten einsortiert ist. Eine App, die geschuetzt ist UND eine geratene Id hat, muss beides
+# sagen: sonst entscheidet der Leser auf halber Grundlage.
+function Get-RunRiskAppLine {
+  param([Parameter(Mandatory)][object]$App)
+  $line = "  - {0}: {1} -> {2}" -f [string]$App.Name, [string]$App.CurrentVersion, [string]$App.LatestVersion
+  $notes = [System.Collections.Generic.List[string]]::new()
+  if ($App.PSObject.Properties['PackageIdFuzzy'] -and $App.PackageIdFuzzy) {
+    $notes.Add(("{0} {1}" -f (Get-UiString 'RiskyRunNoteGuessedId'), [string]$App.PackageId))
   }
-}
-
-# Apps, fuer die im Tenant schon eine mindestens so neue Fassung eines ANDEREN Paketierungstyps
-# liegt (MSI, Store, AppX).
-#
-# Geschuetzte Apps bleiben aussen vor - fuer die ist die Frage eine Rueckfrage vorher gestellt.
-function Split-ForeignNewerApps {
-  param([AllowNull()][AllowEmptyCollection()][object[]]$Apps)
-  $split = Split-AppsByFlag -Apps $Apps -FlagName 'HasForeignNewer' -ExcludeFlagName 'IsProtected'
-  return @{ Foreign = @($split.Matching); Rest = @($split.Rest) }
-}
-
-# Dieselben drei Wege wie bei den geschuetzten Apps und den geratenen Ids.
-function Resolve-ForeignNewerRunChoice {
-  param(
-    [AllowNull()][AllowEmptyCollection()][object[]]$Apps,
-    [ValidateSet('all', 'skip', 'cancel')][string]$Choice
-  )
-  $split = Split-ForeignNewerApps -Apps $Apps
-  switch ($Choice) {
-    'all' { return @{ Proceed = $true; Apps = @($Apps); Skipped = @(); Reason = 'all' } }
-    'skip' {
-      $kept = @($split.Rest)
-      if ($kept.Count -eq 0) {
-        return @{ Proceed = $false; Apps = @(); Skipped = @($split.Foreign); Reason = 'empty' }
-      }
-      return @{ Proceed = $true; Apps = $kept; Skipped = @($split.Foreign); Reason = 'skip' }
+  if ($App.PSObject.Properties['HasForeignNewer'] -and $App.HasForeignNewer) {
+    $tag = "{0} {1} {2}" -f (Get-UiString 'RiskyRunNoteForeign'), [string]$App.ForeignNewerType, [string]$App.ForeignNewerVersion
+    if ($App.PSObject.Properties['ForeignNewerAssigned'] -and $App.ForeignNewerAssigned) {
+      $tag += ' ' + (Get-UiString 'ForeignNewerAssignedTag')
     }
-    default { return @{ Proceed = $false; Apps = @(); Skipped = @(); Reason = 'cancel' } }
+    $notes.Add($tag)
   }
+  if ($notes.Count -gt 0) { $line += ("   [{0}]" -f ($notes -join '; ')) }
+  return $line
 }
 
-# Die dritte Rueckfrage dieser Art - und die einzige, die nicht von einem Datenverlust handelt,
-# sondern von einer DOPPELUNG.
+# Baut den Text der Rueckfrage. Getrennt vom Dialog, damit er ohne Fenster ausgerendert und
+# geprueft werden kann - die Lehre vom 03.09.2026: ein Text mit optionalen Bloecken gehoert
+# angesehen, nicht im Kopf durchgespielt.
+function Get-RunRiskPreview {
+  param([Parameter(Mandatory)][hashtable]$Findings)
+  $blocks = [System.Collections.Generic.List[string]]::new()
+  foreach ($entry in @(
+    @{ Key = 'Protected'; Head = 'RiskyRunHeadProtected' },
+    @{ Key = 'Fuzzy';     Head = 'RiskyRunHeadGuessed' },
+    @{ Key = 'Foreign';   Head = 'RiskyRunHeadForeign' }
+  )) {
+    $apps = @($Findings[$entry.Key])
+    if ($apps.Count -eq 0) { continue }   # leere Klasse: keine Ueberschrift, keine Leerzeile
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add(((Get-UiString $entry.Head) -f $apps.Count))
+    foreach ($a in @($apps | Select-Object -First 12)) { $lines.Add((Get-RunRiskAppLine -App $a)) }
+    if ($apps.Count -gt 12) { $lines.Add('  - ...') }
+    $blocks.Add(($lines -join "`r`n"))
+  }
+  return (($blocks -join "`r`n`r`n").TrimEnd())
+}
+
+# Die eine Rueckfrage, die "Rueckfragen abschalten" NICHT abschalten darf.
 #
-# Der Fall, gemeldet am 09.09.2026: die Update-Liste bot "Google Chrome 151.0.7922.72 ->
-# 153.0.8010.37, neu anzulegen" an, waehrend im Tenant eine ZUGEWIESENE MSI-Fassung 152.0.7977.83
-# lag. Ein Lauf baut dann eine dritte Fassung, die niemand zugewiesen bekommt - die Geraete behalten
-# die MSI, und im Tenant liegt eine Win32-App mehr, die nichts tut.
+# Ohne auffaellige App kostet der Normalfall keinen Klick: dann wird nichts gefragt und die Liste
+# geht unveraendert weiter.
 #
-# Diese Anwendung baut nur Win32 und kann eine MSI- oder Store-Fassung nicht aktualisieren. Ob man
-# sie durch eine Win32-Fassung ABLOEST, ist deshalb eine Entscheidung des Administrators und keine
-# Nebenwirkung eines Klicks - so ausdruecklich gewuenscht. Wie die anderen beiden Rueckfragen laesst
-# sie sich mit abgeschalteten Bestaetigungen nicht wegdruecken.
-function Confirm-ForeignNewerAppsInRun {
+# DREI Wege statt Ja/Nein, und das ist der Kern. Der haeufigste reale Fall: zehn Apps angehakt,
+# zwei davon auffaellig und uebersehen. Bei einer Ja/Nein-Frage heisst Nein "abbrechen, die zwei
+# suchen, abwaehlen, von vorn" - und wer das dreimal gemacht hat, klickt beim vierten Mal Ja.
+function Confirm-RiskyAppsInRun {
   param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Apps)
-  $split = Split-ForeignNewerApps -Apps $Apps
-  $foreign = @($split.Foreign)
-  if ($foreign.Count -eq 0) {
+  $findings = Get-RunRiskFindings -Apps $Apps
+  if ([int]$findings.Total -eq 0) {
     return @{ Proceed = $true; Apps = @($Apps); Skipped = @(); Reason = 'none' }
   }
-  $preview = (@($foreign | Select-Object -First 15 | ForEach-Object {
-    $assignedNote = if ($_.ForeignNewerAssigned) { Get-UiString 'ForeignNewerAssignedTag' } else { '' }
-    "- {0}: {1} -> {2}   [{3} {4} {5}]" -f [string]$_.Name, [string]$_.CurrentVersion, [string]$_.LatestVersion,
-      [string]$_.ForeignNewerType, [string]$_.ForeignNewerVersion, $assignedNote
-  }) -join "`r`n").TrimEnd()
-  if ($foreign.Count -gt 15) { $preview += "`r`n- ..." }
-  Write-Log ("Update run contains {0} app(s) for which the tenant already holds a version of another packaging type that is at least as new, asking for an explicit confirmation regardless of the suppression setting: {1}" -f `
-    $foreign.Count, ((@($foreign | ForEach-Object {
-      "{0} -> target {1}, tenant already has {2} as {3}{4}" -f [string]$_.Name, [string]$_.LatestVersion,
-        [string]$_.ForeignNewerVersion, [string]$_.ForeignNewerType,
-        $(if ($_.ForeignNewerAssigned) { ' (assigned)' } else { '' })
-    })) -join '; '))
+  # Namentlich ins Protokoll, je Klasse: "3 auffaellige Apps" beantwortet im Nachhinein nicht die
+  # Frage, WELCHE freigegeben wurden - und genau die wird nach einem Fehlgriff gestellt.
+  #
+  # Die Laufvariable heisst $classApps und NICHT $apps: PowerShell unterscheidet keine Gross- und
+  # Kleinschreibung, $apps waere also derselbe Behaelter wie der Parameter $Apps gewesen. Genau das
+  # ist beim Bau passiert - nach der Schleife stand in $Apps die zuletzt betrachtete (leere) Klasse
+  # statt der Auswahl, und der Lauf meldete "es bleibt nichts zu tun", obwohl unauffaellige Apps
+  # angehakt waren. Ein Test hat es gefangen, keine Fehlermeldung.
+  foreach ($entry in @(
+    @{ Key = 'Protected'; Text = 'protected (self-packaged)' },
+    @{ Key = 'Fuzzy';     Text = 'package id guessed from the display name' },
+    @{ Key = 'Foreign';   Text = 'tenant already holds a version of another packaging type' }
+  )) {
+    $classApps = @($findings[$entry.Key])
+    if ($classApps.Count -eq 0) { continue }
+    Write-Log ("Update run contains {0} app(s) - {1}: {2}" -f `
+      $classApps.Count, $entry.Text, ((@($classApps | ForEach-Object { [string]$_.Name })) -join ', '))
+  }
+  Write-Log ("Asking for one explicit confirmation for {0} app(s) regardless of the suppression setting." -f $findings.Total)
 
-  $choice = Show-ProtectedRunDialog -Count $foreign.Count -Preview $preview `
-    -TitleKey 'ForeignNewerRunConfirmTitle' -TextKey 'ForeignNewerRunConfirmDialog' `
-    -SkipButtonKey 'ForeignNewerRunSkipButton' -AllButtonKey 'ForeignNewerRunAllButton'
-  $result = Resolve-ForeignNewerRunChoice -Apps $Apps -Choice $choice
+  $choice = Show-RiskyRunDialog -Count ([int]$findings.Total) -Preview (Get-RunRiskPreview -Findings $findings)
+  $result = Resolve-RiskyRunChoice -Apps $Apps -Choice $choice
 
   switch ($result.Reason) {
     'all' {
-      Write-Log ("Confirmed: {0} app(s) will be built as Win32 even though the tenant already holds a version of another packaging type. The other version is NOT touched." -f $foreign.Count)
+      Write-Log ("Confirmed for this run: {0} app(s) will be processed despite the findings above." -f $findings.Total)
     }
     'skip' {
       Write-Log ("Left out of this run ({0}): {1}. Continuing with {2} app(s)." -f `
-        $foreign.Count, ((@($foreign | ForEach-Object { [string]$_.Name })) -join ', '), @($result.Apps).Count)
+        $findings.Total, ((@($result.Skipped | ForEach-Object { [string]$_.Name })) -join ', '), @($result.Apps).Count)
     }
     'empty' {
-      Write-Log 'Only apps with an existing version of another packaging type were selected and the user chose to leave them out; nothing was built or uploaded.'
+      Write-Log 'Only apps with findings were selected and the user chose to leave them out; nothing was built or uploaded.'
     }
     default {
-      Write-Log 'Update run canceled at the other-packaging-type confirmation; nothing was built or uploaded.'
-    }
-  }
-  return $result
-}
-
-# Die zweite Rueckfrage, die "Rueckfragen abschalten" NICHT abschalten darf.
-#
-# Der Fall: eine App, deren WinGet-Id die Anwendung aus dem ANZEIGENAMEN geraten hat (Aehnlichkeit
-# >= 80, 15 Punkte Abstand zum Zweiten). Trifft die Vermutung daneben, baut der Lauf das falsche
-# Produkt, loest die vorhandene App damit ab und zieht ihre Zuweisungen mit - bei einer selbst
-# paketierten App ist das der Totalverlust, den docs/PATTERNS.md beschreibt. Mit
-# SuppressChangeConfirmations lief genau das bisher ohne einen einzigen Klick durch: geschuetzte
-# Apps fragten nach, die allgemeine Rueckfrage blieb stumm, und eine unmarkierte App mit geratener
-# Id fiel durch beide Netze.
-#
-# Ohne geratene Id kostet der Normalfall keinen Klick. Die Absicherung an der Strenge der
-# Id-Auflaesung bleibt unveraendert - diese Frage kommt zusaetzlich, nicht statt ihrer.
-function Confirm-FuzzyMatchedAppsInRun {
-  param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Apps)
-  $split = Split-FuzzyMatchedApps -Apps $Apps
-  $fuzzy = @($split.Fuzzy)
-  if ($fuzzy.Count -eq 0) {
-    return @{ Proceed = $true; Apps = @($Apps); Skipped = @(); Reason = 'none' }
-  }
-  # Namentlich MIT der geratenen Id ins Protokoll: nach einem Fehlgriff ist genau das die Frage -
-  # welches Paket hat er fuer diese App genommen?
-  $preview = (@($fuzzy | Select-Object -First 15 | ForEach-Object {
-    "- {0}: {1} -> {2}   [{3}]" -f [string]$_.Name, [string]$_.CurrentVersion, [string]$_.LatestVersion, [string]$_.PackageId
-  }) -join "`r`n")
-  if ($fuzzy.Count -gt 15) { $preview += "`r`n- ..." }
-  Write-Log ("Update run contains {0} app(s) whose WinGet id was GUESSED from the display name, asking for an explicit confirmation regardless of the suppression setting: {1}" -f `
-    $fuzzy.Count, ((@($fuzzy | ForEach-Object { "{0} -> {1}" -f [string]$_.Name, [string]$_.PackageId })) -join ', '))
-
-  $choice = Show-ProtectedRunDialog -Count $fuzzy.Count -Preview $preview `
-    -TitleKey 'FuzzyRunConfirmTitle' -TextKey 'FuzzyRunConfirmDialog' `
-    -SkipButtonKey 'FuzzyRunSkipButton' -AllButtonKey 'FuzzyRunAllButton'
-  $result = Resolve-FuzzyRunChoice -Apps $Apps -Choice $choice
-
-  switch ($result.Reason) {
-    'all' {
-      Write-Log ("Guessed package ids confirmed for this run: {0} app(s) will be updated from an id that was matched by name only." -f $fuzzy.Count)
-    }
-    'skip' {
-      Write-Log ("Apps with a guessed package id left out of this run ({0}): {1}. Continuing with {2} app(s)." -f `
-        $fuzzy.Count, ((@($fuzzy | ForEach-Object { [string]$_.Name })) -join ', '), @($result.Apps).Count)
-    }
-    'empty' {
-      Write-Log 'Only apps with a guessed package id were selected and the user chose to leave them out; nothing was built or uploaded.'
-    }
-    default {
-      Write-Log 'Update run canceled at the guessed-package-id confirmation; nothing was built or uploaded.'
-    }
-  }
-  return $result
-}
-
-# Ohne geschuetzte App kostet der Normalfall keinen Klick: dann wird nichts gefragt und die Liste
-# geht unveraendert weiter.
-#
-# Mit geschuetzten Apps gibt es DREI Wege statt Ja/Nein. Der Grund ist der haeufigste reale Fall:
-# zehn Apps angehakt, zwei davon geschuetzt uebersehen. Bei einer Ja/Nein-Frage muss man abbrechen,
-# die zwei abwaehlen und von vorn anfangen - die Rueckfrage kostet dann mehr, als sie bringt, und
-# genau so gewoehnt man sich an, sie wegzuklicken.
-function Confirm-ProtectedAppsInRun {
-  param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Apps)
-  $split = Split-ProtectedApps -Apps $Apps
-  $protected = @($split.Protected)
-  if ($protected.Count -eq 0) {
-    return @{ Proceed = $true; Apps = @($Apps); Skipped = @(); Reason = 'none' }
-  }
-  $preview = (@($protected | Select-Object -First 15 | ForEach-Object {
-    "- {0}: {1} -> {2}" -f [string]$_.Name, [string]$_.CurrentVersion, [string]$_.LatestVersion
-  }) -join "`r`n")
-  if ($protected.Count -gt 15) { $preview += "`r`n- ..." }
-  # Namentlich ins Protokoll: "3 geschuetzte Apps" beantwortet im Nachhinein nicht die Frage, WELCHE
-  # freigegeben wurden - und genau die wird nach einem Fehlgriff gestellt.
-  Write-Log ("Update run contains {0} protected app(s), asking for an explicit confirmation regardless of the suppression setting: {1}" -f `
-    $protected.Count, ((@($protected | ForEach-Object { [string]$_.Name })) -join ', '))
-
-  # Eigener Dialog statt Confirm-ChangeAction: drei Wege brauchen drei beschriftete Knoepfe.
-  # "Ja/Nein/Abbrechen" einer MessageBox sagt nicht, WAS ja bedeutet. Dass diese Frage von
-  # "Rueckfragen abschalten" nicht unterdrueckt wird, ergibt sich hier von selbst - der Dialog
-  # geht gar nicht erst durch Confirm-ChangeAction.
-  $choice = Show-ProtectedRunDialog -Count $protected.Count -Preview $preview
-  $result = Resolve-ProtectedRunChoice -Apps $Apps -Choice $choice
-
-  switch ($result.Reason) {
-    'all' {
-      Write-Log ("Protected apps confirmed for this run: {0} app(s) will be superseded." -f $protected.Count)
-    }
-    'skip' {
-      Write-Log ("Protected apps left out of this run ({0}): {1}. Continuing with {2} app(s)." -f `
-        $protected.Count, ((@($protected | ForEach-Object { [string]$_.Name })) -join ', '), @($result.Apps).Count)
-    }
-    'empty' {
-      Write-Log 'Only protected apps were selected and the user chose to leave them out; nothing was built or uploaded.'
-    }
-    default {
-      Write-Log 'Update run canceled at the protected-apps confirmation; nothing was built or uploaded.'
+      Write-Log 'Update run canceled at the findings confirmation; nothing was built or uploaded.'
     }
   }
   return $result

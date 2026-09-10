@@ -430,6 +430,51 @@ Assert-True ($pointArgs.Count -eq 0) (
   "New-Object Point/Size with an unparenthesised calculation in its last argument ({0} site(s)); the comma binds TIGHTER than the minus, so this computes 'array minus n' and throws op_Subtraction when the dialog opens. Wrap it: (`$y - 4):`r`n  {1}" -f
     $pointArgs.Count, ($pointArgs -join "`r`n  "))
 
+# Keine Zuweisung an eine Variable, die sich von einem Parameter nur in der Gross-/Kleinschreibung
+# unterscheidet.
+#
+# PowerShell unterscheidet bei Variablennamen keine Gross- und Kleinschreibung: $apps und $Apps sind
+# DERSELBE Behaelter. Eine Schleife, die sich $apps als Laufvariable nimmt, waehrend der Parameter
+# $Apps heisst, ueberschreibt damit die Eingabe der Funktion - und zwar lautlos.
+#
+# Gefunden am 10.09.2026 in Confirm-RiskyAppsInRun: die Protokollschleife lief ueber drei
+# Befundklassen und liess in $Apps die zuletzt betrachtete, leere Klasse stehen. Der Lauf meldete
+# danach "es bleibt nichts zu tun", obwohl unauffaellige Apps angehakt waren. Kein Parserfehler,
+# keine Ausnahme, keine Protokollzeile - nur ein Lauf, der nichts tat. Ein Test hat es gefangen;
+# diese Regel faengt den naechsten Fall vor dem Test.
+#
+# Gesucht wird nur der eindeutige Fall: eine ZUWEISUNG an einen Namen, den die umgebende Funktion
+# als Parameter fuehrt, mit ABWEICHENDER Schreibweise. Gleiche Schreibweise ist erlaubt - einen
+# Parameter absichtlich zu ueberschreiben ist ein gaengiges Mittel (siehe $checkedApps in 90-Main).
+$caseShadows = [Collections.Generic.List[string]]::new()
+foreach ($fn in $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+  $params = @{}
+  $blockParams = if ($fn.Body.ParamBlock) { $fn.Body.ParamBlock.Parameters } else { $fn.Parameters }
+  foreach ($p in @($blockParams)) {
+    if (-not $p) { continue }
+    $params[$p.Name.VariablePath.UserPath] = $p.Name.VariablePath.UserPath
+  }
+  if ($params.Count -eq 0) { continue }
+  foreach ($assign in $fn.FindAll({ param($node) $node -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+    if ($assign.Left -isnot [System.Management.Automation.Language.VariableExpressionAst]) { continue }
+    $name = $assign.Left.VariablePath.UserPath
+    if ($name -match ':') { continue }   # $script:/$global: sind eigene Behaelter, kein Schatten
+    foreach ($declared in $params.Keys) {
+      # -ceq, nicht -eq: der Vergleichsoperator ist selbst unempfindlich gegen Gross- und
+      # Kleinschreibung. Mit -eq hielt diese Regel jeden Fall fuer "gleiche Schreibweise" und
+      # meldete nie etwas - aufgefallen erst bei der Gegenpruefung.
+      if ($name -ceq $declared) { continue }                                 # gleiche Schreibweise: erlaubt
+      if ([string]::Equals($name, $declared, 'OrdinalIgnoreCase')) {
+        $caseShadows.Add(('line {0}: ${1} in {2} overwrites the parameter ${3}' -f `
+          $assign.Extent.StartLineNumber, $name, $fn.Name, $declared))
+      }
+    }
+  }
+}
+Assert-True ($caseShadows.Count -eq 0) (
+  "Assignment to a name that differs from a parameter only in case ({0} site(s)); PowerShell variable names are case-insensitive, so this silently overwrites the function's input:`r`n  {1}" -f
+    $caseShadows.Count, ($caseShadows -join "`r`n  "))
+
 # Kein Netzaufruf ohne Zeitablauf.
 #
 # Ohne -TimeoutSec wartet Invoke-RestMethod in PowerShell 7 UNBEGRENZT. Gemessen am 31.08.2026:

@@ -42,8 +42,8 @@ Invoke-ScriptAnalyzer -Path .\src   -Settings .\PSScriptAnalyzerSettings.psd1 -R
 Invoke-ScriptAnalyzer -Path .\tests -Settings .\PSScriptAnalyzerSettings.Tests.psd1 -Recurse
 ```
 
-Erwartet (gemessen am 03.09.2026, Stand 0.18.0): StaticChecks grün
-(**366 Funktionen, 1006 UI-Keys je Sprache**), SmokeTest grün, LayoutProbe grün, **794 Pester** grün
+Erwartet (gemessen am 10.09.2026, Stand 0.19.1): StaticChecks grün
+(**388 Funktionen, 1070 UI-Keys je Sprache**), SmokeTest grün, LayoutProbe grün, **1000 Pester** grün
 (1 übersprungen), Analyzer **0 blockierend** (5 informational in `65-Theme.ps1` sind Altbestand).
 
 Die eine übersprungene Prüfung wechselt die Seite, je nachdem was auf dem Rechner installiert ist:
@@ -57,7 +57,7 @@ Die drei Läufer, die kein Parser ersetzt:
 |---|---|
 | `SmokeTest.ps1` | Ladefehler des gebauten Skripts (falsche Teil-Reihenfolge, Control vor seiner Erzeugung benutzt) |
 | `LayoutProbe.ps1` | überlappende Steuerelemente (**auch Beschriftung gegen gerundetes Eingabefeld** — bis 0.18.0 war genau das ausgenommen), abgeschnittener Text, zu geringer Kontrast, Karten die beim Scrollen verrutschen, **aufgeklappte** „Erweiterte Optionen", **ein Aufklapper der etwas außerhalb seiner Sektion verschiebt** — in **allen 7 Designs**, 2 Fenstergrößen × **2 Sprachen**, jeweils auf frischem Profil |
-| `StaticChecks.ps1` | Version/Kopf, UI-Key-Parität EN/DE, tote UI-Schlüssel, `-LiteralPath`-Regeln, `Show-Progress` ohne `Hide-Progress`, MessageBox auf oberster Ebene vor dem Smoke-Tor, `Add_Shown` mit Dialog ohne `Test-UnattendedRun`, Datenpfad außerhalb der zwei Wurzelfunktionen, Sektion ohne Eintrag in `$navKeyOrder`/`$navGlyphs`, **CIM/WMI im Startpfad**, **HTTP-Aufruf ohne `-TimeoutSec`**, **Layout-Tabelle mit unbekannter Funktion oder unbekanntem Bereich**, **Cache-Leerer, der nicht im Tenant-Riegel steht**, **`Save-VersionDiskCache` außerhalb von `Save-PendingVersionDiskCache`**, **`Deploy-WtWin32App` außerhalb von `Invoke-WtDeployOffThread`** |
+| `StaticChecks.ps1` | Version/Kopf, UI-Key-Parität EN/DE, tote UI-Schlüssel, `-LiteralPath`-Regeln, `Show-Progress` ohne `Hide-Progress`, MessageBox auf oberster Ebene vor dem Smoke-Tor, `Add_Shown` mit Dialog ohne `Test-UnattendedRun`, Datenpfad außerhalb der zwei Wurzelfunktionen, Sektion ohne Eintrag in `$navKeyOrder`/`$navGlyphs`, **CIM/WMI im Startpfad**, **HTTP-Aufruf ohne `-TimeoutSec`**, **Layout-Tabelle mit unbekannter Funktion oder unbekanntem Bereich**, **Cache-Leerer, der nicht im Tenant-Riegel steht**, **`Save-VersionDiskCache` außerhalb von `Save-PendingVersionDiskCache`**, **`Deploy-WtWin32App` außerhalb von `Invoke-WtDeployOffThread`**, **eine Zuweisung an einen Namen, der sich von einem Parameter nur in der Groß-/Kleinschreibung unterscheidet** (`$apps` neben `$Apps` ist derselbe Behälter — siehe PATTERNS) |
 
 `Invoke-CheckChain.ps1` prüft selbst nichts — es startet diese Läufer, jeden in einem eigenen
 pwsh-Kindprozess (SmokeTest und LayoutProbe rufen `exit` auf und laden WinForms; nacheinander im

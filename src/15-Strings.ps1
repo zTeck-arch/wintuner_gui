@@ -133,41 +133,29 @@ Log files never contain any of this. They record how many entries exist, never t
     AssignIdRemovedStatus = "WinGet id mapping removed for {0}. Searching for updates again."
     ProtectedAddedStatus = "Protected: {0}. It stays in the list and can still be ticked - an update run asks first."
     ProtectedRemovedStatus = "Protection removed: {0}."
-    ProtectedRunConfirmTitle = "Protected apps in this run"
-    ProtectedRunConfirmDialog = "{0} app(s) in this run are marked as self-packaged:`r`n`r`n{1}`r`n`r`nUpdating them creates a new app, supersedes the existing one and moves its assignments. For a package built by hand, that cannot be undone by re-running anything.`r`n`r`nThis question is asked even when confirmations are switched off in Settings.`r`n`r`nLeave them out and the rest of the run continues unchanged."
-    ProtectedRunSkipButton = "Continue without the protected ones"
-    ProtectedRunAllButton = "Update all, protected included"
-    FuzzyRunConfirmTitle = "Guessed package ids in this run"
-    FuzzyRunConfirmDialog = "For {0} app(s) in this run the WinGet package id was GUESSED from the display name - there is no saved mapping, no WinTuner marker and no exact name match:`r`n`r`n{1}`r`n`r`nIf a guess is wrong, the run packages the WRONG product, supersedes the existing app with it and moves its assignments. For an app packaged by hand, that cannot be undone by re-running anything.`r`n`r`nCheck the id next to each name. If one is wrong, leave these out and assign the correct id first (right-click the row in the update list).`r`n`r`nThis question is asked even when confirmations are switched off in Settings.`r`n`r`nLeave them out and the rest of the run continues unchanged."
-    FuzzyRunSkipButton = "Continue without the guessed ones"
-    FuzzyRunAllButton = "Update all, guessed ids included"
     UpdateStateFuzzyId = "package id guessed from the name"
     UpdateStateForeignNewer = "the tenant already has {0} as {1}"
     UpdateStateForeignNewerAssigned = "the tenant already has {0} as {1} - AND THAT ONE IS ASSIGNED"
     ForeignNewerAssignedTag = "(assigned)"
-    ForeignNewerRunConfirmTitle = "A version of another packaging type already exists"
-    ForeignNewerRunSkipButton = "Continue without these"
-    ForeignNewerRunAllButton = "Build as Win32 anyway"
-    ForeignNewerRunSkippedStatus = "{0} app(s) with an existing version of another packaging type left out; running {1} app(s)."
-    ForeignNewerRunNothingLeftStatus = "Only apps that already exist as another packaging type were selected - nothing left to run."
-    ForeignNewerRunConfirmDialog = @"
-For {0} app(s) the tenant ALREADY holds a version that is at least as new as the target - but as a packaging type this application does not build (MSI, Store, AppX):
+    RiskyRunConfirmTitle = "Check before this run"
+    RiskyRunSkipButton = "Continue without these"
+    RiskyRunAllButton = "Run all of them anyway"
+    RiskyRunHeadProtected = "{0} app(s) marked as SELF-PACKAGED. An update creates a new app, supersedes the existing one and moves its assignments - for a package built by hand that cannot be undone:"
+    RiskyRunHeadGuessed = "{0} app(s) whose WinGet id was GUESSED from the display name - no saved mapping, no WinTuner marker, no exact match. If a guess is wrong, the run packages the WRONG product and supersedes the existing app with it. Check the id, and if one is wrong assign the correct one first (right-click the row):"
+    RiskyRunHeadForeign = "{0} app(s) for which the tenant ALREADY holds a version that is at least as new - but as a packaging type this application does not build (MSI, Store, AppX). This application packages Win32 only and can neither update nor delete that other version, so a build does not replace it: afterwards the tenant holds BOTH, and if the Win32 predecessor carried no assignment nobody gets the new version. Sensible only if you WANT to move to Win32 packaging:"
+    RiskyRunNoteGuessedId = "guessed id:"
+    RiskyRunNoteForeign = "tenant already has"
+    RiskyRunSkippedStatus = "{0} app(s) with findings left out; running {1} app(s)."
+    RiskyRunNothingLeftStatus = "Only apps with findings were selected - nothing left to run."
+    RiskyRunConfirmDialog = @"
+{0} app(s) in this run need a decision that the application must not make for you:
 
 {1}
 
-This application packages Win32 only. It can neither update nor delete that other version, so building the target here does not replace it: afterwards the tenant holds BOTH. If the Win32 predecessor carried no assignment, nobody gets the new version at all - the devices keep the other one.
+"Run all of them anyway" processes everything above. "Continue without these" leaves exactly these apps out; the rest of the run continues unchanged.
 
-So this is a decision, not a routine step:
-
-- "Build as Win32 anyway" makes sense when you WANT to move to Win32 packaging. The other version is left untouched; you assign the new one and retire the old one yourself (its assignment can be moved in "All tenant apps" -> "Clean up duplicate assignments").
-- "Continue without these" leaves them out and runs the rest unchanged.
-
-This question is asked even when confirmations are switched off in Settings.
+This question is asked even when confirmations are switched off in Settings - it is the only one that cannot be suppressed.
 "@
-    ProtectedRunSkippedStatus = "{0} protected app(s) left out; running {1} app(s)."
-    ProtectedRunNothingLeftStatus = "Only protected apps were selected - nothing left to run."
-    FuzzyRunSkippedStatus = "{0} app(s) with a guessed package id left out; running {1} app(s)."
-    FuzzyRunNothingLeftStatus = "Only apps with a guessed package id were selected - nothing left to run."
     TabAppSettings = "App settings"
     TabTenantApps = "All tenant apps"
     TabOwnPackage = "Own installers"
@@ -1447,41 +1435,29 @@ In den Protokolldateien steht nichts davon. Sie halten fest, wie viele Einträge
     AssignIdRemovedStatus = "Zuordnung für {0} entfernt. Die Suche läuft erneut."
     ProtectedAddedStatus = "Geschützt: {0}. Bleibt in der Liste und ist weiter anhakbar - der Lauf fragt vorher nach."
     ProtectedRemovedStatus = "Schutz aufgehoben: {0}."
-    ProtectedRunConfirmTitle = "Geschützte Apps in diesem Lauf"
-    ProtectedRunConfirmDialog = "{0} App(s) in diesem Lauf sind als selbst paketiert markiert:`r`n`r`n{1}`r`n`r`nEin Update legt eine neue App an, löst die vorhandene ab und zieht deren Zuweisungen mit. Bei einem von Hand gebauten Paket lässt sich das durch kein erneutes Ausführen zurückholen.`r`n`r`nDiese Frage kommt auch dann, wenn Bestätigungen in den Einstellungen abgeschaltet sind.`r`n`r`nLässt man sie aus, läuft der Rest unverändert weiter."
-    ProtectedRunSkipButton = "Ohne die geschützten fortfahren"
-    ProtectedRunAllButton = "Alle aktualisieren, auch geschützte"
-    FuzzyRunConfirmTitle = "Geratene Paket-Ids in diesem Lauf"
-    FuzzyRunConfirmDialog = "Bei {0} App(s) in diesem Lauf wurde die WinGet-Paket-Id aus dem Anzeigenamen GERATEN - es gibt keine hinterlegte Zuordnung, keine WinTuner-Marke und keinen exakten Namenstreffer:`r`n`r`n{1}`r`n`r`nIst eine Vermutung falsch, paketiert der Lauf das FALSCHE Produkt, löst die vorhandene App damit ab und zieht deren Zuweisungen mit. Bei einer von Hand paketierten App lässt sich das durch kein erneutes Ausführen zurückholen.`r`n`r`nBitte die Id neben jedem Namen prüfen. Stimmt eine nicht, diese Apps auslassen und zuerst die richtige Id zuordnen (Rechtsklick auf die Zeile in der Update-Liste).`r`n`r`nDiese Frage kommt auch dann, wenn Bestätigungen in den Einstellungen abgeschaltet sind.`r`n`r`nLässt man sie aus, läuft der Rest unverändert weiter."
-    FuzzyRunSkipButton = "Ohne die geratenen fortfahren"
-    FuzzyRunAllButton = "Alle aktualisieren, auch geratene"
     UpdateStateFuzzyId = "Paket-Id aus dem Namen geraten"
     UpdateStateForeignNewer = "im Tenant liegt schon {0} als {1}"
     UpdateStateForeignNewerAssigned = "im Tenant liegt schon {0} als {1} - UND DIE IST ZUGEWIESEN"
     ForeignNewerAssignedTag = "(zugewiesen)"
-    ForeignNewerRunConfirmTitle = "Es existiert schon eine Fassung eines anderen Paketierungstyps"
-    ForeignNewerRunSkipButton = "Ohne diese fortfahren"
-    ForeignNewerRunAllButton = "Trotzdem als Win32 bauen"
-    ForeignNewerRunSkippedStatus = "{0} App(s) mit vorhandener Fassung eines anderen Typs ausgelassen; {1} App(s) werden bearbeitet."
-    ForeignNewerRunNothingLeftStatus = "Es waren nur Apps angehakt, die schon als anderer Paketierungstyp vorliegen - es bleibt nichts zu tun."
-    ForeignNewerRunConfirmDialog = @"
-Für {0} App(s) liegt im Tenant BEREITS eine Fassung, die mindestens so neu ist wie die Zielversion - allerdings als Paketierungstyp, den diese Anwendung nicht baut (MSI, Store, AppX):
+    RiskyRunConfirmTitle = "Prüfung vor diesem Lauf"
+    RiskyRunSkipButton = "Ohne diese fortfahren"
+    RiskyRunAllButton = "Trotzdem alle bearbeiten"
+    RiskyRunHeadProtected = "{0} App(s) sind als SELBST PAKETIERT markiert. Ein Update legt eine neue App an, löst die vorhandene ab und zieht deren Zuweisungen mit - bei einem von Hand gebauten Paket lässt sich das nicht zurückholen:"
+    RiskyRunHeadGuessed = "{0} App(s) mit einer aus dem Anzeigenamen GERATENEN WinGet-Id - keine hinterlegte Zuordnung, keine WinTuner-Marke, kein exakter Treffer. Ist eine Vermutung falsch, paketiert der Lauf das FALSCHE Produkt und löst die vorhandene App damit ab. Bitte die Id prüfen und eine falsche zuerst richtig zuordnen (Rechtsklick auf die Zeile):"
+    RiskyRunHeadForeign = "{0} App(s), für die im Tenant BEREITS eine mindestens so neue Fassung liegt - allerdings als Paketierungstyp, den diese Anwendung nicht baut (MSI, Store, AppX). Sie paketiert ausschließlich Win32 und kann die andere Fassung weder aktualisieren noch löschen; ein Bau ersetzt sie also nicht, danach liegen BEIDE im Tenant, und ohne Zuweisung auf der Win32-Vorgängerversion bekommt die neue niemand. Sinnvoll nur, wenn Sie bewusst auf Win32 wechseln wollen:"
+    RiskyRunNoteGuessedId = "geratene Id:"
+    RiskyRunNoteForeign = "im Tenant liegt schon"
+    RiskyRunSkippedStatus = "{0} App(s) mit Befund ausgelassen; {1} App(s) werden bearbeitet."
+    RiskyRunNothingLeftStatus = "Es waren nur Apps mit Befund angehakt - es bleibt nichts zu tun."
+    RiskyRunConfirmDialog = @"
+{0} App(s) in diesem Lauf brauchen eine Entscheidung, die die Anwendung nicht für Sie treffen darf:
 
 {1}
 
-Diese Anwendung paketiert ausschließlich Win32. Sie kann die andere Fassung weder aktualisieren noch löschen, ein Bau hier ersetzt sie also nicht: danach liegen BEIDE im Tenant. Trug die Win32-Vorgängerversion keine Zuweisung, bekommt die neue Fassung überhaupt niemand - die Geräte behalten die andere.
+„Trotzdem alle bearbeiten" führt alles oben Genannte aus. „Ohne diese fortfahren" lässt genau diese Apps aus; der Rest des Laufs bleibt unverändert.
 
-Das ist deshalb eine Entscheidung und kein Routineschritt:
-
-- „Trotzdem als Win32 bauen" ist sinnvoll, wenn Sie bewusst auf Win32-Paketierung wechseln wollen. Die andere Fassung bleibt unangetastet; die neue weisen Sie selbst zu und lösen die alte ab (deren Zuweisung lässt sich unter „Alle Tenant-Apps" → „Doppelte Zuweisungen aufräumen" verschieben).
-- „Ohne diese fortfahren" lässt sie aus, der Rest läuft unverändert.
-
-Diese Frage kommt auch dann, wenn Bestätigungen in den Einstellungen abgeschaltet sind.
+Diese Frage kommt auch dann, wenn Bestätigungen in den Einstellungen abgeschaltet sind - sie ist die einzige, die sich nicht unterdrücken lässt.
 "@
-    ProtectedRunSkippedStatus = "{0} geschützte App(s) ausgelassen; {1} App(s) werden bearbeitet."
-    ProtectedRunNothingLeftStatus = "Es waren nur geschützte Apps angehakt - es bleibt nichts zu tun."
-    FuzzyRunSkippedStatus = "{0} App(s) mit geratener Paket-Id ausgelassen; {1} App(s) werden bearbeitet."
-    FuzzyRunNothingLeftStatus = "Es waren nur Apps mit geratener Paket-Id angehakt - es bleibt nichts zu tun."
     TabAppSettings = "App-Einstellungen"
     TabTenantApps = "Alle Tenant-Apps"
     TabOwnPackage = "Eigene Installer"

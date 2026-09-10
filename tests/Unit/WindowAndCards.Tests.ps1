@@ -162,6 +162,62 @@ Describe 'Anmeldung mit erhoehten Rechten' {
   }
 }
 
+Describe 'Connect-OptionalGraphScope erkennt vorhandene Berechtigungen' {
+  # Regressionspruefung zum Fehler vom 10.09.2026: die Funktion nannte ihre lokale Zeichenkette
+  # $scope, waehrend der Parameter $Scope hiess - fuer PowerShell dieselbe Variable. Die LISTE der
+  # Berechtigungen war danach durch die zusammengefuegte Zeichenkette ersetzt, und die Pruefung
+  # "traegt die Sitzung alles?" verglich "A B" als EINEN Eintrag gegen die Scope-Liste. Bei mehr als
+  # einer Berechtigung schlug sie deshalb immer fehl, und der Weg "direkt mit erhoehten Rechten
+  # anmelden" meldete sich bei jedem Aufruf neu an.
+  BeforeEach {
+    . ([scriptblock]::Create((Get-SourceFunctionText -Part '82-TenantApps.ps1' -Name 'Connect-OptionalGraphScope')))
+    $script:currentUserUpn = 'admin@kunde.de'
+    $script:groupLookupGranted = @{}
+    $script:groupLookupConsent = @{}
+    $global:TestConnectCalls = 0
+    Set-Item -Path function:global:Get-MgContext -Value {
+      [pscustomobject]@{ Account = 'admin@kunde.de'; Scopes = @('Group.Read.All', 'DeviceManagementManagedDevices.Read.All') }
+    }
+    Set-Item -Path function:global:Connect-MgGraph -Value { param($TenantId, $Scopes, [switch]$NoWelcome) $global:TestConnectCalls++ }
+    Set-Item -Path function:global:Show-GraphScopeConsentDialog -Value { param($TextKey) 'cancel' }
+  }
+
+  AfterAll {
+    foreach ($fn in @('Get-MgContext', 'Connect-MgGraph', 'Show-GraphScopeConsentDialog')) {
+      Remove-Item -Path "function:global:$fn" -ErrorAction SilentlyContinue
+    }
+  }
+
+  It 'meldet sich NICHT neu an, wenn die Sitzung ZWEI Berechtigungen schon traegt' {
+    Connect-OptionalGraphScope -Scope @('Group.Read.All', 'DeviceManagementManagedDevices.Read.All') -NoPrompt |
+      Should -BeTrue
+    $global:TestConnectCalls | Should -Be 0
+  }
+
+  It 'erkennt auch eine einzelne Berechtigung' {
+    Connect-OptionalGraphScope -Scope 'Group.Read.All' -NoPrompt | Should -BeTrue
+    $global:TestConnectCalls | Should -Be 0
+  }
+
+  It 'meldet sich an, wenn eine der beiden fehlt' {
+    # Die Gegenrichtung: sonst haette ein Test, der nur "kein Anmeldeversuch" prueft, auch dann
+    # bestanden, wenn die Funktion nie etwas tut.
+    Set-Item -Path function:global:Get-MgContext -Value {
+      [pscustomobject]@{ Account = 'admin@kunde.de'; Scopes = @('Group.Read.All') }
+    }
+    [void](Connect-OptionalGraphScope -Scope @('Group.Read.All', 'DeviceManagementManagedDevices.Read.All') -NoPrompt)
+    $global:TestConnectCalls | Should -Be 1
+  }
+
+  It 'merkt die Zustimmung je Tenant UND je Berechtigungssatz' {
+    # Der Schluessel muss die zusammengefuegte Liste enthalten - "Gruppen darf ich lesen" sagt
+    # nichts darueber, ob auch erkannte Geraete erlaubt sind.
+    $fn = Get-SourceFunctionText -Part '82-TenantApps.ps1' -Name 'Connect-OptionalGraphScope'
+    $fn | Should -Match '\$memoryKey = \("\{0\}\|\{1\}" -f \$tenantDomain, \$scopeKey\)'
+    $fn | Should -Not -Match '(?m)^\s*\$scope = '
+  }
+}
+
 Describe 'Der Weg mit -NoPrompt oeffnet keinen Dialog' {
 
   It 'ruft Show-GraphScopeConsentDialog nur ohne -NoPrompt' {
