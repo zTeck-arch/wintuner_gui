@@ -29,7 +29,7 @@ function New-UpdateRow {
   $noteParts.Add([string]$actionNote)
   # Ganz vorn, weil es die wichtigste Aussage der Zeile ist: diese App ist als selbst paketiert
   # markiert. Sie bleibt anhakbar - Umgebungen muss man pflegen koennen - aber der Lauf fragt vorher
-  # ausdruecklich nach, auch bei abgeschalteten Bestaetigungen (Confirm-ProtectedAppsInRun).
+  # ausdruecklich nach, auch bei abgeschalteten Bestaetigungen (Confirm-RiskyAppsInRun).
   # Die Farbe wird am ENDE einmal gesetzt, nicht hier. Vorher setzte jede der folgenden Regeln ihr
   # Orange nach - die geschuetzte App stand zuerst und wurde von der naechsten Regel wieder
   # ueberschrieben. Bei einer selbst paketierten App, deren Zuweisungen unklar sind, verschwand die
@@ -57,7 +57,7 @@ function New-UpdateRow {
   # Eigener Block, nicht in den darueber gefaltet: "nicht von WinTuner gebaut" ist eine Aussage
   # ueber die HERKUNFT DER APP, "Paket-Id aus dem Namen geraten" eine ueber die Herkunft der ID -
   # und nur die zweite kann das falsche Produkt paketieren. Eine Zeile kann beides tragen, dann
-  # stehen auch beide da. Die Rueckfrage vor dem Lauf (Confirm-FuzzyMatchedAppsInRun) nennt
+  # stehen auch beide da. Die Rueckfrage vor dem Lauf (Confirm-RiskyAppsInRun) nennt
   # zusaetzlich die geratene Id; hier ist kein Platz dafuer.
   if ($App.PSObject.Properties['PackageIdFuzzy'] -and $App.PackageIdFuzzy) {
     $noteParts.Add((Get-UiString 'UpdateStateFuzzyId'))

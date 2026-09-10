@@ -270,14 +270,46 @@ von WinTuner gebaut" unsichtbar, obwohl `New-UpdateRow` sie kannte — im Lauf v
 `blocked|GraphId`-Zweig fielen alle nicht prüfbaren Apps zu **einer** Zeile zusammen.
 Regressionsprüfung: `BlockedUpdateRows.Tests.ps1`.
 
-### Eine Rückfrage, die „Rückfragen abschalten" nicht abschalten darf
-`Confirm-ProtectedAppsInRun` ruft `Confirm-ChangeAction` **mit `-AlwaysAsk`**. Ohne das Wort wäre
-der Riegel genau bei dem Benutzer stumm, der ihn am dringendsten braucht: wer
-`SuppressChangeConfirmations` gesetzt hat, startet den Lauf sonst völlig ohne Nachfrage. Der
-Normalfall kostet trotzdem keinen Klick — ohne geschützte App kehrt die Funktion sofort mit `$true`
-zurück. Beide Update-Wege müssen den Riegel haben, „Alle aktualisieren" ist der gefährlichere: dort
-liest niemand jede Zeile. Das Urteil `IsProtected` fällt **einmal** in `New-UpdateCandidateModel` —
-rechnete jede Anzeigestelle selbst, könnten Zeilenfarbe und Rückfrage auseinanderlaufen.
+### Eine Rückfrage, die „Rückfragen abschalten" nicht abschalten darf — und zwar genau eine
+`Confirm-RiskyAppsInRun` (70-Runtime) geht **nicht** durch `Confirm-ChangeAction`, sondern öffnet mit
+`Show-RiskyRunDialog` ihren eigenen Dialog. Damit ergibt sich von selbst, dass
+`SuppressChangeConfirmations` sie nicht wegdrückt — sonst wäre der Riegel genau bei dem Benutzer
+stumm, der ihn am dringendsten braucht. Der Normalfall kostet trotzdem keinen Klick: ohne Befund
+kehrt die Funktion sofort mit `Proceed = $true` zurück. Beide Update-Wege müssen den Riegel haben,
+„Alle aktualisieren" ist der gefährlichere: dort liest niemand jede Zeile.
+
+Bis 0.19.0 waren es **drei** solche Funktionen (geschützte Apps, geratene Paket-Id, fremder
+Paketierungstyp), und das war der Fehler: vor einem Lauf standen vier nicht wegdrückbare Dialoge
+nacheinander, was zum Durchklicken erzieht — und weil die Prüfungen für geratene Id und fremden Typ
+beide nur `IsProtected` ausschlossen, **nicht sich gegenseitig**, wurde eine App mit beiden Befunden
+zweimal gefragt. Wer eine vierte Art von Befund hinzufügt, erweitert deshalb
+`$script:runRiskClasses` und `Get-RunRiskFindings`, statt eine vierte Rückfrage zu schreiben. Jede
+App gehört dort zu **genau einer** Klasse (Rangfolge = Gewicht), ihre Zeile nennt aber über
+`Get-RunRiskAppLine` alle zutreffenden Gründe.
+
+Das Urteil `IsProtected` fällt **einmal** in `New-UpdateCandidateModel` — rechnete jede Anzeigestelle
+selbst, könnten Zeilenfarbe und Rückfrage auseinanderlaufen. Regressionsprüfung:
+`RiskyRunConfirm.Tests.ps1`.
+
+### `$apps` und `$Apps` sind dieselbe Variable
+PowerShell unterscheidet bei Variablennamen **keine** Groß- und Kleinschreibung. Eine Schleife, die
+sich `$apps` als Laufvariable nimmt, während der Parameter `$Apps` heißt, überschreibt damit die
+Eingabe der Funktion — lautlos, ohne Parserfehler und ohne Ausnahme.
+
+Am 10.09.2026 zweimal zugeschnappt. In `Confirm-RiskyAppsInRun` lief die Protokollschleife über drei
+Befundklassen und ließ in `$Apps` die zuletzt betrachtete, **leere** Klasse stehen; der Lauf meldete
+danach „es bleibt nichts zu tun", obwohl unauffällige Apps angehakt waren. In
+`Connect-OptionalGraphScope` ersetzte `$scope = @($Scope) -join ' '` die **Liste** der
+Berechtigungen durch die zusammengefügte Zeichenkette, und die Prüfung „trägt die Sitzung alles?"
+verglich danach `"A B"` als einen Eintrag gegen die Scope-Liste — bei mehr als einer Berechtigung
+schlug sie immer fehl, und „direkt mit erhöhten Rechten anmelden" meldete sich bei jedem Aufruf neu
+an.
+
+Eine StaticCheck-Regel fängt das jetzt: eine Zuweisung an einen Namen, der sich von einem Parameter
+derselben Funktion **nur in der Schreibweise** unterscheidet. Gleiche Schreibweise bleibt erlaubt —
+einen Parameter absichtlich zu überschreiben ist ein gängiges Mittel. Wer die Regel selbst anfasst:
+der Vergleich muss `-ceq` benutzen, denn `-eq` ist ebenfalls unempfindlich gegen Groß- und
+Kleinschreibung und die Regel meldete damit nie etwas.
 
 ### Zwei Schreiber auf eine Liste vertragen sich nicht
 Die Schutzliste wird an zwei Stellen gepflegt (Rechtsklick in der Update-Liste, Karte in den

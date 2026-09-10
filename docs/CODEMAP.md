@@ -41,7 +41,7 @@ ist reihenfolgeabhängig und nur über SmokeTest und LayoutProbe abgedeckt.
 | `55-Dialogs` | 1530 | Alle Dialoge. Zwei davon sind auch **Bereiche**: `Show-AppSettingsDialog -HostPanel`, `Show-LeistungstextDialog -HostPanel`. Dazu die generische Zeilen-Anordnung (`Set-AppSettingsRowBlock`, `Get-ControlTextWidth/-Height`) und `Show-GraphScopeConsentDialog` |
 | `60-Batch` | 370 | `Invoke-AppUpdateBatch` (Stapellauf über mehrere Apps) + die sieben Design-Tabellen (`$script:darkTheme` …) |
 | `65-Theme` | 795 | `Set-GuiTheme`, `New-Card`, `Get-DimmedColor`, `Set-LabelDimmed`, `Get-ScrollOffsetY`, `Add-SettingRow`, `Update-SettingsLayout`, `Update-StackedCards`, `Set-ActiveTheme` |
-| `70-Runtime` | 646 | `Write-Log` (+ Mutex, Löschfrist), `Update-Status`, Busy-Sperre (`Test-UiBusy`, `Test-OperationRunning`), aufgeschobene Aktionen, `Get-SanitizedLogText` |
+| `70-Runtime` | 912 | `Write-Log` (+ Mutex, Löschfrist), `Update-Status`, Busy-Sperre (`Test-UiBusy`, `Test-OperationRunning`), aufgeschobene Aktionen, `Get-SanitizedLogText`, die **eine** nicht abschaltbare Lauf-Rückfrage (`Get-RunRiskFindings`, `Resolve-RiskyRunChoice`, `Confirm-RiskyAppsInRun`) |
 | `75-UiState` | 1360 | Fenster, Kopfzeile, Seitenleiste (`Add-Section`, `Show-Section`), Statuszeile/Protokollbereich, **Fortschrittsanzeige** (`Show-Progress`/`Set-ProgressValue`/`Hide-Progress`), `Show-GroupFavoriteDialog` |
 | `80-Views` | 2200 | Bereiche **WinGet-Apps**, **Microsoft Store**, **Lokale Pakete** + `Update-StoreLayout`, `Update-StoreAssignLayout`, `Update-LocalPackagesLayout` |
 | `82-TenantApps` | 900 | Bereich **Alle Tenant-Apps**, Zuweisungs-Manager, Entra-Gruppensuche, `Connect-OptionalGraphScope`, `Get-TenantDetectedApps` |

@@ -655,7 +655,7 @@ function Set-AppSettingsRowBlock {
   # rechnete jeder Block seine eigene aus, und untereinander standen die Auswahllisten versetzt.
   param([object[]]$Rows, [int]$X, [int]$Y, [int]$Width, [int]$Gap = 8, [int]$LabelWidth = 0)
   $labelW = if ($LabelWidth -gt 0) { $LabelWidth } else { Get-AppSettingsLabelColumn -Rows $Rows -Width $Width }
-  $y = $Y
+  $rowTop = $Y
   foreach ($row in $Rows) {
     $cells = @($row.Cells)
     $rowH = 0
@@ -668,7 +668,7 @@ function Set-AppSettingsRowBlock {
       $cell = $cells[$i]
       if ($cell.L) {
         $cell.L.Left = $cursor
-        $cell.L.Top = $y + [int](($rowH - $cell.L.Height) / 2)
+        $cell.L.Top = $rowTop + [int](($rowH - $cell.L.Height) / 2)
       }
       if ($i -eq 0) {
         # Eine Zeile ohne Beschriftung, die eine ganze Aussage traegt ("Zeiten in der lokalen
@@ -684,14 +684,14 @@ function Set-AppSettingsRowBlock {
         $want = [int]$cell.W
         $cw = if ($want -gt 0) { [Math]::Min($want, [Math]::Max(60, $available)) } else { [Math]::Max(60, $available) }
         $cell.C.Left = $cursor
-        $cell.C.Top = $y + [int](($rowH - $cell.C.Height) / 2)
+        $cell.C.Top = $rowTop + [int](($rowH - $cell.C.Height) / 2)
         $cell.C.Width = $cw
         $cursor = $cell.C.Right + 24
       }
     }
-    $y += $rowH + $Gap
+    $rowTop += $rowH + $Gap
   }
-  return $y
+  return $rowTop
 }
 
 # Uebernimmt die Haken der SICHTBAREN Zeilen in die gemerkte Auswahl. Muss vor jedem Neuaufbau
@@ -1793,21 +1793,24 @@ function Show-ProductionWarningDialog {
   return @{ Accepted = $accepted; Hide = $hide }
 }
 
-# Die Textschluessel sind Parameter, weil es ZWEI Fragen dieser Form gibt und beide dieselben drei
-# Wege brauchen: geschuetzte Apps und Apps mit geratener Paket-Id. Die Vorgaben sind die
-# geschuetzten - so bleibt jeder bestehende Aufruf unveraendert.
-function Show-ProtectedRunDialog {
+# Die EINE Rueckfrage vor einem Lauf, die sich nicht abschalten laesst.
+#
+# Bis 0.19.0 nahm diese Funktion die Textschluessel als Parameter, weil es drei Fragen dieser Form
+# gab (geschuetzte Apps, geratene Paket-Id, fremder Paketierungstyp). Drei nicht wegdrueckbare
+# Dialoge hintereinander erziehen aber genau zu dem Durchklicken, das sie verhindern sollen -
+# seit 0.19.1 nennt EIN Dialog alle Befunde eines Laufs (Confirm-RiskyAppsInRun in 70-Runtime).
+# Damit sind die Schluessel wieder fest: ein Parameter fuer einen einzigen Aufrufer ist nur eine
+# Stelle mehr, an der zwei Texte auseinanderlaufen koennen.
+function Show-RiskyRunDialog {
   param(
     [Parameter(Mandatory)][int]$Count,
-    [string]$Preview = '',
-    [string]$TitleKey = 'ProtectedRunConfirmTitle',
-    [string]$TextKey = 'ProtectedRunConfirmDialog',
-    [string]$SkipButtonKey = 'ProtectedRunSkipButton',
-    [string]$AllButtonKey = 'ProtectedRunAllButton'
+    [string]$Preview = ''
   )
   $dlg = New-Object System.Windows.Forms.Form
-  $dlg.Text = Get-UiString $TitleKey
-  $dlg.ClientSize = New-Object System.Drawing.Size(720, 420)
+  $dlg.Text = Get-UiString 'RiskyRunConfirmTitle'
+  # Groesser als die drei Vorgaenger (720x420): der zusammengefasste Text nennt bis zu drei
+  # Befundgruppen mit ihrer Begruendung. Er passt trotzdem nicht immer - das Textfeld scrollt.
+  $dlg.ClientSize = New-Object System.Drawing.Size(760, 540)
   $dlg.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterParent
   $dlg.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
   $dlg.MinimizeBox = $false
@@ -1819,44 +1822,44 @@ function Show-ProtectedRunDialog {
   $text.ReadOnly = $true
   $text.ScrollBars = [System.Windows.Forms.ScrollBars]::Vertical
   $text.Location = New-Object System.Drawing.Point(14, 14)
-  $text.Size = New-Object System.Drawing.Size(692, 324)
-  $text.Text = (Get-UiString $TextKey) -f $Count, $Preview
+  $text.Size = New-Object System.Drawing.Size(732, 444)
+  $text.Text = (Get-UiString 'RiskyRunConfirmDialog') -f $Count, $Preview
   # Sonst bekommt das Textfeld den Fokus und markiert seinen ganzen Inhalt blau.
   $text.TabStop = $false
   $dlg.Controls.Add($text)
 
   # Zustandsbeutel im Skript-Bereich: ein Handler, der nach der Rueckkehr dieser Funktion laeuft,
   # haette keine lokalen Variablen mehr (siehe docs/PATTERNS.md).
-  $script:protectedRunChoice = 'cancel'
+  $script:riskyRunChoice = 'cancel'
 
   $skipButton = New-Object System.Windows.Forms.Button
-  $skipButton.Text = Get-UiString $SkipButtonKey
+  $skipButton.Text = Get-UiString 'RiskyRunSkipButton'
   $skipButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
-  $skipButton.Add_Click({ $script:protectedRunChoice = 'skip' })
+  $skipButton.Add_Click({ $script:riskyRunChoice = 'skip' })
   $dlg.Controls.Add($skipButton)
   $dlg.AcceptButton = $skipButton
 
   $allButton = New-Object System.Windows.Forms.Button
   $allButton.Tag = 'btn-secondary'
-  $allButton.Text = Get-UiString $AllButtonKey
+  $allButton.Text = Get-UiString 'RiskyRunAllButton'
   $allButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
-  $allButton.Add_Click({ $script:protectedRunChoice = 'all' })
+  $allButton.Add_Click({ $script:riskyRunChoice = 'all' })
   $dlg.Controls.Add($allButton)
 
   $cancelButton = New-Object System.Windows.Forms.Button
   $cancelButton.Tag = 'btn-secondary'
   $cancelButton.Text = Get-UiString 'CancelButton'
   $cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-  $cancelButton.Add_Click({ $script:protectedRunChoice = 'cancel' })
+  $cancelButton.Add_Click({ $script:riskyRunChoice = 'cancel' })
   $dlg.Controls.Add($cancelButton)
 
   # Breiten GEMESSEN, nicht gesetzt. Vorher standen hier 290/268/114 px - Zahlen, die zu den
-  # damaligen zwei Beschriftungen passten. Mit den Texten der zweiten Frage (geratene Paket-Id) und
-  # in sieben Designs mit unterschiedlichen Schriftarten haelt keine feste Zahl; abgeschnitten waere
-  # sie genau an der Frage, deren falsche Antwort eine App abloest. Von RECHTS nach links gelegt,
-  # damit "Abbrechen" immer am Rand sitzt.
+  # damaligen zwei Beschriftungen passten. Mit wechselnden Beschriftungen und in sieben Designs mit
+  # unterschiedlichen Schriftarten haelt keine feste Zahl; abgeschnitten waere sie genau an der
+  # Frage, deren falsche Antwort eine App abloest. Von RECHTS nach links gelegt, damit "Abbrechen"
+  # immer am Rand sitzt.
   $gap = 10
-  $btnY = 352
+  $btnY = 472
   $buttons = @($cancelButton, $allButton, $skipButton)
   foreach ($b in $buttons) {
     $b.Height = 34
@@ -1892,7 +1895,7 @@ function Show-ProtectedRunDialog {
   # deren falsche Antwort eine selbst paketierte App abloest, ist "kann ich nicht erklaeren" Grund
   # genug, den Ausgang am DialogResult festzumachen statt an einer Variablen allein.
   if ($result -ne [System.Windows.Forms.DialogResult]::OK) { return 'cancel' }
-  return $script:protectedRunChoice
+  return $script:riskyRunChoice
 }
 
 function Show-GraphScopeConsentDialog {

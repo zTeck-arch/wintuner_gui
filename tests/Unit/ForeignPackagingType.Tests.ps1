@@ -20,8 +20,12 @@ BeforeAll {
     'Test-IsNewerVersion', 'Get-ComparableVersionParts', 'Get-MobileAppTypeLabel'))))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '25-WinGetData.ps1' -Name @(
     'Get-NonWin32AppIndex', 'Find-NonWin32NewerVersion'))))
+  # Die Rueckfrage selbst steht seit 0.19.1 nicht mehr hier: sie ist mit den beiden anderen nicht
+  # wegdrueckbaren Fragen zu EINER zusammengefasst (RiskyRunConfirm.Tests.ps1). Diese Datei prueft
+  # den Weg dorthin - Index, Vergleich, Merker, Gruppierung.
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '70-Runtime.ps1' -Name @(
-    'Split-AppsByFlag', 'Split-ForeignNewerApps', 'Resolve-ForeignNewerRunChoice'))))
+    'Get-RunRiskFindings'))))
+  $script:runRiskClasses = @('protected', 'fuzzy', 'foreign')
 
   function New-RawApp {
     param([string]$Name, [string]$Version, [string]$Type, [bool]$Assigned = $false, [string]$Id = '')
@@ -190,7 +194,7 @@ Describe 'Group-UpdateCandidates traegt den Merker mit' {
   }
 }
 
-Describe 'Resolve-ForeignNewerRunChoice' {
+Describe 'Die Einordnung sieht den Merker' {
   BeforeAll {
     function New-App {
       param([string]$Name, [bool]$Foreign = $false, [bool]$Protected = $false)
@@ -202,33 +206,19 @@ Describe 'Resolve-ForeignNewerRunChoice' {
     $script:mixed = @((New-App -Name 'Chrome' -Foreign $true), (New-App -Name '7-Zip'), (New-App -Name 'VLC'))
   }
 
-  It "'all' laesst die Liste unveraendert" {
-    $r = Resolve-ForeignNewerRunChoice -Apps $script:mixed -Choice 'all'
-    $r.Proceed | Should -BeTrue
-    @($r.Apps).Count | Should -Be 3
+  It 'fuehrt genau die betroffene App als Befund' {
+    $f = Get-RunRiskFindings -Apps $script:mixed
+    @($f.Foreign).Count | Should -Be 1
+    @($f.Foreign)[0].Name | Should -Be 'Chrome'
+    @($f.Rest).Count | Should -Be 2
   }
 
-  It "'skip' entfernt GENAU die betroffenen" {
-    $r = Resolve-ForeignNewerRunChoice -Apps $script:mixed -Choice 'skip'
-    @($r.Apps).Count | Should -Be 2
-    @($r.Apps | Where-Object { $_.HasForeignNewer }).Count | Should -Be 0
-    @($r.Skipped).Count | Should -Be 1
-  }
-
-  It "'cancel' laesst nichts laufen" {
-    (Resolve-ForeignNewerRunChoice -Apps $script:mixed -Choice 'cancel').Proceed | Should -BeFalse
-  }
-
-  It "unterscheidet 'nichts mehr uebrig' von 'abgebrochen'" {
-    $r = Resolve-ForeignNewerRunChoice -Apps @((New-App -Name 'Chrome' -Foreign $true)) -Choice 'skip'
-    $r.Proceed | Should -BeFalse
-    $r.Reason | Should -Be 'empty'
-  }
-
-  It 'fragt bei einer GESCHUETZTEN App nicht doppelt' {
-    # Fuer die ist die Frage eine Rueckfrage vorher gestellt worden, und zwar die ernstere.
-    $r = Resolve-ForeignNewerRunChoice -Apps @((New-App -Name 'TeamViewer' -Foreign $true -Protected $true)) -Choice 'skip'
-    @($r.Apps).Count | Should -Be 1
+  It 'fragt eine GESCHUETZTE App nicht zweimal' {
+    # Fuer die zaehlt der ernstere Grund; genannt wird die fremde Fassung in ihrer Zeile trotzdem.
+    $f = Get-RunRiskFindings -Apps @((New-App -Name 'TeamViewer' -Foreign $true -Protected $true))
+    $f.Total | Should -Be 1
+    @($f.Foreign).Count | Should -Be 0
+    @($f.Protected).Count | Should -Be 1
   }
 }
 
@@ -238,17 +228,13 @@ Describe 'Verdrahtung' {
     $script:winget = Get-SourcePartText -Part '25-WinGetData.ps1'
   }
 
-  It 'fragt in BEIDEN Laeufen und rechnet mit der Liste aus dem Ergebnis' {
-    ([regex]::Matches($script:main, 'Confirm-ForeignNewerAppsInRun')).Count | Should -Be 2
-    $script:main | Should -Match '\$checkedApps = @\(\$foreignChoice\.Apps\)'
-    $script:main | Should -Match '\$updatedApps = @\(\$foreignChoice\.Apps\)'
-  }
-
-  It 'geht NICHT durch Confirm-ChangeAction - die Frage ist nicht abschaltbar' {
-    $fn = Get-SourceFunctionText -Part '70-Runtime.ps1' -Name 'Confirm-ForeignNewerAppsInRun'
-    $code = @($fn -split "`r?`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
-    $code | Should -Not -Match 'Confirm-ChangeAction'
-    $code | Should -Not -Match 'Test-ChangeConfirmationsSuppressed'
+  It 'nennt Typ, Version und Zuweisung in der Vorschau der Rueckfrage' {
+    # Ohne diese drei Angaben ist die Frage nicht entscheidbar: "es gibt schon eine andere Fassung"
+    # sagt nicht, ob sie neuer ist und ob sie ueberhaupt jemand bekommt.
+    $fn = Get-SourceFunctionText -Part '70-Runtime.ps1' -Name 'Get-RunRiskAppLine'
+    $fn | Should -Match '\$App\.ForeignNewerType'
+    $fn | Should -Match '\$App\.ForeignNewerVersion'
+    $fn | Should -Match 'ForeignNewerAssignedTag'
   }
 
   It 'liest den Rohbestand nur EINMAL fuer beide Auswertungen' {
@@ -288,8 +274,7 @@ Describe 'Verdrahtung' {
   It 'hat jeden neuen Text in BEIDEN Sprachbloecken' {
     $strings = Get-SourcePartText -Part '15-Strings.ps1'
     foreach ($key in @('UpdateStateForeignNewer', 'UpdateStateForeignNewerAssigned', 'ForeignNewerAssignedTag',
-                       'ForeignNewerRunConfirmTitle', 'ForeignNewerRunConfirmDialog', 'ForeignNewerRunSkipButton',
-                       'ForeignNewerRunAllButton', 'ForeignNewerRunSkippedStatus', 'ForeignNewerRunNothingLeftStatus')) {
+                       'RiskyRunHeadForeign', 'RiskyRunNoteForeign')) {
       ([regex]::Matches($strings, ("(?m)^\s*{0}\s*=" -f [regex]::Escape($key)))).Count |
         Should -Be 2 -Because "$key muss einmal in EN und einmal in DE stehen"
     }

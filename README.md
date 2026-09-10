@@ -386,9 +386,12 @@ Replacing one of these with the plain vendor build installs the same product "em
 
 **Protected does not mean blocked.** The app stays visible in the update list, stays tickable, and still shows that a newer version exists. The only difference is that a run asks about it explicitly — and that question is asked even with **Skip the confirmation prompts before changes in Intune** switched on.
 
+> [!NOTE]
+> **It is one question, not three.** This section and the two that follow describe three kinds of finding — marked as self-packaged, package id merely guessed, a copy of another packaging type already in the tenant. Before a run they arrive **together in one dialog**, grouped by kind, each app with its version and every reason that applies. Up to 0.19.0 these were three dialogs in a row, and an app carrying two findings was asked about twice. The three ways, and the fact that this question cannot be switched off, are unchanged.
+
 Three ways past it, from the most local to the most permanent:
 
-1. **For this one run:** the question offers **Update all, protected included**. The other buttons are **Continue without the protected ones** (the default) and Cancel. Closing the dialog without clicking always means cancel, never "update everything".
+1. **For this one run:** the question offers **Run all of them anyway**. The other buttons are **Continue without these** (the default) and Cancel. Closing the dialog without clicking always means cancel, never "run everything".
 2. **For this one app, permanently:** right-click its row in the update list and remove the protection. The status line confirms with **Protection removed: ...**.
 3. **For a whole pattern:** **Protected apps...** in the update view, or the same list under **Settings → Self-packaged apps**. Select the entry, **Remove selected**. Changes take effect and are saved immediately; the **Save Settings** button is not involved.
 
@@ -408,10 +411,10 @@ Up to 0.18.1 the update scan did **not** see those: it discarded every app type 
 Now:
 
 - The row says so **before** you tick it, in the warning colour: *the tenant already has 152.0.7977.83 as MSI* — and if that copy is assigned, it says that explicitly.
-- Before the run, a separate question lists every affected app with its target version, the existing version and its type. It cannot be dismissed by **Skip confirmations**.
-- Three ways: **Continue without these** (default), **Build as Win32 anyway**, Cancel.
+- Before the run, the question lists every affected app with its target version, the existing version and its type. It cannot be dismissed by **Skip confirmations**.
+- Three ways: **Continue without these** (default), **Run all of them anyway**, Cancel.
 
-**The other copy is never touched** — neither updated nor deleted, because this application cannot take responsibility for a type it does not build. "Build as Win32 anyway" is the right choice when you deliberately want to move to Win32 packaging: the new version is created, you assign it, and the old copy's assignment can then be moved via **All tenant apps → Clean up duplicate assignments**.
+**The other copy is never touched** — neither updated nor deleted, because this application cannot take responsibility for a type it does not build. "Run all of them anyway" is the right choice when you deliberately want to move to Win32 packaging: the new version is created, you assign it, and the old copy's assignment can then be moved via **All tenant apps → Clean up duplicate assignments**.
 
 > [!NOTE]
 > This hint depends on the setting **Also check Win32 apps that carry no WinTuner marker**: only then is the tenant read in full, and only then can foreign packaging types be seen at all. With it off, the log says explicitly that the hint was not possible in this run — so its absence does not mean "there are none".
@@ -434,9 +437,9 @@ In that last case a run may package the **wrong product**, supersede the existin
 So since 0.19.0:
 
 - The row in the update list says so **before** you tick it: *package id guessed from the name*, in the warning colour.
-- Before the run, a separate question lists **every** guessed id with its app name and package id. It cannot be dismissed by **Skip confirmations before changes in Intune** — same as for protected apps.
-- That question offers the same three ways: **Continue without the guessed ones** (default), **Update all, guessed ids included**, Cancel.
-- Protected apps are not asked about twice here; for those the question was already asked one dialog earlier.
+- Before the run, the question lists **every** guessed id with its app name and package id. It cannot be dismissed by **Skip confirmations before changes in Intune** — same as for protected apps.
+- The same three ways: **Continue without these** (default), **Run all of them anyway**, Cancel.
+- No app is asked about twice. If it carries several findings it appears once — under the most serious one — and its line names every reason.
 
 To fix a guessed mapping for good, record the id: right-click the row in the update list and assign it. From then on it counts as your statement and the question stays away.
 

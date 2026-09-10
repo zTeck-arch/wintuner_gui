@@ -4,17 +4,10 @@
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '10-Settings.ps1' -Name @(
     'Test-IsProtectedApp', 'Set-ProtectedAppPatterns',
     'Add-ProtectedAppPattern', 'Remove-ProtectedAppPattern'))))
-  # Split-AppsByFlag ist der gemeinsame Kern beider Lauf-Rueckfragen (geschuetzte Apps, geratene
-  # Paket-Id); Split-ProtectedApps ist nur noch der Aufruf mit 'IsProtected'.
-  . ([scriptblock]::Create((Get-SourceFunctionText -Part '70-Runtime.ps1' -Name @(
-    'Confirm-ProtectedAppsInRun', 'Split-AppsByFlag', 'Split-ProtectedApps',
-    'Resolve-ProtectedRunChoice'))))
-
-  function New-Candidate {
-    param([string]$Name, [bool]$Protected = $false, [string]$From = '1.0', [string]$To = '2.0')
-    [pscustomobject]@{ Name = $Name; CurrentVersion = $From; LatestVersion = $To; IsProtected = $Protected }
-  }
 }
+# Die Rueckfrage vor dem Lauf steht seit 0.19.1 nicht mehr hier: sie ist mit den beiden anderen
+# nicht wegdrueckbaren Fragen zu EINER zusammengefasst und wird in RiskyRunConfirm.Tests.ps1
+# geprueft. Diese Datei prueft nur noch die Werksliste selbst.
 
 Describe 'Test-IsProtectedApp' {
   It 'trifft einen Eintrag ohne Platzhalter genau' {
@@ -112,112 +105,9 @@ Describe 'Add-ProtectedAppPattern und Remove-ProtectedAppPattern' {
   }
 }
 
-Describe 'Confirm-ProtectedAppsInRun' {
-  BeforeEach {
-    $global:TestLog.Clear()
-    $global:ConfirmCalls = 0
-    $global:LastConfirmText = ''
-    # Standardantwort 'all': das ist der Weg, der dem frueheren "Ja" entspricht.
-    $global:ConfirmAnswer = 'all'
-    # Gemockt wird der EIGENE Dialog, nicht mehr Confirm-ChangeAction. Dass diese Frage nicht
-    # unterdrueckbar ist, ergibt sich seit dem Umbau daraus, dass sie gar nicht mehr durch
-    # Confirm-ChangeAction laeuft - geprueft wird das eine Ebene tiefer, in ProtectedRunChoice.Tests.
-    Set-Item -Path function:global:Show-ProtectedRunDialog -Value {
-      param([int]$Count, [string]$Preview)
-      $global:ConfirmCalls++
-      $global:LastConfirmText = ((Get-UiString 'ProtectedRunConfirmDialog') -f $Count, $Preview)
-      return $global:ConfirmAnswer
-    }
-    # Der Dialogtext MUSS die beiden Platzhalter behalten, sonst prueft der Test unten nur, dass ein
-    # Schluesselname zurueckkommt - und haette auch dann bestanden, wenn die Namen nie im Dialog stehen.
-    Set-Item -Path function:global:Get-UiString -Value {
-      param([string]$Key)
-      if ($Key -eq 'ProtectedRunConfirmDialog') { return "COUNT={0}|LIST={1}" }
-      return "UI:$Key"
-    }
-  }
+Describe 'Das Urteil faellt einmal, im Zeilenmodell' {
 
-  AfterAll {
-    Remove-Item -Path function:global:Show-ProtectedRunDialog -ErrorAction SilentlyContinue
-    Remove-Item -Path function:global:Get-UiString -ErrorAction SilentlyContinue
-  }
-
-  It 'fragt gar nicht, wenn keine geschuetzte App dabei ist' {
-    # Der Normalfall darf keinen zusaetzlichen Klick kosten, sonst wird die Rueckfrage zur Gewohnheit
-    # und damit wirkungslos.
-    $r = Confirm-ProtectedAppsInRun -Apps @((New-Candidate -Name 'Google Chrome'))
-    $r.Proceed | Should -BeTrue
-    @($r.Apps).Count | Should -Be 1
-    $global:ConfirmCalls | Should -Be 0
-  }
-
-  It 'fragt immer, wenn eine geschuetzte App dabei ist' {
-    # Die zentrale Regel dieser Funktion: bei SuppressChangeConfirmations=True darf sie NICHT
-    # lautlos werden - also genau bei dem Benutzer, dessen Lauf sonst voellig ohne Rueckfrage
-    # startet. Sichergestellt wird das seit dem Umbau dadurch, dass hier ein eigener Dialog steht
-    # statt Confirm-ChangeAction.
-    [void](Confirm-ProtectedAppsInRun -Apps @((New-Candidate -Name 'Splashtop Streamer' -Protected $true)))
-    $global:ConfirmCalls | Should -Be 1
-  }
-
-  It 'nennt die betroffenen Apps im Dialog' {
-    [void](Confirm-ProtectedAppsInRun -Apps @(
-      (New-Candidate -Name 'Google Chrome'),
-      (New-Candidate -Name 'Splashtop Streamer' -Protected $true -From '3.5' -To '3.6')))
-    $global:LastConfirmText | Should -Match 'Splashtop Streamer'
-    $global:LastConfirmText | Should -Match '3\.5 -> 3\.6'
-    $global:LastConfirmText | Should -Not -Match 'Google Chrome'
-  }
-
-  It 'nennt sie auch namentlich im Protokoll' {
-    # "3 geschuetzte Apps" beantwortet im Nachhinein nicht, WELCHE freigegeben wurden - und genau
-    # das ist die Frage nach einem Fehlgriff.
-    [void](Confirm-ProtectedAppsInRun -Apps @((New-Candidate -Name 'Keeper Password Manager' -Protected $true)))
-    ($global:TestLog -join "`n") | Should -Match 'Keeper Password Manager'
-  }
-
-  It 'bricht ab, wenn der Benutzer abbricht' {
-    $global:ConfirmAnswer = 'cancel'
-    $r = Confirm-ProtectedAppsInRun -Apps @((New-Candidate -Name 'Splashtop Streamer' -Protected $true))
-    $r.Proceed | Should -BeFalse
-    ($global:TestLog -join "`n") | Should -Match 'canceled at the protected-apps confirmation'
-  }
-
-  It 'laesst die geschuetzten aus und den Rest laufen' {
-    # Der dritte Weg, und der haeufigste reale Fall: zehn Apps angehakt, zwei davon geschuetzt.
-    $global:ConfirmAnswer = 'skip'
-    $r = Confirm-ProtectedAppsInRun -Apps @(
-      (New-Candidate -Name 'Google Chrome'),
-      (New-Candidate -Name 'Splashtop Streamer' -Protected $true))
-    $r.Proceed | Should -BeTrue
-    @($r.Apps).Count | Should -Be 1
-    @($r.Apps)[0].Name | Should -Be 'Google Chrome'
-    ($global:TestLog -join "`n") | Should -Match 'Protected apps left out of this run'
-    # Auch hier namentlich: welche wurden ausgelassen, ist im Nachhinein dieselbe Frage.
-    ($global:TestLog -join "`n") | Should -Match 'Splashtop Streamer'
-  }
-
-  It 'kommt mit einer leeren Auswahl aus' {
-    $r = Confirm-ProtectedAppsInRun -Apps @()
-    $r.Proceed | Should -BeTrue
-    $global:ConfirmCalls | Should -Be 0
-  }
-}
-
-Describe 'Der Riegel haengt in beiden Update-Laeufen' {
-  BeforeAll { $script:mainText = Get-SourcePartText -Part '90-Main.ps1' }
-
-  It 'sichert den Lauf ueber die markierten Zeilen ab' {
-    $script:mainText | Should -Match '\$protectedChoice = Confirm-ProtectedAppsInRun -Apps @\(\$checkedApps\)'
-  }
-
-  It 'sichert auch "Alle aktualisieren" ab' {
-    # Der Weg, auf dem eine geschuetzte App am ehesten ungesehen mitlaeuft - niemand liest dabei
-    # jede Zeile. Nur den markierten Lauf abzusichern haette genau die Luecke gelassen.
-    $script:mainText | Should -Match 'Confirm-ProtectedAppsInRun -Apps @\(\$updatedApps\)'
-  }
-
-  It 'faellt das Urteil einmal im Zeilenmodell' {
+  It 'setzt IsProtected in New-UpdateCandidateModel und nirgends sonst' {
     # Wuerde jede Anzeigestelle selbst rechnen, koennten Zeilenfarbe und Rueckfrage auseinanderlaufen -
     # die Zeile saehe harmlos aus und der Lauf fragte trotzdem, oder schlimmer: umgekehrt.
     $fn = Get-SourceFunctionText -Part '30-UpdateTargets.ps1' -Name 'New-UpdateCandidateModel'

@@ -1179,7 +1179,15 @@ function Connect-OptionalGraphScope {
   )
   # Mehrere Berechtigungen in EINEM Anmeldevorgang: zwei Fenster hintereinander waeren bei der
   # Anmeldung zwei Unterbrechungen fuer dieselbe Entscheidung.
-  $scope = @($Scope | Where-Object { $_ }) -join ' '
+  #
+  # $scopeKey und NICHT $scope: PowerShell unterscheidet keine Gross- und Kleinschreibung, $scope
+  # war also derselbe Behaelter wie der Parameter $Scope. Die Liste wurde damit durch die
+  # zusammengefuegte ZEICHENKETTE ersetzt, und die Pruefung "traegt die Sitzung alle Berechtigungen?"
+  # weiter unten verglich danach "Group.Read.All DeviceManagementManagedDevices.Read.All" als EINEN
+  # Eintrag gegen die Scope-Liste. Bei mehr als einer Berechtigung schlug sie deshalb IMMER fehl -
+  # der Weg "direkt mit erhoehten Rechten anmelden" meldete sich bei jedem Aufruf neu an. Gefunden
+  # am 10.09.2026 durch die StaticCheck-Regel gegen genau diesen Schatten.
+  $scopeKey = @($Scope | Where-Object { $_ }) -join ' '
   $context = $null
   try { $context = Get-MgContext -ErrorAction SilentlyContinue } catch { $context = $null }
   $tenantDomain = $script:currentUserUpn.Split('@')[1]
@@ -1191,7 +1199,7 @@ function Connect-OptionalGraphScope {
   # Sitzung selbst muss den Scope aber weiterhin wirklich tragen.
   # Gemerkt wird je Tenant UND je Berechtigung - "Gruppen darf ich lesen" sagt nichts darueber, ob
   # auch erkannte Apps erlaubt sind.
-  $memoryKey = ("{0}|{1}" -f $tenantDomain, $scope)
+  $memoryKey = ("{0}|{1}" -f $tenantDomain, $scopeKey)
   $wanted = @($Scope | Where-Object { $_ })
   $hasAll = $true
   foreach ($s in $wanted) { if (-not ($context -and ($context.Scopes -contains $s))) { $hasAll = $false } }
