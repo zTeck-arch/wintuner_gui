@@ -301,6 +301,42 @@ Assert-True ($shownWithDialog.Count -eq 0) (
   "Add_Shown handler opens a MessageBox without a Test-UnattendedRun guard ({0} site(s)); the layout probe shows the window, so an unattended run would wait for the click:`r`n  {1}" -f
     $shownWithDialog.Count, ($shownWithDialog -join "`r`n  "))
 
+# Keine NEUE Frage per roher MessageBox - eine Sperrklinke, kein Verbot.
+#
+# Ein reiner Hinweis (Knopfsatz OK) per MessageBox ist in Ordnung; davon gibt es 72, und sie richten
+# keinen Schaden an. Eine FRAGE ist etwas anderes: `Confirm-ChangeAction` (70-Runtime) schreibt sie
+# ins Protokoll und wendet die Einstellung "Rueckfragen ueberspringen" an. Eine Frage, die direkt
+# ueber die MessageBox geht, tut beides nicht - im Nachhinein steht dann nirgends, was gefragt und
+# was geantwortet wurde.
+#
+# Die 25 vorhandenen Stellen sind Altbestand und teils bewusst so (eine Loeschung im Tenant DARF
+# nicht unterdrueckbar sein - siehe 82-TenantApps). Sie hier alle umzubauen waere kein Aufraeumen,
+# sondern eine Verhaltensaenderung an 25 Rueckfragen: eine, die unterdrueckbar wird, ist eine
+# Sicherheitsluecke, und eine, die es nicht mehr ist, eine Zumutung. Das ist eine Entscheidung je
+# Stelle und keine, die eine Prueffregel treffen kann.
+#
+# Deshalb eine Sperrklinke: die Zahl darf nicht STEIGEN. Wer eine neue Frage braucht, nimmt
+# `Confirm-ChangeAction` (mit `-AlwaysAsk`, wenn sie nicht abschaltbar sein soll) - oder er hebt
+# diese Zahl bewusst an und schreibt dazu, warum. Sinkt sie, wird die Zahl nachgezogen; sonst
+# rostet die Klinke fest und der Bestand wird nie kleiner.
+$messageBoxQuestionBaseline = 25
+$messageBoxQuestions = [Collections.Generic.List[string]]::new()
+foreach ($call in $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+    ([string]$node.Expression) -match 'MessageBox' -and ([string]$node.Member.Value) -eq 'Show'
+  }, $true)) {
+  # Ein Knopfsatz ausser OK macht aus dem Hinweis eine Frage. Ohne Angabe ist es OK - die Vorgabe.
+  if ($call.Extent.Text -notmatch 'MessageBoxButtons\]::(?!OK\b)\w+') { continue }
+  $messageBoxQuestions.Add(('line {0}' -f $call.Extent.StartLineNumber))
+}
+Assert-True ($messageBoxQuestions.Count -le $messageBoxQuestionBaseline) (
+  "A new question is asked through a raw MessageBox: {0} site(s), baseline is {1}. Such a question is neither written to the log nor covered by 'skip confirmations' - use Confirm-ChangeAction (with -AlwaysAsk when it must not be suppressible). If the new site is deliberate, raise `$messageBoxQuestionBaseline in tests/StaticChecks.ps1 and say why." -f
+    $messageBoxQuestions.Count, $messageBoxQuestionBaseline)
+Assert-True ($messageBoxQuestions.Count -ge $messageBoxQuestionBaseline) (
+  "Raw MessageBox questions are down to {0}, the ratchet still says {1}. Lower `$messageBoxQuestionBaseline in tests/StaticChecks.ps1 so the count cannot creep back up." -f
+    $messageBoxQuestions.Count, $messageBoxQuestionBaseline)
+
 # Die eigenen Datenpfade duerfen nur ueber die zwei Wurzelfunktionen laufen.
 #
 # [Environment]::GetFolderPath('ApplicationData') ignoriert $env:APPDATA. Die Prueflaeufer setzten
@@ -613,6 +649,49 @@ foreach ($call in $ast.FindAll({
 Assert-True ($uiThreadDeploys.Count -eq 0) (
   "Deploy-WtWin32App is called outside Invoke-WtDeployOffThread ({0} site(s)); on the UI thread the upload freezes the window and the module's logger floods the console:`r`n  {1}" -f
     $uiThreadDeploys.Count, ($uiThreadDeploys -join "`r`n  "))
+
+# Eine macOS-App wird an GENAU EINER Stelle angelegt.
+#
+# Das Gegenstueck zur Regel darueber, fuer den Weg, den das WinTuner-Modul nicht kennt. Der POST auf
+# /mobileApps mit '#microsoft.graph.macOSPkgApp' legt eine App AN und ist nicht idempotent; er
+# braucht deshalb -MaxRetries 0, die Marke im Notizfeld und includedApps als Erkennungsregel. Eine
+# zweite Anlegestelle waere eine, die eines davon vergisst - und eine macOS-App ohne includedApps
+# erkennt Intune auf dem Geraet NIE, installiert sie also bei jeder Pruefung neu. Das faellt unter
+# Windows durch nichts auf: es gibt keinen Mac in dieser Pruefkette.
+$macAppCreators = [Collections.Generic.List[string]]::new()
+foreach ($literal in $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+    $node.Value -eq '#microsoft.graph.macOSPkgApp'
+  }, $true)) {
+  $scope = Get-EnclosingFunctionName -Node $literal
+  # New-MacOsPkgApp legt an; die beiden anderen PATCHEN eine vorhandene App, was idempotent ist.
+  if ($scope -in 'New-MacOsPkgApp', 'Invoke-MacOsPkgDeploy', 'Update-MacOsPkgAppContent') { continue }
+  $macAppCreators.Add(('line {0}: used in {1}' -f $literal.Extent.StartLineNumber, $(if ($scope) { $scope } else { 'the script body' })))
+}
+Assert-True ($macAppCreators.Count -eq 0) (
+  "'#microsoft.graph.macOSPkgApp' is used outside New-MacOsPkgApp/Invoke-MacOsPkgDeploy/Update-MacOsPkgAppContent ({0} site(s)); a second creation site is one that forgets -MaxRetries 0, the notes marker or includedApps - and an app without includedApps is never detected on the device, so it reinstalls on every check:`r`n  {1}" -f
+    $macAppCreators.Count, ($macAppCreators -join "`r`n  "))
+
+# Die Verschluesselung des Inhalts bleibt an EINER Stelle.
+#
+# fileEncryptionInfo ist die Nutzlast, mit der Intune das Hochgeladene wieder aufmacht: AES-Schluessel,
+# IV, MAC und der SHA256 des KLARTEXTS. Jedes Feld darin kann man falsch befuellen, ohne dass Graph
+# widerspricht - der Fehler zeigt sich erst, wenn ein Geraet das Paket entschluesseln will. Deshalb
+# wird dieses Objekt nur dort gebaut, wo auch verschluesselt wird (Teil 42), und nirgends sonst.
+$encryptionPayloads = [Collections.Generic.List[string]]::new()
+foreach ($literal in $ast.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+    $node.Value -eq 'fileEncryptionInfo'
+  }, $true)) {
+  $scope = Get-EnclosingFunctionName -Node $literal
+  if ($scope -eq 'Publish-MobileAppContentVersion') { continue }
+  $encryptionPayloads.Add(('line {0}: used in {1}' -f $literal.Extent.StartLineNumber, $(if ($scope) { $scope } else { 'the script body' })))
+}
+Assert-True ($encryptionPayloads.Count -eq 0) (
+  "'fileEncryptionInfo' is built outside Publish-MobileAppContentVersion ({0} site(s)); every field in it can be filled wrongly without Graph objecting, and the error only surfaces when a device tries to decrypt the package:`r`n  {1}" -f
+    $encryptionPayloads.Count, ($encryptionPayloads -join "`r`n  "))
 
 # Jeder Modulparameter, den der Code namentlich bindet, muss im Startvertrag stehen.
 #

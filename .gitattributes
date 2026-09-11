@@ -10,3 +10,13 @@
 
 # Checksums are consumed by tooling that expects exactly the bytes the release workflow wrote.
 *.sha256 -text
+
+# Installer packages are binary and must survive byte for byte.
+#
+# Gemessen am 11.09.2026 an tests/Fixtures/sample-app.pkg: die Datei enthaelt KEIN Nullbyte, also
+# haelt die Auto-Erkennung von `text=auto` sie fuer Text. Beim Einchecken faellt das nicht auf
+# (nichts zu normalisieren), beim AUSCHECKEN macht `eol=crlf` aber aus jedem der 7 rohen
+# LF-Bytes ein CRLF. Die Datei waere 7 Byte groesser, und jeder Offset im xar-Inhaltsverzeichnis
+# zeigte daneben - ein Fixture, das im Arbeitsverzeichnis des Autors funktioniert und nach einem
+# frischen clone nicht mehr.
+*.pkg binary

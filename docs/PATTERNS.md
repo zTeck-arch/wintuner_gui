@@ -51,6 +51,40 @@ wirft „Argument types do not match". In einer Funktion mit `catch { Write-LogD
 nirgends auf — außer im gerenderten Bild (sieben Karten lagen übereinander). Elemente lieber in
 einer Schleife holen.
 
+### Eine Liste aus einer Funktion fällt bei EINEM Element zum Skalar zusammen
+
+`return $list` auf einer `List[hashtable]` entfaltet PowerShell beim Zurückgeben. Bei zwei Treffern
+bekommt der Aufrufer ein Array, bei **einem** bekommt er das Hashtable selbst — und dann liefert
+`.Count` die Zahl seiner **Schlüssel** (gemessen: 8) und `[0]` greift ins Leere.
+
+Gefunden am 11.09.2026 in `Select-MacOsPkgCasks`: mit genau einem passenden Katalogeintrag wäre
+jeder Aufrufer falsch gelaufen. Der Fix ist das vorangestellte Komma, das den Rückgabewert als
+**ein** Objekt durchreicht:
+
+```powershell
+return , $out.ToArray()
+```
+
+Die Alternative — jeden Aufrufer in `@(…)` zu wickeln — verlagert die Verantwortung an die falsche
+Stelle: vergisst sie einer, ist es genau derselbe Fehler, nur weiter weg von seiner Ursache.
+
+### `Set-AppSettingsRowBlock` streckt, was keine Breite nennt
+
+Eine Zelle ohne `W` bekommt die **ganze Restbreite** der Zeile. Wer daneben noch etwas setzen will
+und dessen `Left` selbst ausrechnet, legt es unter das gestreckte Element. Genau so passiert: die
+Auswahlliste lag über ihrem Nachbarn, in allen sieben Designs, zwei Fenstergrößen und beiden
+Sprachen — acht Befunde aus einer Ursache.
+
+Zwei Elemente in einer Zeile sind **zwei Zellen**, jede mit ihrer Breite:
+
+```powershell
+@{ Cells = @(
+    @{ L = $label; C = $combo;  W = 250 }
+    @{ C = $groupBox;  W = 180 }
+    @{ C = $favButton; W = 96 }
+  ) }
+```
+
 ### Weitere Kleinigkeiten
 - `$args` ist automatisch und darf in einem Handler nicht zugewiesen werden.
 - Befehlsaufruf in einem Methodenaufruf braucht eigene Klammern: `$list.Add((Get-UiString 'X'))`.
@@ -309,7 +343,26 @@ Eine StaticCheck-Regel fängt das jetzt: eine Zuweisung an einen Namen, der sich
 derselben Funktion **nur in der Schreibweise** unterscheidet. Gleiche Schreibweise bleibt erlaubt —
 einen Parameter absichtlich zu überschreiben ist ein gängiges Mittel. Wer die Regel selbst anfasst:
 der Vergleich muss `-ceq` benutzen, denn `-eq` ist ebenfalls unempfindlich gegen Groß- und
-Kleinschreibung und die Regel meldete damit nie etwas.
+Kleinschreibung und die Regel meldete damit nie etwas. Sie hat gleich beim Aufteilen von
+`Update-SingleApp` noch einmal zugeschlagen — ein `$result = $Result` am Anfang der neuen Funktion.
+
+### Ein Steuerelement, das niemand in den Zustandsbeutel legt, liegt für immer still
+Der App-Einstellungen-Editor baut seine Steuerelemente an zwei Stellen (`Show-AppSettingsDialog` für
+Rahmen und Liste, `Add-AppSettingsAssignmentControls` für die 25 Zuweisungseinstellungen) und legt
+beides in **einen** Beutel — `$script:appSettingsUi`. Die gesamte Anordnung und jedes Ereignis lesen
+nur von dort. Damit hängt alles an einer Menge von Namen, die nirgends deklariert ist.
+
+Am 10.09.2026 traf beim Herausziehen eine Textersetzung **zwei** Stellen und löschte den
+`return`-Block des Erbauers. Er gab danach nichts zurück, 22 Einträge fehlten im Beutel, und die
+Anordnung ließ die Steuerelemente auf ihren Konstruktionspositionen liegen: drei Überlappungen in
+zwei Sprachen. Kein Parserfehler, kein Test rot — gefunden hat es allein die Layout-Probe, und die
+braucht knapp zwei Minuten. Der Grund, warum nichts auffällt: `$null.Left = 12` wirft nicht, es
+passiert einfach nichts.
+
+`AppSettingsBagContract.Tests.ps1` prüft den Vertrag jetzt in Millisekunden, in beide Richtungen:
+jeder Name, den die Anordnung liest, muss von einem der beiden Erbauer geliefert werden — und jedes
+gelieferte Steuerelement muss auch angeordnet werden. Wer den Editor erweitert, fügt den Namen an
+beiden Enden hinzu; vergisst er ein Ende, sagt es diese Datei und nicht die Probe.
 
 ### Zwei Schreiber auf eine Liste vertragen sich nicht
 Die Schutzliste wird an zwei Stellen gepflegt (Rechtsklick in der Update-Liste, Karte in den
@@ -329,6 +382,37 @@ Tenants antworten auf die ersten zwei mit HTTP 400, also kostete jede Sonde drei
 `$script:installProbeSource` merkt sich die Quelle, die geantwortet hat, und fragt sie zuerst — die
 Regeln bleiben: eine Null muss von einer zweiten Quelle bestätigt sein, unbekannt blockiert jedes
 Löschen. Beim Tenant-Wechsel wieder offen (`Clear-InstallProbeSource`).
+
+### Ein Test, der aus dem falschen Grund grün ist, ist schlimmer als ein roter
+
+Beim Bau des macOS-Katalogs (11.09.2026) legte eine Pester-Prüfung das Cask-Array in einer
+`$script:`-Variablen ab. Dort kam ein Array **mit einem Element** an, das seinerseits das eigentliche
+Array war. `.Count` sagte `1` — aber
+
+```powershell
+$liste | Where-Object { $_.token -eq 'google-chrome' }
+```
+
+fand trotzdem etwas, weil PowerShell `$_.token` auf einem Array zur **Eigenschaftsentfaltung**
+auflöst und alle Token zurückgibt. Die Prüfung „Chrome ist ein DMG" wurde damit grün, ohne irgendetwas
+geprüft zu haben.
+
+Die Lehre ist nicht „Arrays sind heikel", sondern: **eine Prüfung soll auf einer Zahl bestehen, die
+sich nicht verstecken kann.** Was abgeleitet werden kann, wird im `BeforeAll` abgeleitet; die `It`s
+vergleichen dann Zählwerte und Wahrheitswerte, keine Sammlungen unbekannter Form. Ein grüner Haken
+sieht aus wie ein Beweis — deshalb muss er einer sein.
+
+### Der Getter von `HMAC.Key` gibt eine Kopie zurück
+
+```powershell
+$hmac.Key = [byte[]]::new(32)
+[System.Security.Cryptography.RandomNumberGenerator]::Fill($hmac.Key)   # FALSCH
+```
+
+`Fill` bekommt die Kopie, der echte Schlüssel bleibt auf 32 Nullbytes. Der MAC verifiziert
+anschließend tadellos — er ist nur mit einem Schlüssel gebildet, den jeder kennt, und **nichts**
+meldet einen Fehler. Erst füllen, dann zuweisen. Dasselbe gilt für jede .NET-Eigenschaft, die ein
+Feld als Kopie herausgibt.
 
 ### Einen Zwischenspeicher einmal je Schleife schreiben, nicht einmal je Element
 `Save-VersionDiskCache` stand **in** `Get-WingetVersions` und war dort die einzige Aufrufstelle. Eine

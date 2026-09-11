@@ -1,5 +1,106 @@
 ﻿# Changelog
 
+## 0.20.0 – macOS-Pakete und eine Versionsgrenze, die sich durchsetzt
+
+Zwei Neuerungen, die nichts miteinander zu tun haben außer dem Datum: die Oberfläche kann jetzt
+macOS-Installationspakete nach Intune bringen, und die Obergrenze für gleichzeitig vorgehaltene
+App-Versionen kann sich gegen gemeldete Installationen durchsetzen.
+
+> [!NOTE]
+> **Zwei Bestätigungen kommen nach dem Update einmal wieder** — beide hängen absichtlich an der
+> Versionsnummer, und in dieser Fassung ist das besonders angebracht, weil zwei Schalter
+> dazugekommen sind, die Löschungen beziehungsweise Uploads freigeben:
+> - **„Rückfragen vor Änderungen in Intune überspringen"** muss erneut bestätigt werden.
+> - Der **Produktivhinweis** beim Start erscheint noch einmal, sofern Sie ihn nicht dauerhaft
+>   abgestellt haben.
+
+### Die Versionsgrenze kann sich durchsetzen
+
+**Aus dem Betrieb (11.09.2026).** Gewünscht war: „höchstens drei Fassungen einer App gleichzeitig,
+auch wenn einzelne Geräte noch alte tragen". Die Obergrenze selbst gab es bereits — *Einstellungen →
+Versionen je Paket behalten*. Sie setzte sich nur nie durch: eine Fassung über der Grenze blieb für
+immer stehen, sobald **ein** Gerät sie noch als installiert meldete. Der Schalter aus 0.19.0 half
+dagegen nur bei Geräten, die seit Tagen still sind, und nur beim Aufräumen von Hand.
+
+- **Neu: „Die Grenze von N Version(en) wiegt schwerer als gemeldete Installationen".** Ist sie
+  gesetzt, wird eine Fassung über der Grenze auch dann gelöscht, wenn Geräte sie noch tragen — und
+  zwar beim Aufräumen von Hand **und** im automatischen Lauf nach einem Update. Eine Grenze, die nur
+  auf Knopfdruck hält, ist keine. Vorgabe ist **aus**, wie bei jeder Einstellung, die Löschungen
+  freigibt.
+
+> [!IMPORTANT]
+> **Was dabei wirklich passiert:** Eine gelöschte Intune-App wird auf dem Gerät **nicht**
+> deinstalliert. Die Software bleibt, wo sie ist. Intune verliert für dieses App-Objekt den Bericht,
+> die Zuweisung und die Möglichkeit zur Neuinstallation. Genau deshalb ist „noch installiert" kein
+> Schaden, den die Löschung anrichtet, sondern eine Meldung, die verloren geht.
+
+- **Drei Riegel bleiben.** *Zuweisungen* schützen eine Fassung weiterhin — das ist ein anderer
+  Verlust, weil die betroffenen Geräte die App dann gar nicht mehr bekämen. Eine Fassung, deren
+  Zustand sich **nicht lesen** lässt, wird nie gelöscht: die Grenze überstimmt eine Meldung, nicht
+  ihr Fehlen. Und ohne den Schalter ändert sich am bisherigen Verhalten nichts.
+- **Das Protokoll schreibt den Fall aus.** Wird trotz gemeldeter Installationen gelöscht, nennt die
+  Zeile die Zahl der betroffenen Geräte, den jüngsten Gerätekontakt und ausdrücklich, dass die
+  Software dort installiert bleibt. Die Einstellungsübersicht beim Start nennt den Schalter ebenfalls
+  im Klartext statt als „True" am Zeilenende.
+
+**Was die Grenze nicht erreicht:** Das Aufräumen gruppiert über eine belastbare Paket-Id. Apps ohne
+eine — etwa handgebaute Kundensoftware ohne WinGet-Id — werden weiterhin vollständig übersprungen
+(mit Protokollzeile). Für sie gilt keine Obergrenze, mit oder ohne diesen Schalter.
+
+**Unter der Haube:** Die Entscheidung ist als eigene Funktion herausgelöst und einzeln geprüft
+(`Get-VersionCapDeleteVerdict`, 11 neue Prüfungen) — das dritte Löschurteil dieser Anwendung neben
+den beiden aus 0.19.1, und wie diese eine reine Rechnung ohne Tenant.
+
+### macOS-Pakete (Beta)
+
+**Neu (11.09.2026).** Die Oberfläche kann jetzt macOS-Installationspakete (`.pkg`) in Intune
+anlegen — als eigener Bereich **macOS (PKG) – Beta** unter *Bereitstellen*.
+
+> [!WARNING]
+> **Warum Beta, und was das hier bedeutet.** Alles auf der Windows-Seite dieses Weges ist durch
+> Tests gedeckt (72 neue Prüfungen). Das **Ergebnis** nicht: ob ein Paket auf einem Mac wirklich
+> installiert, lässt sich von Windows aus nicht feststellen, und an der Prüfkette dieses Projekts
+> nimmt kein Mac teil. Die erste Bereitstellung ist ein Versuch, keine Routine.
+
+- **Aus dem Katalog oder von Hand.** Der Katalog kommt von Homebrew, gefiltert auf die Einträge, die
+  wirklich ein `.pkg` liefern (gemessen am 11.09.2026: 378 von 7712 Casks, davon 334 mit
+  veröffentlichter Prüfsumme — darunter die Microsoft-Familie, Zoom, TeamViewer, Citrix Workspace).
+  Weil Homebrew die großen Browser als DMG führt, gibt es daneben eine kurze, von Hand geprüfte
+  Liste mit Hersteller-Adressen; **Google Chrome** und **Mozilla Firefox** sind darüber verfügbar.
+  Die Spalte *Quelle* sagt bei jedem Eintrag, woher er stammt, die Spalte *Prüfsumme*, ob der
+  Download gegen eine veröffentlichte geprüft werden kann.
+- **Aktualisieren ersetzt den Inhalt, statt eine zweite App anzulegen.** Ablösung gibt es für
+  macOS-PKG-Apps nicht — für macOS ist das aber kein Notbehelf, sondern der übliche Weg: dieselbe
+  App-ID, dieselben Zuweisungen, dieselbe Statistik, neuer Inhalt. Erkannt wird die vorhandene App
+  über eine Marke im Notizfeld, **nicht** über den Anzeigenamen (den kann jemand im Portal geändert
+  haben, und dann entstünde eine zweite App). Die Zuweisungen bleiben dabei unangetastet.
+- **Die Version für die Erkennung ist eine Wahl, keine Annahme.** Ein Paket führt zwei Versionen —
+  Chrome etwa `153.0.8010.37` als `CFBundleShortVersionString` und `8010.37` als `CFBundleVersion`.
+  Welche Intune vergleicht, lässt sich ohne Mac nicht messen, deshalb werden beide ausgelesen und
+  die Karte lässt umschalten. Steht die falsche darin, installiert Intune die App bei jeder Prüfung
+  neu, statt sie zu erkennen.
+- **Das Paket wird gelesen, nicht geraten.** Bundle-ID, beide Versionen, die enthaltenen Bundles und
+  die Mindestversion von macOS kommen aus der `.pkg` selbst. Dabei werden nur Kopf, Inhaltsverzeichnis
+  und zwei Einträge von je unter 2 KB gelesen — ein 252-MB-Chrome-Paket in 5 ms, der Payload wird nie
+  angefasst. Bringt das Paket Installationsskripte mit (die als root laufen), sagt die Karte das.
+- **Eine `.pkg` wird wie eine Datei aus dem Internet behandelt.** Die Größenangaben im Dateikopf
+  werden begrenzt, bevor Speicher belegt wird, das Entpacken hat eine Obergrenze, und das XML wird
+  **ohne DTD-Verarbeitung** gelesen — sonst wäre ein präpariertes Paket ein Weg, die Anwendung
+  Dateien nachladen zu lassen.
+
+**Was dieser Bereich bewusst NICHT kann:** kein DMG (das ist ein anderer App-Typ und ein anderes
+Format), keine Zuweisungseinstellungen wie bei Win32 (Intunes Einstellungsobjekt dort ist hart an
+Win32 gebunden), kein Stapellauf über mehrere Apps.
+
+**Unter der Haube:** der Upload nach Intune ist erstmals selbst geschrieben — das WinTuner-Modul
+kennt ausschließlich Win32. Verschlüsselung (AES-256-CBC + HMAC, Schema ProfileVersion1),
+Blockupload in den Azure-Blob mit Erneuerung der Adresse bei Ablauf, `commit` und Zustandsautomat
+liegen in einem Teil, den zwei neue statische Prüfregeln dort festhalten. Drei Fehler, die kein
+Mensch auf dem Gerät je hätte zuordnen können, hat die Prüfkette dabei gefangen: ein MAC-Schlüssel
+aus lauter Nullbytes (der Getter von `HMAC.Key` gibt eine Kopie zurück), ein letzter Datenblock, der
+nicht als Rohbytes verschickt worden wäre, und ein Rückgabewert, der bei genau einem Treffer zum
+Skalar zusammenfiel.
+
 ## 0.19.1 – Eine Rückfrage statt vier
 
 **Nachtrag zu 0.19.0 (10.09.2026)**
@@ -8,7 +109,10 @@
 
 - **Alle Befunde eines Laufs stehen jetzt in EINER Rückfrage.** Sie nennt jede betroffene App mit Version und **allen** zutreffenden Gründen, gruppiert nach dem, was den Befund auslöst: als selbst paketiert markiert, Paket-Id aus dem Namen geraten, im Tenant liegt schon eine mindestens so neue Fassung eines anderen Paketierungstyps. Die drei Wege sind unverändert — „Ohne diese fortfahren" (Vorgabe), „Trotzdem alle bearbeiten", Abbrechen — und ebenso, dass „Rückfragen überspringen" sie nicht abschaltet. Ohne Befund kostet ein Lauf weiterhin keinen zusätzlichen Klick.
 - **Behoben: eine App mit zwei Befunden wurde zweimal gefragt.** Die Prüfung auf „geratene Paket-Id" und die auf „Fassung anderen Typs vorhanden" schlossen beide nur geschützte Apps aus, **nicht sich gegenseitig**. Eine App, die beides trug, stand deshalb in zwei aufeinanderfolgenden Dialogen — mit denselben drei Knöpfen und ohne neue Aussage. Jetzt gehört jede App zu genau einer Gruppe (nach Gewicht: geschützt vor geratener Id vor fremdem Typ), ihre Zeile nennt aber weiterhin alle Gründe.
+- **Behoben: das Protokoll schwieg, wenn eine alte Fassung wegen einer eigenen Zuweisung stehen blieb.** Beim Zusammenführen in eine schon vorhandene Zielversion gibt es vier Gründe, die Vorgängerversion zu behalten — nicht nachweisbar, noch zugewiesen, gemeldete Installationen, Einstellung. Für den zweiten war in der Erklärungskette kein Zweig vorgesehen: die App blieb stehen, und im Protokoll stand dazu kein Wort. Wer hinterher suchte, warum nichts passiert ist, fand nichts. Jetzt nennt die Zeile immer einen Grund.
 - **Behoben: „direkt mit erhöhten Rechten anmelden" meldete sich bei jedem Aufruf neu an.** Die Prüfung „trägt die Graph-Sitzung die Berechtigungen schon?" verglich die beiden angeforderten Berechtigungen als **eine** zusammengefügte Zeichenkette gegen die Liste der tatsächlich erteilten. Bei mehr als einer Berechtigung schlug sie damit immer fehl. Ursache war eine lokale Variable, die sich vom Parameter nur in der Groß-/Kleinschreibung unterschied — für PowerShell derselbe Behälter, weshalb die Liste durch die Zeichenkette ersetzt wurde. Eine neue statische Prüfregel fängt diese Klasse von Fehler künftig vor dem ersten Lauf; sie hat den Fall selbst gefunden.
+
+**Unter der Haube**, ohne sichtbare Änderung: die beiden Entscheidungen „darf diese alte Fassung gelöscht werden?" sind aus dem Ablauf herausgelöst und einzeln geprüft (25 neue Prüfungen) — es ist die folgenreichste Logik dieser Anwendung, und sie hatte bis dahin keine einzige. Der Zusammenführungsweg und die 25 Steuerelemente der Zuweisungseinstellungen haben eigene Funktionen bekommen; die zwei größten Funktionen sind damit von 438 auf 352 und von 589 auf 340 Zeilen geschrumpft. Dazu drei neue Prüfregeln: gegen eine neue Rückfrage per roher MessageBox, gegen eine Variable, die einen Parameter nur durch die Groß-/Kleinschreibung überschreibt, und gegen ein Steuerelement, das gebaut aber nie angeordnet wird.
 
 ## 0.19.0 – Fragen, wo bisher stillschweigend gehandelt wurde
 

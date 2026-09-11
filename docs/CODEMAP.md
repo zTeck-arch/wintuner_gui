@@ -36,9 +36,12 @@ ist reihenfolgeabhängig und nur über SmokeTest und LayoutProbe abgedeckt.
 | `30-UpdateTargets` | 665 | Welche App wird wohin aktualisiert: `New-UpdateCandidateModel`, `Find-ExistingUpdateTarget`, `Resolve-DeployedUpdateTarget`, `Measure-AvailableUpdates`, `Get-StringSimilarity` (Jaccard), Store-Auflösung |
 | `35-Packaging` | 760 | Paketbau **und Upload** in eigenen Runspaces: `New-PackagingRunspace` (der gemeinsame Erzeuger), `Get-PackageRunspace`, `Invoke-WtPackageBuild`, `Invoke-PackageBuildWithThrottleRetry`, `New-WingetPackageWithFallback`, `Test-PackageFolderUsable`, Vorab-Bau (`Start-PackagePrebuild`, `Get-PrebuildResult`, `Get-PackageBuildKey`), Rückfall (`Get-PackageFallbackVersion`, `Invoke-PackageFallbackBuild`) und **`Invoke-WtModuleCallOffThread`** — der gemeinsame Rumpf für schreibende Modulaufrufe im Hintergrund (`Get-DeployRunspace`, `Close-DeployRunspace`); darauf **`Invoke-WtDeployOffThread`** (der EINE Weg zu `Deploy-WtWin32App`) und das Löschen aus 30-UpdateTargets, dazu `Remove-SupersededByUnlinking` (Abhängen mit Nachlesen und Rückbau) |
 | `40-Graph` | 620 | **Der Graph-Transport** (`Invoke-GraphRest`, `Get-GraphRetryPlan`, `Get-ErrorRetryAfterSeconds`, `Get-ErrorHttpStatus`) + Sonden: `Get-GraphCollectionItems`, `Get-AppAssignmentProbe`, `Get-AppInstallationProbe` (zweite Quelle!), `Group-UpdateCandidates` |
+| `42-ContentUpload` | 336 | **Der einzige selbstgeschriebene Upload-Weg** (das Modul kennt nur Win32): `New-IntuneContentEncryption` (AES-256-CBC + HMAC, Schema ProfileVersion1), `Get-BlobBlockId`, `Get-BlobBlockListXml`, `Test-SasRenewalDue`, `Wait-MobileAppFileState`, `Send-BlobBlocks`, **`Publish-MobileAppContentVersion`** (contentVersions → files → Azure-Blob → commit). Nimmt den OData-Typ als Parameter, wird aber nur von macOS benutzt |
+| `43-PkgMetadata` | 300 | **Der PKG-Leser** (`installer -pkginfo` gibt es unter Windows nicht): `Read-XarToc`, `Expand-ZlibBytes`, `ConvertTo-SafeXml` (ohne DTD!), `Get-XarEntryText`, `Get-MacOsMinimumOsProperty`, **`Get-MacOsPkgMetadata`**. Liest nur Kopf, TOC und zwei Einträge — ein 252-MB-Paket in 5 ms |
+| `44-MacOsCatalog` | 380 | **Der macOS-Katalog**: Homebrew (`Select-MacOsPkgCasks`, nur PKG) + eigene `$script:macOsPkgOverrides` (`Merge-MacOsCatalogOverrides`), Kopie auf Platte, `Invoke-MacOsPackageDownload` (Blöcke, Abbruch, SHA256), die Marke `[WtMac\|token\|version]` (`New-/Read-MacOsAppMarker`, `Test-MacOsUpdateNeeded`) und `Get-TenantMacOsPkgApps`/`Find-DeployedMacOsApp` |
 | `45-Assignments` | 766 | Zuweisungen schreiben: `Move-AppAssignments`, `Clear-AppAssignments`, `New-AppAssignmentConfiguration`, `Set-AppAssignmentSettings`, `Save-AppScopeSnapshot`, `Enable-AppAutoUpdateChecked` |
-| `50-UpdateEngine` | 947 | **`Update-SingleApp`** (der Kern: paketieren → hochladen → Zuweisungen → Aufräumen) und der Leistungsnachweis (`Add-SessionActivity`, `Save-SessionActivity`, `Import-PreviousSessionActivity`, `Get-SessionLeistungstext`) |
-| `55-Dialogs` | 1530 | Alle Dialoge. Zwei davon sind auch **Bereiche**: `Show-AppSettingsDialog -HostPanel`, `Show-LeistungstextDialog -HostPanel`. Dazu die generische Zeilen-Anordnung (`Set-AppSettingsRowBlock`, `Get-ControlTextWidth/-Height`) und `Show-GraphScopeConsentDialog` |
+| `50-UpdateEngine` | 1159 | **`Update-SingleApp`** (der Kern: paketieren → hochladen → Zuweisungen → Aufräumen), `Invoke-ExistingTargetConsolidation` (der Weg „Zielversion liegt schon im Tenant"), die zwei Löschurteile als reine Rechnung (`Get-ConsolidationDeleteVerdict`, `Get-UnusedPredecessorDeleteVerdict`) und der Leistungsnachweis (`Add-SessionActivity`, `Save-SessionActivity`, `Import-PreviousSessionActivity`, `Get-SessionLeistungstext`) |
+| `55-Dialogs` | 2050 | Alle Dialoge. Zwei davon sind auch **Bereiche**: `Show-AppSettingsDialog -HostPanel` (die 25 Zuweisungseinstellungen baut `Add-AppSettingsAssignmentControls`), `Show-LeistungstextDialog -HostPanel`. Dazu die generische Zeilen-Anordnung (`Set-AppSettingsRowBlock`, `Get-ControlTextWidth/-Height`) und `Show-GraphScopeConsentDialog` |
 | `60-Batch` | 370 | `Invoke-AppUpdateBatch` (Stapellauf über mehrere Apps) + die sieben Design-Tabellen (`$script:darkTheme` …) |
 | `65-Theme` | 795 | `Set-GuiTheme`, `New-Card`, `Get-DimmedColor`, `Set-LabelDimmed`, `Get-ScrollOffsetY`, `Add-SettingRow`, `Update-SettingsLayout`, `Update-StackedCards`, `Set-ActiveTheme` |
 | `70-Runtime` | 912 | `Write-Log` (+ Mutex, Löschfrist), `Update-Status`, Busy-Sperre (`Test-UiBusy`, `Test-OperationRunning`), aufgeschobene Aktionen, `Get-SanitizedLogText`, die **eine** nicht abschaltbare Lauf-Rückfrage (`Get-RunRiskFindings`, `Resolve-RiskyRunChoice`, `Confirm-RiskyAppsInRun`) |
@@ -47,6 +50,7 @@ ist reihenfolgeabhängig und nur über SmokeTest und LayoutProbe abgedeckt.
 | `82-TenantApps` | 900 | Bereich **Alle Tenant-Apps**, Zuweisungs-Manager, Entra-Gruppensuche, `Connect-OptionalGraphScope`, `Get-TenantDetectedApps` |
 | `83-OwnPackage` | 1995 | Bereich **Eigene Installer** (EXE/MSI, Erkennungsregeln, Sandbox-Test, Inhalt ersetzen) |
 | `85-Rows` | 1560 | Bereiche **Updates**, **Erkannte Apps**, **App-Zuweisungseinstellungen**, **Leistungsnachweis**, **Einstellungen** |
+| `86-MacOsPkg` | 620 | Bereich **macOS (PKG) – Beta**: Warnkarte, Katalog, Dateiwahl, Metadaten, Zuweisen. `New-MacOsPkgApp` (die EINE Anlegestelle), `Update-MacOsPkgAppContent` (Update ohne Ablösung — die gibt es für macOS nicht), `Set-MacOsPkgAppAssignment` (ohne Einstellungsobjekt: `New-AssignmentSettingsObject` ist hart Win32), `Invoke-MacOsPkgDeploy`, `Update-MacOsPkgLayout` |
 | `90-Main` | 2515 | Verdrahtung: alle `Add_Click`-Handler, Seitenleiste bauen, Tooltips, Fensterplatzierung, Smoke-Gate, Start |
 
 ## Wo ändere ich …?
@@ -75,7 +79,7 @@ neue Layout-Funktion schreibt, trägt sie dort ein und ist fertig; die drei Aufr
   Schriftart ändert die Zeilenhöhe überall, und ein Designwechsel kostet einen Klick statt dutzender
   Ereignisse je Sekunde.
 
-Die elf Einträge: `updates`, `tenant`, `store`, `winget`, `discovered`, `ownpackage`,
+Die zwölf Einträge: `updates`, `tenant`, `store`, `winget`, `discovered`, `ownpackage`, `macospkg`,
 `localpackages`, `appsettings`, `workrecord`, `customerdata`, `settings`. `dashboard` hat keine
 eigene Funktion — seine Kacheln hängen an `Update-CardWidths`.
 
@@ -86,8 +90,8 @@ die zwei eingebetteten Editoren).
 
 ## Bereiche und ihre Gruppen
 
-`dashboard` (start) · `winget`, `store`, `ownpackage` (deploy) · `updates`, `tenant`, `discovered`,
-`appsettings` (manage) · `localpackages`, `workrecord`, `settings` (local)
+`dashboard` (start) · `winget`, `store`, `ownpackage`, `macospkg` (deploy) · `updates`, `tenant`,
+`discovered`, `appsettings` (manage) · `localpackages`, `workrecord`, `settings` (local)
 
 ## Zustand, den man kennen muss
 

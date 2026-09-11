@@ -42,9 +42,14 @@ Invoke-ScriptAnalyzer -Path .\src   -Settings .\PSScriptAnalyzerSettings.psd1 -R
 Invoke-ScriptAnalyzer -Path .\tests -Settings .\PSScriptAnalyzerSettings.Tests.psd1 -Recurse
 ```
 
-Erwartet (gemessen am 10.09.2026, Stand 0.19.1): StaticChecks grün
-(**388 Funktionen, 1070 UI-Keys je Sprache**), SmokeTest grün, LayoutProbe grün, **1000 Pester** grün
-(1 übersprungen), Analyzer **0 blockierend** (5 informational in `65-Theme.ps1` sind Altbestand).
+Erwartet (gemessen am 11.09.2026, Stand 0.20.0): StaticChecks grün
+(**433 Funktionen, 1136 UI-Keys je Sprache**), SmokeTest grün, LayoutProbe grün, **1107 Pester** grün
+(5 übersprungen), Analyzer **0 blockierend** (5 informational in `65-Theme.ps1` sind Altbestand).
+
+Von den fünf übersprungenen sind **vier** der Netzblock in `MacOsCatalog.Tests.ps1`: die Kette startet
+jeden Schritt in einem eigenen pwsh-Kindprozess, und dort kommt keine Verbindung zu
+`formulae.brew.sh` zustande. Direkt aufgerufen laufen sie grün, und auf dem GitHub-Runner laufen sie
+ebenfalls. **Ein grüner Kettenlauf beweist diese vier also nicht.**
 
 Die eine übersprungene Prüfung wechselt die Seite, je nachdem was auf dem Rechner installiert ist:
 mit WinTuner-Modul läuft der Modulvertrag (`ModuleContract.Tests.ps1`) und der Platzhalter
@@ -57,7 +62,7 @@ Die drei Läufer, die kein Parser ersetzt:
 |---|---|
 | `SmokeTest.ps1` | Ladefehler des gebauten Skripts (falsche Teil-Reihenfolge, Control vor seiner Erzeugung benutzt) |
 | `LayoutProbe.ps1` | überlappende Steuerelemente (**auch Beschriftung gegen gerundetes Eingabefeld** — bis 0.18.0 war genau das ausgenommen), abgeschnittener Text, zu geringer Kontrast, Karten die beim Scrollen verrutschen, **aufgeklappte** „Erweiterte Optionen", **ein Aufklapper der etwas außerhalb seiner Sektion verschiebt** — in **allen 7 Designs**, 2 Fenstergrößen × **2 Sprachen**, jeweils auf frischem Profil |
-| `StaticChecks.ps1` | Version/Kopf, UI-Key-Parität EN/DE, tote UI-Schlüssel, `-LiteralPath`-Regeln, `Show-Progress` ohne `Hide-Progress`, MessageBox auf oberster Ebene vor dem Smoke-Tor, `Add_Shown` mit Dialog ohne `Test-UnattendedRun`, Datenpfad außerhalb der zwei Wurzelfunktionen, Sektion ohne Eintrag in `$navKeyOrder`/`$navGlyphs`, **CIM/WMI im Startpfad**, **HTTP-Aufruf ohne `-TimeoutSec`**, **Layout-Tabelle mit unbekannter Funktion oder unbekanntem Bereich**, **Cache-Leerer, der nicht im Tenant-Riegel steht**, **`Save-VersionDiskCache` außerhalb von `Save-PendingVersionDiskCache`**, **`Deploy-WtWin32App` außerhalb von `Invoke-WtDeployOffThread`**, **eine Zuweisung an einen Namen, der sich von einem Parameter nur in der Groß-/Kleinschreibung unterscheidet** (`$apps` neben `$Apps` ist derselbe Behälter — siehe PATTERNS) |
+| `StaticChecks.ps1` | Version/Kopf, UI-Key-Parität EN/DE, tote UI-Schlüssel, `-LiteralPath`-Regeln, `Show-Progress` ohne `Hide-Progress`, MessageBox auf oberster Ebene vor dem Smoke-Tor, `Add_Shown` mit Dialog ohne `Test-UnattendedRun`, Datenpfad außerhalb der zwei Wurzelfunktionen, Sektion ohne Eintrag in `$navKeyOrder`/`$navGlyphs`, **CIM/WMI im Startpfad**, **HTTP-Aufruf ohne `-TimeoutSec`**, **Layout-Tabelle mit unbekannter Funktion oder unbekanntem Bereich**, **Cache-Leerer, der nicht im Tenant-Riegel steht**, **`Save-VersionDiskCache` außerhalb von `Save-PendingVersionDiskCache`**, **`Deploy-WtWin32App` außerhalb von `Invoke-WtDeployOffThread`**, **eine Zuweisung an einen Namen, der sich von einem Parameter nur in der Groß-/Kleinschreibung unterscheidet** (`$apps` neben `$Apps` ist derselbe Behälter — siehe PATTERNS), **eine neue Frage per roher MessageBox** (Sperrklinke: die Zahl darf nicht steigen, `$messageBoxQuestionBaseline`), **`#microsoft.graph.macOSPkgApp` außerhalb der drei macOS-Funktionen** (eine zweite Anlegestelle vergisst `includedApps` — und eine macOS-App ohne die wird auf dem Gerät nie erkannt), **`fileEncryptionInfo` außerhalb von `Publish-MobileAppContentVersion`** |
 
 `Invoke-CheckChain.ps1` prüft selbst nichts — es startet diese Läufer, jeden in einem eigenen
 pwsh-Kindprozess (SmokeTest und LayoutProbe rufen `exit` auf und laden WinForms; nacheinander im
@@ -86,9 +91,10 @@ selben Prozess wäre die Kette nach dem ersten Schritt tot).
 | `15` | **Alle** UI-Texte, EN und DE |
 | `20`–`35` | Versionsvergleich + Selbstupdate, WinGet-Daten, Update-Zielauflösung, Paketierung |
 | `40`–`50` | Graph-Aufrufe, Zuweisungen, Update-Motor (`Update-SingleApp`) |
+| `42`–`44` | **macOS (Beta):** selbstgeschriebener Inhalts-Upload, PKG-Leser (xar), Katalog + Marke |
 | `55` | Alle Dialoge — auch die zwei, die als **Bereich** eingebettet werden |
 | `60`–`70` | Stapellauf, Designs/Karten/Layout-Helfer, Laufzeit (Protokoll, Busy-Sperre, Statuszeile) |
-| `75`–`90` | Fenster + Seitenleiste, Bereiche (Views/Rows/TenantApps/OwnPackage), Verdrahtung + Start |
+| `75`–`90` | Fenster + Seitenleiste, Bereiche (Views/Rows/TenantApps/OwnPackage/MacOsPkg), Verdrahtung + Start |
 
 Details, Funktionsnamen und „wo ändere ich X?" → [docs/CODEMAP.md](docs/CODEMAP.md).
 

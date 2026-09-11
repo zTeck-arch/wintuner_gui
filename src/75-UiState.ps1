@@ -990,6 +990,7 @@ $script:sectionLayoutFunctions = @{
   winget        = 'Update-WingetLayout'
   discovered    = 'Update-DiscoveredLayout'
   ownpackage    = 'Update-OwnPackageLayout'
+  macospkg      = 'Update-MacOsPkgLayout'
   localpackages = 'Update-LocalPackagesLayout'
   appsettings   = 'Update-AppSettingsLayout'
   workrecord    = 'Update-WorkRecordSectionLayout'
@@ -1132,6 +1133,7 @@ $script:navGlyphs = @{
   updates    = 0xE72C   # refresh
   tenant     = 0xE71D   # all apps
   ownpackage = 0xE7B8   # package / box
+  macospkg   = 0xE7F4   # Bildschirm - der einzige Bereich, der NICHT Windows verteilt
   localpackages = 0xE8B7   # folder - Paketkopien auf der Platte
   appsettings = 0xE8B3     # select-all - Einstellungen fuer MEHRERE Apps auf einmal;
                            # bewusst nicht das Listensymbol der Nachbarn darueber

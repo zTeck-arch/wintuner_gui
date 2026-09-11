@@ -1632,9 +1632,24 @@ $quietDaysRow.Controls.Add($quietDaysInput)
 
 [void](Add-SettingRow -Card $cardAfterUpdate -Control $quietDaysRow -Hint (Get-UiString 'HintQuietDays') -Indent 32)
 
+# Die Versionsgrenze wiegt schwerer als gemeldete Installationen.
+#
+# Gewuenscht am 11.09.2026. Unterschied zur Zeile darueber, und der ist wesentlich: das Fenster
+# oben fragt "ist das Geraet noch aktiv?", dieser Schalter sagt "die Grenze gilt, ganz gleich wie
+# frisch die Meldung ist" - und er wirkt auch im AUTOMATISCHEN Aufraeumen, weil eine Obergrenze,
+# die nur auf Knopfdruck gilt, keine Obergrenze ist.
+$versionCapOverrideCheckbox = New-Object System.Windows.Forms.CheckBox
+$versionCapOverrideCheckbox.Text = (Get-UiString 'VersionCapOverrideCheckbox') -f $script:keepVersionCount
+$versionCapOverrideCheckbox.AutoSize = $true
+$versionCapOverrideCheckbox.Checked = [bool]$script:settings.VersionCapOverridesInstallations
+[void](Add-SettingRow -Card $cardAfterUpdate -Control $versionCapOverrideCheckbox -Hint (Get-UiString 'HintVersionCapOverride') -Indent 32)
+
 function Update-KeepVersionCountUi {
   $count = $script:keepVersionCount
   try { $autoVersionCleanupCheckbox.Text = (Get-UiString 'AutoVersionCleanupCheckbox') -f $count } catch { Write-LogDebug 'keep-count checkbox text' }
+  # Traegt die Zahl ebenfalls im Text - sonst stuende nach dem Speichern einer neuen Grenze hier
+  # noch die alte, ausgerechnet an dem Schalter, der Loeschungen freigibt.
+  try { $versionCapOverrideCheckbox.Text = (Get-UiString 'VersionCapOverrideCheckbox') -f $count } catch { Write-LogDebug 'version-cap checkbox text' }
   try { $versionCleanupButton.Text = (Get-UiString 'VersionCleanupButton') -f $count } catch { Write-LogDebug 'keep-count button text' }
   # $toolTip is created later (90-Main); at runtime it exists, before that this is simply skipped.
   try { if ($toolTip) { $toolTip.SetToolTip($versionCleanupButton, ((Get-UiString 'TtVersionCleanupButton') -f $count)) } } catch { Write-LogDebug 'keep-count tooltip' }
@@ -1956,6 +1971,7 @@ $saveSettingsButton.Add_Click({
     $script:settings.RequestOptionalScopesOnLogin = $elevatedLoginCheckbox.Checked
     $script:settings.AutoRemoveSuperseded = $autoRemoveSupersededCheckbox.Checked
     if ($autoVersionCleanupCheckbox) { $script:settings.AutoVersionCleanup = $autoVersionCleanupCheckbox.Checked }
+    if ($versionCapOverrideCheckbox) { $script:settings.VersionCapOverridesInstallations = $versionCapOverrideCheckbox.Checked }
     if ($moveAssignmentsCheckbox) { $script:settings.MoveAssignmentsOnUpdate = $moveAssignmentsCheckbox.Checked }
     if ($saveScopeCheckbox) { $script:settings.SaveScopeBeforeRemoval = $saveScopeCheckbox.Checked }
     if ($favoriteAutoCheckbox) { $script:settings.AutoUpdateFavoritesOnStartup = $favoriteAutoCheckbox.Checked }
