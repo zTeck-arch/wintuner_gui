@@ -71,6 +71,9 @@ Upload new Win32 apps and optionally assign them as available, required or unins
 **Manage Microsoft Store apps**
 Resolve Store apps by name or package identifier, search the tenant and deploy. Apps that already exist are recognised, so nothing gets deployed twice.
 
+**Deploy macOS packages (Beta)**
+Bring a macOS `.pkg` into Intune as a "macOS app (PKG)". Nothing has to be packaged: Intune takes the vendor's file as it is. Pick an application from a catalogue built from Homebrew — filtered to the entries that really ship a `.pkg`, with the published checksum where there is one — or choose a file yourself. Bundle identifier, version, included bundles and the minimum macOS version are read out of the package. Deploying the same application again replaces the content of the existing app instead of creating a second one, so its assignments and statistics stay. See the warning under [macOS packages are Beta](#macos-packages-are-beta).
+
 **Check deployed apps for updates**
 Compare Win32 apps in Intune against current WinGet versions. The result list distinguishes between a required new upload, reuse of a target that already exists, and follow-up work still to be done.
 
@@ -79,6 +82,8 @@ Package a new target version or reuse an existing one, carry assignments across,
 
 **Clean up old versions safely**
 Find superseded or unused app objects. Automatic deletion only happens after assignments and successful installations have been re-checked. The risky cleanup options are off by default.
+
+You can also cap how many versions of one package are kept. On its own, that cap yields to reported installations: a version beyond it stays as long as a single device still reports it. An optional setting lets the cap win instead, in the manual and the automatic clean-up alike. Assignments still protect a version, and one whose state cannot be read is never deleted. Worth knowing before switching it on: **deleting an app object does not uninstall the software from the device** — Intune loses the reporting, the assignment and the option to reinstall from that object, the software itself stays.
 
 **Package your own installers and replace app content**
 Turn any EXE or MSI installer into an `.intunewin` package, including software that is not in WinGet. You can also replace the content of an existing Intune app in place: the app ID, its assignments and its history stay as they are, no second app object appears and nothing is superseded.
@@ -114,10 +119,23 @@ English and German interface, several display modes, plus locally stored setting
 | Discovered apps | Intune inventory and WinGet | Maps installed software to possible WinGet packages. The scan itself is read-only |
 | All tenant apps | Intune | Lists every app object of every type. Assignments are read and can be changed, which writes to Intune. Selected apps can be **deleted** from here - permanently, after a question that names each app and says which of them are assigned or installed |
 | Own installers | Local files and Intune | Packages any EXE or MSI locally into `.intunewin`. Replacing the content of an existing app writes to Intune |
+| macOS (PKG) – Beta | Homebrew, the vendor's download and Intune | Downloads a macOS `.pkg` and creates it in Intune, or replaces the content of an app deployed earlier. Reads the package metadata locally; no catalogue entry is deployed without confirmation |
 | Local packages | WinGet and the local package folder | Maintains package copies on this computer: check the saved list and download newer ones. Creates nothing in Intune |
 | Settings | Local settings file and Intune | Package and log folder, language, theme, cleanup options and saved group favourites. Nothing here changes the tenant by itself; the options decide what the other sections are allowed to do |
 
 The interface does not install software on endpoints. It creates and manages app objects and assignments in Intune; the actual distribution and reporting is then done by Microsoft Intune.
+
+### macOS packages are Beta
+
+Everything on the Windows side of that path is covered by tests. The result is not: whether a package actually installs can only be seen on a Mac, and no Mac takes part in this project's checks. Treat the first deployment as an experiment rather than as routine, and start without an assignment so nothing reaches a device.
+
+Three things decide whether it works, and this interface cannot check any of them for you:
+
+- The `.pkg` must be **signed and notarized** by its vendor. macOS blocks anything else on the device, no matter what Intune reports.
+- **Install scripts inside a package run as root.** You are uploading more than an application, so check where the file came from.
+- Intune detects the app by bundle identifier and version, and a package carries **two** versions (`CFBundleShortVersionString` and `CFBundleVersion`). Both are read out and you choose which one is used. If it is the wrong one, the app is reinstalled on every check instead of being recognised.
+
+The catalogue only lists entries that really ship a `.pkg` — a minority of Homebrew, because most applications ship a DMG, which is a different Intune app type and not supported here. For a few applications where the vendor publishes a `.pkg` although Homebrew points at a DMG, a short hand-checked list of vendor addresses is built in.
 
 ---
 

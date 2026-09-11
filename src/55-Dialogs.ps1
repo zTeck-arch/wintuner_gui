@@ -9,6 +9,284 @@
 # -PreselectApp (optional): a tenant app object with .Id. When given, that app is pre-checked and
 # selected once the list has loaded, so the caller can open the dialog "for one app" without ever
 # touching assignment targets - the dialog only ever writes settings, never rewrites targets.
+# Die 25 Steuerelemente der Intune-Zuweisungseinstellungen: Benachrichtigung, Verfuegbarkeit,
+# Frist, Neustartverhalten, Uebertragungsart, Selbstaktualisierung.
+#
+# Bis 0.19.1 standen sie als 235-Zeilen-Block mitten in Show-AppSettingsDialog (589 Zeilen). Sie
+# gehoeren zusammen und sonst zu nichts: es ist genau die Menge, die Intune je Zuweisung kennt,
+# und sie hat mit der App-Liste darunter oder dem Rahmen darueber nichts zu tun.
+#
+# WARUM DIE EREIGNISSE HIER UEBER $script:appSettingsUi GEHEN und nicht ueber die lokalen
+# Variablen: siehe den Block bei Show-AppSettingsDialog. Kurz - als eingebetteter Bereich kehrt
+# der Aufbau sofort zurueck, danach sind die lokalen Variablen weg, und .GetNewClosure() bindet
+# den Block an ein dynamisches Modul, in dem $script: und die Skriptfunktionen nicht mehr
+# auffindbar sind. Der Beutel existiert, wenn diese Ereignisse feuern: er wird direkt nach dem
+# Aufbau gesetzt, die Ereignisse laufen erst ab Add_Shown.
+function Add-AppSettingsAssignmentControls {
+  param([Parameter(Mandatory)][object]$Dialog)
+  # --- settings block ---
+  $notifyLabel = New-Object System.Windows.Forms.Label
+  $notifyLabel.Text = Get-UiString 'AppSettingsNotifyLabel'
+  $notifyLabel.Location = New-Object System.Drawing.Point(12, 364)
+  $notifyLabel.AutoSize = $true
+  $notifyLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($notifyLabel)
+
+  $notifyCombo = New-Object System.Windows.Forms.ComboBox
+  $notifyCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+  $notifyCombo.Location = New-Object System.Drawing.Point(240, 361)
+  $notifyCombo.Width = 300
+  $notifyCombo.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  [void]$notifyCombo.Items.AddRange(@(
+    (Get-UiString 'AppSettingsNotifyKeep'),
+    (Get-UiString 'AppSettingsNotifyAll'),
+    (Get-UiString 'AppSettingsNotifyReboot'),
+    (Get-UiString 'AppSettingsNotifyHide')))
+  $notifyCombo.SelectedIndex = 0
+  $Dialog.Controls.Add($notifyCombo)
+
+  # Explicit mode selectors replace the former three-state checkboxes. The indeterminate square
+  # was technically correct but visually opaque; these choices state the resulting Intune action.
+  $availLabel = New-Object System.Windows.Forms.Label
+  $availLabel.Text = Get-UiString 'AppSettingsAvailableFrom'
+  $availLabel.Location = New-Object System.Drawing.Point(12, 398)
+  $availLabel.AutoSize = $true
+  $availLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($availLabel)
+
+  $availModeCombo = New-Object System.Windows.Forms.ComboBox
+  $availModeCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+  $availModeCombo.Location = New-Object System.Drawing.Point(240, 395)
+  $availModeCombo.Width = 160
+  [void]$availModeCombo.Items.AddRange(@((Get-UiString 'AppSettingsNotifyKeep'), (Get-UiString 'AppSettingsModeAsap'), (Get-UiString 'AppSettingsModeScheduled')))
+  $availModeCombo.SelectedIndex = 0
+  $availModeCombo.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($availModeCombo)
+
+  $availPicker = New-Object System.Windows.Forms.DateTimePicker
+  $availPicker.Format = [System.Windows.Forms.DateTimePickerFormat]::Custom
+  $availPicker.CustomFormat = "dd.MM.yyyy  HH:mm"
+  $availPicker.ShowUpDown = $true
+  $availPicker.Location = New-Object System.Drawing.Point(410, 395)
+  $availPicker.Width = 298
+  $availPicker.Enabled = $false
+  $availPicker.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($availPicker)
+  # WARUM JEDES EREIGNIS HIER UEBER $script:appSettingsUi GEHT
+  #
+  # Als eingebetteter Bereich wird diese Funktion einmal beim Aufbau des Fensters durchlaufen und
+  # kehrt sofort zurueck. Danach sind ihre lokalen Variablen weg, und jedes Ereignis, das spaeter
+  # feuert, sah $null - genau das waren die beiden Meldungen aus dem Protokoll:
+  #   "App settings load failed: The property 'Text' cannot be found on this object."
+  #   "FATAL UI ERROR: The expression after '&' ... must result in a command name, a script block".
+  #
+  # .GetNewClosure() waere der naheliegende Griff und ist hier trotzdem falsch: eine Closure haelt
+  # zwar die Steuerelemente fest, bindet den Block aber an ein dynamisches Modul. Dort zeigt
+  # $script: nicht mehr auf das Hauptskript, und die Funktionen des Skripts (Get-UiString,
+  # Write-Log, ...) werden nur gefunden, solange das Skript zufaellig das oberste ist - wird es aus
+  # einem anderen Skript heraus aufgerufen, meldet jedes Ereignis "Get-UiString is not recognized".
+  # Dieselbe Falle steht schon einmal weiter unten bei Show-LeistungstextDialog beschrieben.
+  #
+  # Deshalb: einfache Skriptbloecke (die finden Funktionen und $script: zuverlaessig) und die
+  # Steuerelemente in EINEM Beutel im Skript-Bereich. Der modale Dialog legt seinen eigenen Beutel
+  # an und stellt den vorherigen beim Schliessen zurueck (siehe unten), sonst haetten die Ereignisse
+  # des eingebetteten Bereichs danach auf die verworfenen Steuerelemente des Dialogs gezeigt.
+  $availModeCombo.Add_SelectedIndexChanged({
+    $ui = $script:appSettingsUi
+    $ui.AvailPicker.Enabled = ($ui.AvailModeCombo.SelectedIndex -eq 2)
+  })
+
+  $deadlineLabel = New-Object System.Windows.Forms.Label
+  $deadlineLabel.Text = Get-UiString 'AppSettingsDeadline'
+  $deadlineLabel.Location = New-Object System.Drawing.Point(12, 430)
+  $deadlineLabel.AutoSize = $true
+  $deadlineLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($deadlineLabel)
+
+  $deadlineModeCombo = New-Object System.Windows.Forms.ComboBox
+  $deadlineModeCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+  $deadlineModeCombo.Location = New-Object System.Drawing.Point(240, 427)
+  $deadlineModeCombo.Width = 160
+  [void]$deadlineModeCombo.Items.AddRange(@((Get-UiString 'AppSettingsNotifyKeep'), (Get-UiString 'AppSettingsModeAsap'), (Get-UiString 'AppSettingsModeScheduled')))
+  $deadlineModeCombo.SelectedIndex = 0
+  $deadlineModeCombo.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($deadlineModeCombo)
+
+  $deadlinePicker = New-Object System.Windows.Forms.DateTimePicker
+  $deadlinePicker.Format = [System.Windows.Forms.DateTimePickerFormat]::Custom
+  $deadlinePicker.CustomFormat = "dd.MM.yyyy  HH:mm"
+  $deadlinePicker.ShowUpDown = $true
+  $deadlinePicker.Location = New-Object System.Drawing.Point(410, 427)
+  $deadlinePicker.Width = 298
+  $deadlinePicker.Enabled = $false
+  $deadlinePicker.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($deadlinePicker)
+  $deadlineModeCombo.Add_SelectedIndexChanged({
+    $ui = $script:appSettingsUi
+    $ui.DeadlinePicker.Enabled = ($ui.DeadlineModeCombo.SelectedIndex -eq 2)
+  })
+
+  $localTimeCheck = New-Object System.Windows.Forms.CheckBox
+  $localTimeCheck.Text = Get-UiString 'AppSettingsUseLocalTime'
+  $localTimeCheck.Location = New-Object System.Drawing.Point(12, 462)
+  $localTimeCheck.AutoSize = $true
+  $localTimeCheck.Checked = $true
+  $localTimeCheck.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($localTimeCheck)
+
+  $restartModeLabel = New-Object System.Windows.Forms.Label
+  $restartModeLabel.Text = Get-UiString 'AppSettingsRestartEnable'
+  $restartModeLabel.Location = New-Object System.Drawing.Point(12, 496)
+  $restartModeLabel.AutoSize = $true
+  $restartModeLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($restartModeLabel)
+
+  $restartModeCombo = New-Object System.Windows.Forms.ComboBox
+  $restartModeCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+  $restartModeCombo.Location = New-Object System.Drawing.Point(240, 491)
+  $restartModeCombo.Width = 300
+  [void]$restartModeCombo.Items.AddRange(@((Get-UiString 'AppSettingsNotifyKeep'), (Get-UiString 'AppSettingsModeDisabled'), (Get-UiString 'AppSettingsModeEnabled')))
+  $restartModeCombo.SelectedIndex = 0
+  $restartModeCombo.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($restartModeCombo)
+
+  $restartGraceLabel = New-Object System.Windows.Forms.Label
+  $restartGraceLabel.Text = Get-UiString 'AppSettingsRestartGrace'
+  $restartGraceLabel.Location = New-Object System.Drawing.Point(32, 524)
+  $restartGraceLabel.AutoSize = $true
+  Set-LabelDimmed -Label $restartGraceLabel -Dimmed $true
+  $restartGraceLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($restartGraceLabel)
+  $restartGraceValue = New-Object System.Windows.Forms.NumericUpDown
+  $restartGraceValue.Location = New-Object System.Drawing.Point(240, 521)
+  $restartGraceValue.Width = 110
+  $restartGraceValue.Minimum = 1
+  $restartGraceValue.Maximum = 20160
+  $restartGraceValue.Value = 1440
+  $restartGraceValue.Enabled = $false
+  $restartGraceValue.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($restartGraceValue)
+
+  $restartCountdownLabel = New-Object System.Windows.Forms.Label
+  $restartCountdownLabel.Text = Get-UiString 'AppSettingsRestartCountdown'
+  $restartCountdownLabel.Location = New-Object System.Drawing.Point(32, 556)
+  $restartCountdownLabel.AutoSize = $true
+  Set-LabelDimmed -Label $restartCountdownLabel -Dimmed $true
+  $restartCountdownLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($restartCountdownLabel)
+  $restartCountdownValue = New-Object System.Windows.Forms.NumericUpDown
+  $restartCountdownValue.Location = New-Object System.Drawing.Point(240, 553)
+  $restartCountdownValue.Width = 110
+  $restartCountdownValue.Minimum = 1
+  $restartCountdownValue.Maximum = 20160
+  $restartCountdownValue.Value = 15
+  $restartCountdownValue.Enabled = $false
+  $restartCountdownValue.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($restartCountdownValue)
+
+  $restartSnoozeCheck = New-Object System.Windows.Forms.CheckBox
+  $restartSnoozeCheck.Text = Get-UiString 'AppSettingsRestartSnooze'
+  $restartSnoozeCheck.Location = New-Object System.Drawing.Point(380, 524)
+  $restartSnoozeCheck.AutoSize = $true
+  $restartSnoozeCheck.Checked = $true
+  $restartSnoozeCheck.Enabled = $false
+  $restartSnoozeCheck.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($restartSnoozeCheck)
+  $restartSnoozeLabel = New-Object System.Windows.Forms.Label
+  $restartSnoozeLabel.Text = Get-UiString 'AppSettingsRestartSnoozeMinutes'
+  $restartSnoozeLabel.Location = New-Object System.Drawing.Point(380, 556)
+  $restartSnoozeLabel.AutoSize = $true
+  Set-LabelDimmed -Label $restartSnoozeLabel -Dimmed $true
+  $restartSnoozeLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($restartSnoozeLabel)
+  $restartSnoozeValue = New-Object System.Windows.Forms.NumericUpDown
+  $restartSnoozeValue.Location = New-Object System.Drawing.Point(570, 553)
+  $restartSnoozeValue.Width = 110
+  $restartSnoozeValue.Minimum = 1
+  $restartSnoozeValue.Maximum = 20160
+  $restartSnoozeValue.Value = 240
+  $restartSnoozeValue.Enabled = $false
+  $restartSnoozeValue.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($restartSnoozeValue)
+
+  $restartModeCombo.Add_SelectedIndexChanged({
+    $ui = $script:appSettingsUi
+    $enabled = ($ui.RestartModeCombo.SelectedIndex -eq 2)
+    # Beschriftungen werden GEDAEMPFT, nicht deaktiviert: WinForms zeichnet eine deaktivierte
+    # Label in SystemColors.GrayText und ignoriert dabei jede Designfarbe (siehe 65-Theme).
+    Set-LabelDimmed -Label $ui.RestartGraceLabel -Dimmed (-not $enabled)
+    Set-LabelDimmed -Label $ui.RestartCountdownLabel -Dimmed (-not $enabled)
+    Set-LabelDimmed -Label $ui.RestartSnoozeLabel -Dimmed (-not $enabled)
+    $ui.RestartGraceValue.Enabled = $enabled
+    $ui.RestartCountdownValue.Enabled = $enabled
+    $ui.RestartSnoozeCheck.Enabled = $enabled
+    $ui.RestartSnoozeValue.Enabled = ($enabled -and $ui.RestartSnoozeCheck.Checked)
+  })
+  $restartSnoozeCheck.Add_CheckedChanged({
+    $ui = $script:appSettingsUi
+    $ui.RestartSnoozeValue.Enabled = ($ui.RestartModeCombo.SelectedIndex -eq 2 -and $ui.RestartSnoozeCheck.Checked)
+  })
+
+  $deliveryLabel = New-Object System.Windows.Forms.Label
+  $deliveryLabel.Text = Get-UiString 'AppSettingsDeliveryPriority'
+  $deliveryLabel.Location = New-Object System.Drawing.Point(12, 594)
+  $deliveryLabel.AutoSize = $true
+  $deliveryLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($deliveryLabel)
+  $deliveryCombo = New-Object System.Windows.Forms.ComboBox
+  $deliveryCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+  $deliveryCombo.Location = New-Object System.Drawing.Point(240, 591)
+  $deliveryCombo.Width = 300
+  [void]$deliveryCombo.Items.AddRange(@((Get-UiString 'AppSettingsDeliveryKeep'), (Get-UiString 'AppSettingsDeliveryBackground'), (Get-UiString 'AppSettingsDeliveryForeground')))
+  $deliveryCombo.SelectedIndex = 0
+  $deliveryCombo.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($deliveryCombo)
+
+  $autoUpdLabel = New-Object System.Windows.Forms.Label
+  $autoUpdLabel.Text = Get-UiString 'AppSettingsAutoUpdate'
+  $autoUpdLabel.Location = New-Object System.Drawing.Point(12, 626)
+  $autoUpdLabel.Size = New-Object System.Drawing.Size(376, 38)
+  $autoUpdLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($autoUpdLabel)
+
+  $autoUpdModeCombo = New-Object System.Windows.Forms.ComboBox
+  $autoUpdModeCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+  # 240 wie alle anderen: die Auswahllisten dieser Karte stehen in einer Flucht. Diese eine stand
+  # auf 400, weil ihre Beschriftung 314 px breit war - die ist jetzt gekuerzt.
+  $autoUpdModeCombo.Location = New-Object System.Drawing.Point(240, 629)
+  $autoUpdModeCombo.Width = 140
+  [void]$autoUpdModeCombo.Items.AddRange(@((Get-UiString 'AppSettingsNotifyKeep'), (Get-UiString 'AppSettingsModeDisabled'), (Get-UiString 'AppSettingsModeEnabled')))
+  $autoUpdModeCombo.SelectedIndex = 0
+  $autoUpdModeCombo.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
+  $Dialog.Controls.Add($autoUpdModeCombo)
+
+  # Der Aufrufer legt sie in seinen Zustandsbeutel - unter genau diesen Namen.
+  return @{
+    NotifyLabel = $notifyLabel
+    AvailLabel = $availLabel
+    DeadlineLabel = $deadlineLabel
+    RestartModeLabel = $restartModeLabel
+    DeliveryLabel = $deliveryLabel
+    AutoUpdLabel = $autoUpdLabel
+    NotifyCombo = $notifyCombo
+    AvailModeCombo = $availModeCombo
+    AvailPicker = $availPicker
+    DeadlineModeCombo = $deadlineModeCombo
+    DeadlinePicker = $deadlinePicker
+    LocalTimeCheck = $localTimeCheck
+    RestartModeCombo = $restartModeCombo
+    RestartGraceLabel = $restartGraceLabel
+    RestartGraceValue = $restartGraceValue
+    RestartCountdownLabel = $restartCountdownLabel
+    RestartCountdownValue = $restartCountdownValue
+    RestartSnoozeCheck = $restartSnoozeCheck
+    RestartSnoozeLabel = $restartSnoozeLabel
+    RestartSnoozeValue = $restartSnoozeValue
+    DeliveryCombo = $deliveryCombo
+    AutoUpdModeCombo = $autoUpdModeCombo
+  }
+}
+
 function Show-AppSettingsDialog {
   param(
     [object]$PreselectApp,
@@ -96,241 +374,9 @@ function Show-AppSettingsDialog {
   $uncheckAll.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
   $dlg.Controls.Add($uncheckAll)
 
-  # --- settings block ---
-  $notifyLabel = New-Object System.Windows.Forms.Label
-  $notifyLabel.Text = Get-UiString 'AppSettingsNotifyLabel'
-  $notifyLabel.Location = New-Object System.Drawing.Point(12, 364)
-  $notifyLabel.AutoSize = $true
-  $notifyLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($notifyLabel)
-
-  $notifyCombo = New-Object System.Windows.Forms.ComboBox
-  $notifyCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
-  $notifyCombo.Location = New-Object System.Drawing.Point(240, 361)
-  $notifyCombo.Width = 300
-  $notifyCombo.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  [void]$notifyCombo.Items.AddRange(@(
-    (Get-UiString 'AppSettingsNotifyKeep'),
-    (Get-UiString 'AppSettingsNotifyAll'),
-    (Get-UiString 'AppSettingsNotifyReboot'),
-    (Get-UiString 'AppSettingsNotifyHide')))
-  $notifyCombo.SelectedIndex = 0
-  $dlg.Controls.Add($notifyCombo)
-
-  # Explicit mode selectors replace the former three-state checkboxes. The indeterminate square
-  # was technically correct but visually opaque; these choices state the resulting Intune action.
-  $availLabel = New-Object System.Windows.Forms.Label
-  $availLabel.Text = Get-UiString 'AppSettingsAvailableFrom'
-  $availLabel.Location = New-Object System.Drawing.Point(12, 398)
-  $availLabel.AutoSize = $true
-  $availLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($availLabel)
-
-  $availModeCombo = New-Object System.Windows.Forms.ComboBox
-  $availModeCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
-  $availModeCombo.Location = New-Object System.Drawing.Point(240, 395)
-  $availModeCombo.Width = 160
-  [void]$availModeCombo.Items.AddRange(@((Get-UiString 'AppSettingsNotifyKeep'), (Get-UiString 'AppSettingsModeAsap'), (Get-UiString 'AppSettingsModeScheduled')))
-  $availModeCombo.SelectedIndex = 0
-  $availModeCombo.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($availModeCombo)
-
-  $availPicker = New-Object System.Windows.Forms.DateTimePicker
-  $availPicker.Format = [System.Windows.Forms.DateTimePickerFormat]::Custom
-  $availPicker.CustomFormat = "dd.MM.yyyy  HH:mm"
-  $availPicker.ShowUpDown = $true
-  $availPicker.Location = New-Object System.Drawing.Point(410, 395)
-  $availPicker.Width = 298
-  $availPicker.Enabled = $false
-  $availPicker.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($availPicker)
-  # WARUM JEDES EREIGNIS HIER UEBER $script:appSettingsUi GEHT
-  #
-  # Als eingebetteter Bereich wird diese Funktion einmal beim Aufbau des Fensters durchlaufen und
-  # kehrt sofort zurueck. Danach sind ihre lokalen Variablen weg, und jedes Ereignis, das spaeter
-  # feuert, sah $null - genau das waren die beiden Meldungen aus dem Protokoll:
-  #   "App settings load failed: The property 'Text' cannot be found on this object."
-  #   "FATAL UI ERROR: The expression after '&' ... must result in a command name, a script block".
-  #
-  # .GetNewClosure() waere der naheliegende Griff und ist hier trotzdem falsch: eine Closure haelt
-  # zwar die Steuerelemente fest, bindet den Block aber an ein dynamisches Modul. Dort zeigt
-  # $script: nicht mehr auf das Hauptskript, und die Funktionen des Skripts (Get-UiString,
-  # Write-Log, ...) werden nur gefunden, solange das Skript zufaellig das oberste ist - wird es aus
-  # einem anderen Skript heraus aufgerufen, meldet jedes Ereignis "Get-UiString is not recognized".
-  # Dieselbe Falle steht schon einmal weiter unten bei Show-LeistungstextDialog beschrieben.
-  #
-  # Deshalb: einfache Skriptbloecke (die finden Funktionen und $script: zuverlaessig) und die
-  # Steuerelemente in EINEM Beutel im Skript-Bereich. Der modale Dialog legt seinen eigenen Beutel
-  # an und stellt den vorherigen beim Schliessen zurueck (siehe unten), sonst haetten die Ereignisse
-  # des eingebetteten Bereichs danach auf die verworfenen Steuerelemente des Dialogs gezeigt.
-  $availModeCombo.Add_SelectedIndexChanged({
-    $ui = $script:appSettingsUi
-    $ui.AvailPicker.Enabled = ($ui.AvailModeCombo.SelectedIndex -eq 2)
-  })
-
-  $deadlineLabel = New-Object System.Windows.Forms.Label
-  $deadlineLabel.Text = Get-UiString 'AppSettingsDeadline'
-  $deadlineLabel.Location = New-Object System.Drawing.Point(12, 430)
-  $deadlineLabel.AutoSize = $true
-  $deadlineLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($deadlineLabel)
-
-  $deadlineModeCombo = New-Object System.Windows.Forms.ComboBox
-  $deadlineModeCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
-  $deadlineModeCombo.Location = New-Object System.Drawing.Point(240, 427)
-  $deadlineModeCombo.Width = 160
-  [void]$deadlineModeCombo.Items.AddRange(@((Get-UiString 'AppSettingsNotifyKeep'), (Get-UiString 'AppSettingsModeAsap'), (Get-UiString 'AppSettingsModeScheduled')))
-  $deadlineModeCombo.SelectedIndex = 0
-  $deadlineModeCombo.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($deadlineModeCombo)
-
-  $deadlinePicker = New-Object System.Windows.Forms.DateTimePicker
-  $deadlinePicker.Format = [System.Windows.Forms.DateTimePickerFormat]::Custom
-  $deadlinePicker.CustomFormat = "dd.MM.yyyy  HH:mm"
-  $deadlinePicker.ShowUpDown = $true
-  $deadlinePicker.Location = New-Object System.Drawing.Point(410, 427)
-  $deadlinePicker.Width = 298
-  $deadlinePicker.Enabled = $false
-  $deadlinePicker.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($deadlinePicker)
-  $deadlineModeCombo.Add_SelectedIndexChanged({
-    $ui = $script:appSettingsUi
-    $ui.DeadlinePicker.Enabled = ($ui.DeadlineModeCombo.SelectedIndex -eq 2)
-  })
-
-  $localTimeCheck = New-Object System.Windows.Forms.CheckBox
-  $localTimeCheck.Text = Get-UiString 'AppSettingsUseLocalTime'
-  $localTimeCheck.Location = New-Object System.Drawing.Point(12, 462)
-  $localTimeCheck.AutoSize = $true
-  $localTimeCheck.Checked = $true
-  $localTimeCheck.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($localTimeCheck)
-
-  $restartModeLabel = New-Object System.Windows.Forms.Label
-  $restartModeLabel.Text = Get-UiString 'AppSettingsRestartEnable'
-  $restartModeLabel.Location = New-Object System.Drawing.Point(12, 496)
-  $restartModeLabel.AutoSize = $true
-  $restartModeLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($restartModeLabel)
-
-  $restartModeCombo = New-Object System.Windows.Forms.ComboBox
-  $restartModeCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
-  $restartModeCombo.Location = New-Object System.Drawing.Point(240, 491)
-  $restartModeCombo.Width = 300
-  [void]$restartModeCombo.Items.AddRange(@((Get-UiString 'AppSettingsNotifyKeep'), (Get-UiString 'AppSettingsModeDisabled'), (Get-UiString 'AppSettingsModeEnabled')))
-  $restartModeCombo.SelectedIndex = 0
-  $restartModeCombo.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($restartModeCombo)
-
-  $restartGraceLabel = New-Object System.Windows.Forms.Label
-  $restartGraceLabel.Text = Get-UiString 'AppSettingsRestartGrace'
-  $restartGraceLabel.Location = New-Object System.Drawing.Point(32, 524)
-  $restartGraceLabel.AutoSize = $true
-  Set-LabelDimmed -Label $restartGraceLabel -Dimmed $true
-  $restartGraceLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($restartGraceLabel)
-  $restartGraceValue = New-Object System.Windows.Forms.NumericUpDown
-  $restartGraceValue.Location = New-Object System.Drawing.Point(240, 521)
-  $restartGraceValue.Width = 110
-  $restartGraceValue.Minimum = 1
-  $restartGraceValue.Maximum = 20160
-  $restartGraceValue.Value = 1440
-  $restartGraceValue.Enabled = $false
-  $restartGraceValue.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($restartGraceValue)
-
-  $restartCountdownLabel = New-Object System.Windows.Forms.Label
-  $restartCountdownLabel.Text = Get-UiString 'AppSettingsRestartCountdown'
-  $restartCountdownLabel.Location = New-Object System.Drawing.Point(32, 556)
-  $restartCountdownLabel.AutoSize = $true
-  Set-LabelDimmed -Label $restartCountdownLabel -Dimmed $true
-  $restartCountdownLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($restartCountdownLabel)
-  $restartCountdownValue = New-Object System.Windows.Forms.NumericUpDown
-  $restartCountdownValue.Location = New-Object System.Drawing.Point(240, 553)
-  $restartCountdownValue.Width = 110
-  $restartCountdownValue.Minimum = 1
-  $restartCountdownValue.Maximum = 20160
-  $restartCountdownValue.Value = 15
-  $restartCountdownValue.Enabled = $false
-  $restartCountdownValue.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($restartCountdownValue)
-
-  $restartSnoozeCheck = New-Object System.Windows.Forms.CheckBox
-  $restartSnoozeCheck.Text = Get-UiString 'AppSettingsRestartSnooze'
-  $restartSnoozeCheck.Location = New-Object System.Drawing.Point(380, 524)
-  $restartSnoozeCheck.AutoSize = $true
-  $restartSnoozeCheck.Checked = $true
-  $restartSnoozeCheck.Enabled = $false
-  $restartSnoozeCheck.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($restartSnoozeCheck)
-  $restartSnoozeLabel = New-Object System.Windows.Forms.Label
-  $restartSnoozeLabel.Text = Get-UiString 'AppSettingsRestartSnoozeMinutes'
-  $restartSnoozeLabel.Location = New-Object System.Drawing.Point(380, 556)
-  $restartSnoozeLabel.AutoSize = $true
-  Set-LabelDimmed -Label $restartSnoozeLabel -Dimmed $true
-  $restartSnoozeLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($restartSnoozeLabel)
-  $restartSnoozeValue = New-Object System.Windows.Forms.NumericUpDown
-  $restartSnoozeValue.Location = New-Object System.Drawing.Point(570, 553)
-  $restartSnoozeValue.Width = 110
-  $restartSnoozeValue.Minimum = 1
-  $restartSnoozeValue.Maximum = 20160
-  $restartSnoozeValue.Value = 240
-  $restartSnoozeValue.Enabled = $false
-  $restartSnoozeValue.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($restartSnoozeValue)
-
-  $restartModeCombo.Add_SelectedIndexChanged({
-    $ui = $script:appSettingsUi
-    $enabled = ($ui.RestartModeCombo.SelectedIndex -eq 2)
-    # Beschriftungen werden GEDAEMPFT, nicht deaktiviert: WinForms zeichnet eine deaktivierte
-    # Label in SystemColors.GrayText und ignoriert dabei jede Designfarbe (siehe 65-Theme).
-    Set-LabelDimmed -Label $ui.RestartGraceLabel -Dimmed (-not $enabled)
-    Set-LabelDimmed -Label $ui.RestartCountdownLabel -Dimmed (-not $enabled)
-    Set-LabelDimmed -Label $ui.RestartSnoozeLabel -Dimmed (-not $enabled)
-    $ui.RestartGraceValue.Enabled = $enabled
-    $ui.RestartCountdownValue.Enabled = $enabled
-    $ui.RestartSnoozeCheck.Enabled = $enabled
-    $ui.RestartSnoozeValue.Enabled = ($enabled -and $ui.RestartSnoozeCheck.Checked)
-  })
-  $restartSnoozeCheck.Add_CheckedChanged({
-    $ui = $script:appSettingsUi
-    $ui.RestartSnoozeValue.Enabled = ($ui.RestartModeCombo.SelectedIndex -eq 2 -and $ui.RestartSnoozeCheck.Checked)
-  })
-
-  $deliveryLabel = New-Object System.Windows.Forms.Label
-  $deliveryLabel.Text = Get-UiString 'AppSettingsDeliveryPriority'
-  $deliveryLabel.Location = New-Object System.Drawing.Point(12, 594)
-  $deliveryLabel.AutoSize = $true
-  $deliveryLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($deliveryLabel)
-  $deliveryCombo = New-Object System.Windows.Forms.ComboBox
-  $deliveryCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
-  $deliveryCombo.Location = New-Object System.Drawing.Point(240, 591)
-  $deliveryCombo.Width = 300
-  [void]$deliveryCombo.Items.AddRange(@((Get-UiString 'AppSettingsDeliveryKeep'), (Get-UiString 'AppSettingsDeliveryBackground'), (Get-UiString 'AppSettingsDeliveryForeground')))
-  $deliveryCombo.SelectedIndex = 0
-  $deliveryCombo.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($deliveryCombo)
-
-  $autoUpdLabel = New-Object System.Windows.Forms.Label
-  $autoUpdLabel.Text = Get-UiString 'AppSettingsAutoUpdate'
-  $autoUpdLabel.Location = New-Object System.Drawing.Point(12, 626)
-  $autoUpdLabel.Size = New-Object System.Drawing.Size(376, 38)
-  $autoUpdLabel.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($autoUpdLabel)
-
-  $autoUpdModeCombo = New-Object System.Windows.Forms.ComboBox
-  $autoUpdModeCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
-  # 240 wie alle anderen: die Auswahllisten dieser Karte stehen in einer Flucht. Diese eine stand
-  # auf 400, weil ihre Beschriftung 314 px breit war - die ist jetzt gekuerzt.
-  $autoUpdModeCombo.Location = New-Object System.Drawing.Point(240, 629)
-  $autoUpdModeCombo.Width = 140
-  [void]$autoUpdModeCombo.Items.AddRange(@((Get-UiString 'AppSettingsNotifyKeep'), (Get-UiString 'AppSettingsModeDisabled'), (Get-UiString 'AppSettingsModeEnabled')))
-  $autoUpdModeCombo.SelectedIndex = 0
-  $autoUpdModeCombo.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left
-  $dlg.Controls.Add($autoUpdModeCombo)
+  # Die Zuweisungseinstellungen baut Add-AppSettingsAssignmentControls; sie kommen unten in
+  # denselben Zustandsbeutel wie alles andere.
+  $assignmentControls = Add-AppSettingsAssignmentControls -Dialog $dlg
 
   $applyButton = New-Object System.Windows.Forms.Button
   $applyButton.Text = Get-UiString 'AppSettingsApplyButton'
@@ -382,29 +428,12 @@ function Show-AppSettingsDialog {
     PreselectApp          = $PreselectApp
     ApplyButton           = $applyButton
     CloseButton           = $closeButton
-    NotifyLabel           = $notifyLabel
-    AvailLabel            = $availLabel
-    DeadlineLabel         = $deadlineLabel
-    RestartModeLabel      = $restartModeLabel
-    DeliveryLabel         = $deliveryLabel
-    AutoUpdLabel          = $autoUpdLabel
-    NotifyCombo           = $notifyCombo
-    AvailModeCombo        = $availModeCombo
-    AvailPicker           = $availPicker
-    DeadlineModeCombo     = $deadlineModeCombo
-    DeadlinePicker        = $deadlinePicker
-    LocalTimeCheck        = $localTimeCheck
-    RestartModeCombo      = $restartModeCombo
-    RestartGraceLabel     = $restartGraceLabel
-    RestartGraceValue     = $restartGraceValue
-    RestartCountdownLabel = $restartCountdownLabel
-    RestartCountdownValue = $restartCountdownValue
-    RestartSnoozeCheck    = $restartSnoozeCheck
-    RestartSnoozeLabel    = $restartSnoozeLabel
-    RestartSnoozeValue    = $restartSnoozeValue
-    DeliveryCombo         = $deliveryCombo
-    AutoUpdModeCombo      = $autoUpdModeCombo
   }
+  # Die Steuerelemente der Zuweisungseinstellungen dazu - unter den Namen, die
+  # Add-AppSettingsAssignmentControls vergibt. Als Schleife und nicht als 22 Zeilen: eine
+  # vergessene Zeile waere hier ein $null im Beutel, und das faellt erst auf, wenn ein Ereignis
+  # darauf zugreift.
+  foreach ($key in $assignmentControls.Keys) { $script:appSettingsUi[$key] = $assignmentControls[$key] }
 
   # Apps are held on the rows themselves (.Tag), the same pattern the discovered list uses -
   # no fragile name matching.

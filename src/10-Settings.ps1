@@ -124,6 +124,24 @@ $script:settings = @{
   # Vorgabe bewusst 0: eine Einstellung, die Loeschungen freigibt, schaltet sich nicht selbst ein.
   # Das AUTOMATISCHE Aufraeumen ignoriert diesen Wert ohnehin immer.
   IgnoreDevicesQuietForDays = 0
+  # Die Versionsgrenze (KeepVersionCount) wiegt schwerer als gemeldete Installationen.
+  #
+  # Gewuenscht am 11.09.2026: "maximal drei Fassungen gleichzeitig, auch wenn einzelne Geraete noch
+  # alte tragen". Ohne diesen Schalter bleibt eine Fassung ueber der Grenze fuer immer stehen,
+  # sobald EIN Geraet sie meldet - IgnoreDevicesQuietForDays hilft nur bei stillen Geraeten und nur
+  # beim Aufraeumen von Hand.
+  #
+  # Was dabei wirklich passiert, und warum es vertretbar ist: eine geloeschte App wird auf dem
+  # Geraet NICHT deinstalliert. Die Software bleibt; Intune verliert fuer dieses Objekt den Bericht,
+  # die Zuweisung und die Moeglichkeit zur Neuinstallation.
+  #
+  # ZUWEISUNGEN schuetzen weiterhin - das ist ein anderer Schaden als ein verlorener Bericht.
+  #
+  # Vorgabe aus, wie bei jeder Einstellung, die Loeschungen freigibt. Anders als
+  # IgnoreDevicesQuietForDays wirkt dieser Schalter aber in BEIDEN Laeufen, auch im automatischen
+  # nach einem Update - ausdruecklich so entschieden, weil eine Obergrenze, die nur auf Knopfdruck
+  # gilt, keine Obergrenze ist.
+  VersionCapOverridesInstallations = $false
   ThemeName = "Light"
   Language = "en"
   RecentLogins = @()   # most-recent-first list of previously used UPNs, for quick re-selection
@@ -282,6 +300,13 @@ function Get-SettingsSnapshotLines {
     $(if ($quietDays -gt 0) {
         ("installations on devices quiet for more than {0} day(s) do NOT block a deletion (automatic cleanup still blocks on any installation)" -f $quietDays)
       } else { 'every reported installation blocks a deletion (IgnoreDevicesQuietForDays=0)' })))
+  # Der folgenreichste Schalter dieser Anwendung gehoert ausgeschrieben ins Protokoll, nicht als
+  # "True" am Ende einer Zeile: er gibt Loeschungen frei, die das Sicherheitsnetz sonst verhindert,
+  # und er wirkt in BEIDEN Laeufen.
+  $lines.Add(("{0} | version limit vs. installations: {1}" -f $Prefix,
+    $(if (& $val 'VersionCapOverridesInstallations' $false) {
+        ("a version beyond the newest {0} is deleted EVEN IF devices still report it installed (assignments still protect; the software stays on those devices, Intune loses the reporting). Applies to the manual AND the automatic cleanup." -f [int](& $val 'KeepVersionCount' 0))
+      } else { 'reported installations always block a deletion (VersionCapOverridesInstallations=off)' })))
   # Der Schalter allein sagt nicht, was WIRKT: das Unterdruecken gilt nur, wenn das Risiko fuer
   # GENAU DIESE Version bestaetigt wurde (Test-ChangeConfirmationsSuppressed). Gemeldet am
   # 08.09.2026 aus einem echten Protokoll: dort stand "suppressed=True (accepted for version
@@ -667,6 +692,7 @@ function Load-Settings {
         # A missing/invalid KeepVersionCount only resets THAT value - it must never silently
         # re-enable the auto-removal opt-in the user just turned off.
         $script:settings.KeepVersionCount        = Get-SettingValue -Source $o -Name 'KeepVersionCount'        -Type Int  -Default 2 -Minimum 1
+        $script:settings.VersionCapOverridesInstallations = Get-SettingValue -Source $o -Name 'VersionCapOverridesInstallations' -Type Bool -Default $false
         # Obergrenze 3650 (zehn Jahre): ein Tippfehler wie 99999 wuerde das Fenster praktisch
         # abschalten und damit stillschweigend das alte Verhalten herstellen - das faellt niemandem
         # auf. Untergrenze 0, weil 0 ausdruecklich "aus" bedeutet.

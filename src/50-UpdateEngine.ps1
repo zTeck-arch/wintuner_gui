@@ -72,6 +72,59 @@ function Get-AppVersionGroups {
   return @($result)
 }
 
+# Darf DIESE Fassung fallen, weil sie ueber der Versionsgrenze liegt?
+#
+# Das dritte Loeschurteil dieser Anwendung, und wie die anderen beiden eine reine Rechnung - damit
+# es pruefbar ist, ohne einen Lauf gegen einen echten Tenant zu fuehren.
+#
+# Die Leitregel der anderen beiden gilt hier genauso: eine Sondierung, die NICHT geantwortet hat,
+# zaehlt nie als "ist frei". Unbekannt heisst behalten. Eine geloeschte Intune-App laesst sich nicht
+# zurueckholen.
+#
+# Neu am 11.09.2026, ausdruecklich so gewuenscht: mit $CapOverridesInstallations wiegt die
+# Versionsgrenze schwerer als gemeldete Installationen. Der Grund, warum das vertretbar ist, steht
+# an der Einstellung selbst - eine geloeschte App wird auf dem Geraet NICHT deinstalliert. Die
+# Software bleibt; Intune verliert fuer dieses Objekt den Bericht, die Zuweisung und die
+# Moeglichkeit zur Neuinstallation.
+#
+# ZUWEISUNGEN schuetzen weiterhin, und zwar unabhaengig davon. Das ist ein anderer Schaden: faellt
+# eine noch zugewiesene Fassung, verlieren die betroffenen Geraete die Verteilung - nicht nur den
+# Bericht darueber.
+function Get-VersionCapDeleteVerdict {
+  param(
+    [Parameter(Mandatory)][AllowNull()][object]$AssignmentProbe,
+    [Parameter(Mandatory)][AllowNull()][object]$InstallationProbe,
+    [bool]$CapOverridesInstallations = $false
+  )
+  $flag = {
+    param($probe, $name)
+    [bool]($probe -and $probe.PSObject.Properties[$name] -and $probe.$name)
+  }
+  $out = @{ Delete = $false; KeepReason = ''; OverrodeInstallations = $false }
+
+  # Zuerst der Unbekannt-Fall: ohne Antwort ist nichts entschieden, und dann wird nichts geloescht.
+  # Auch nicht mit gesetzter Grenze - die Grenze ueberstimmt eine MELDUNG, nicht ihr Fehlen.
+  if (-not (& $flag $AssignmentProbe 'Succeeded') -or -not (& $flag $InstallationProbe 'Succeeded')) {
+    $out.KeepReason = 'unknown'
+    return $out
+  }
+  if (& $flag $AssignmentProbe 'HasAssignments') {
+    $out.KeepReason = 'assigned'
+    return $out
+  }
+  if (& $flag $InstallationProbe 'HasInstallations') {
+    if (-not $CapOverridesInstallations) {
+      $out.KeepReason = 'installations'
+      return $out
+    }
+    # Geloescht wird trotzdem - aber der Aufrufer muss wissen, dass er es getan hat, damit die
+    # Protokollzeile die Zahl der betroffenen Geraete nennen kann.
+    $out.OverrodeInstallations = $true
+  }
+  $out.Delete = $true
+  return $out
+}
+
 # Runs the "keep only N versions" cleanup. -Silent skips the confirmation (used by the automatic
 # post-update run); interactive callers get a Yes/No list of exactly what would be removed.
 function Invoke-VersionCleanup {
@@ -120,20 +173,29 @@ function Invoke-VersionCleanup {
         $assignmentProbe = Get-AppAssignmentProbe -AppId $item.App.GraphId -AppName $g.Name
         # Das Aktivitaetsfenster gilt NUR beim Aufraeumen von Hand ($Silent ist der automatische
         # Lauf nach einem Update). So ausdruecklich entschieden am 09.09.2026: automatisch heisst
-        # ohne Klick und ohne Blick - dort bleibt die vorsichtige Regel, dass jede gemeldete
-        # Installation schuetzt. Wer selbst aufraeumt, will die Karteileichen los.
+        # ohne Klick und ohne Blick. Wer selbst aufraeumt, will die Karteileichen los.
+        #
+        # NICHT zu verwechseln mit VersionCapOverridesInstallations weiter unten: das Fenster hier
+        # fragt "ist das Geraet noch aktiv?", die Einstellung dort sagt "die Versionsgrenze wiegt
+        # schwerer als die Meldung, ganz gleich wie frisch sie ist" - und die gilt in beiden Laeufen.
         $quietDays = if ($Silent) { 0 } else { [int]$script:settings.IgnoreDevicesQuietForDays }
         $installationProbe = Get-AppInstallationProbe -AppId $item.App.GraphId -AppName $g.Name `
           -IgnoreDevicesQuietForDays $quietDays
-        if (-not $assignmentProbe.Succeeded -or -not $installationProbe.Succeeded -or
-            $assignmentProbe.HasAssignments -or $installationProbe.HasInstallations) {
-          if (-not $assignmentProbe.Succeeded -or -not $installationProbe.Succeeded) {
+        # Die Versionsgrenze wiegt schwerer als gemeldete Installationen, wenn der Benutzer das so
+        # eingestellt hat - und dann in BEIDEN Laeufen, auch im automatischen. Ausdrueckliche
+        # Entscheidung vom 11.09.2026: "maximal N Versionen" soll immer halten und nicht nur, wenn
+        # jemand daran denkt, den Knopf zu druecken.
+        $capOverrides = [bool]$script:settings.VersionCapOverridesInstallations
+        $verdict = Get-VersionCapDeleteVerdict -AssignmentProbe $assignmentProbe `
+          -InstallationProbe $installationProbe -CapOverridesInstallations $capOverrides
+        if (-not $verdict.Delete) {
+          if ($verdict.KeepReason -eq 'unknown') {
             # Unknown state is a genuine problem: nothing can be decided, so this one counts as an
             # error rather than as a deliberate protection.
             $failed++
             $reason = 'assignment/installation state is unknown'
             $reasonText = Get-UiString 'CleanupKeptReasonUnknown'
-          } elseif ($assignmentProbe.HasAssignments) {
+          } elseif ($verdict.KeepReason -eq 'assigned') {
             $reason = 'the app still has assignments'
             $reasonText = Get-UiString 'CleanupKeptReasonAssigned'
             [void]$protectedItems.Add(("{0} {1} - {2}" -f $g.Name, $item.Raw, $reasonText))
@@ -161,6 +223,16 @@ function Invoke-VersionCleanup {
         }
         # Wird trotz gemeldeter Installationen geloescht, gehoert der Grund ins Protokoll - mit Zahl
         # und Alter. Ohne das liest sich der Lauf wie ein Widerspruch zum Sicherheitsnetz.
+        # Die Versionsgrenze hat die Meldung ueberstimmt. Das ist die folgenreichste Zeile dieses
+        # Laufs und muss die Zahl nennen: wie viele Geraete die Fassung noch tragen und wann das
+        # juengste zuletzt Kontakt hatte. Ohne sie sieht ein Lauf, der genau das Gewollte tut,
+        # hinterher aus wie ein Riss im Sicherheitsnetz.
+        if ($verdict.OverrodeInstallations) {
+          Write-Log ("Version cleanup: {0} {1} ({2}) is beyond the keep-newest-{3} limit and reports {4} installation(s) (newest device contact: {5}). Deleting anyway because 'the version limit outweighs reported installations' is switched on. The software STAYS installed on those devices; Intune loses the reporting, the assignment and the option to reinstall from this app object." -f `
+            $g.Name, $item.Raw, $item.App.GraphId, $KeepCount,
+            $(if ($null -ne $installationProbe.Count) { [int]$installationProbe.Count } else { 'an unknown number of' }),
+            $(if ($null -ne $installationProbe.NewestDaysAgo) { ("{0} day(s) ago" -f $installationProbe.NewestDaysAgo) } else { 'unknown' }))
+        }
         if ($installationProbe.StaleOnly) {
           Write-Log ("Version cleanup: {0} {1} ({2}) reports {3} installation(s), but ALL of them are on devices that have not synced within {4} day(s) (newest contact: {5}). The app object is deleted; the software stays installed on those devices - Intune only loses the reporting and the option to reinstall from this app." -f `
             $g.Name, $item.Raw, $item.App.GraphId, [int]$installationProbe.Count, $quietDays,
@@ -211,6 +283,217 @@ function Get-SupersedingAppIdFromError {
 }
 
 # Performs update workflow for a single app (create package + deploy)
+# --- Die zwei Loeschentscheidungen, als reine Rechnung ------------------------------------------
+#
+# Beide beantworten dieselbe Frage an zwei Stellen des Laufs: darf die Vorgaengerversion WEG? Sie
+# standen bis 0.19.1 als lose Ausdruecke mitten in Update-SingleApp - vier Bedingungen ueber drei
+# Sondierungen, gefolgt von einer elseif-Kette, die nur den Protokolltext waehlt. Damit waren sie
+# nur pruefbar, indem man einen ganzen Update-Lauf gegen einen Tenant fuehrt, also gar nicht: es ist
+# die folgenreichste Logik dieser Anwendung, und sie hatte keinen einzigen Test.
+#
+# Herausgezogen wird bewusst nur das Urteil, nicht das Handeln. Das Loeschen, das Protokoll und die
+# Sicherung des Geltungsbereichs bleiben beim Aufrufer - eine Funktion, die rechnet UND loescht,
+# waere im Test wieder nur mit Attrappen zu fassen.
+
+# Weg 1: die Zielversion lag schon im Tenant, es wurde nichts gebaut, nur zusammengefuehrt.
+#
+# `SafeExceptHandover` heisst: alles ausser der Uebergabe spricht fuer das Loeschen. Die Uebergabe
+# fehlt hier absichtlich - sie kostet Graph-Aufrufe und eine Wartezeit und wird deshalb zuletzt und
+# nur dann gefragt, wenn alles andere schon dafuer spricht (`NeedsHandoverCheck`).
+function Get-ConsolidationDeleteVerdict {
+  param(
+    [Parameter(Mandatory)][AllowNull()][object]$AssignmentProbe,
+    [Parameter(Mandatory)][AllowNull()][object]$PostAssignmentProbe,
+    [Parameter(Mandatory)][AllowNull()][object]$PreInstallProbe,
+    [Parameter(Mandatory)][AllowNull()][object]$PostInstallProbe,
+    [bool]$AutoRemoveSuperseded
+  )
+  $flag = {
+    param($probe, $name)
+    [bool]($probe -and $probe.PSObject.Properties[$name] -and $probe.$name)
+  }
+  $hadAssignments = [bool](& $flag $AssignmentProbe 'HasAssignments')
+  # Eine Sondierung, die nicht geantwortet hat, zaehlt NIE als "ist frei". Fehlt sie ganz, ist das
+  # derselbe Fall: unbekannt, also nicht loeschen.
+  $zeroInstallations = (
+    (& $flag $PreInstallProbe 'Succeeded') -and -not (& $flag $PreInstallProbe 'HasInstallations') -and
+    (& $flag $PostInstallProbe 'Succeeded') -and -not (& $flag $PostInstallProbe 'HasInstallations'))
+  $mayDeleteByPolicy = ((-not $hadAssignments) -or $AutoRemoveSuperseded)
+  $postAssignmentsFree = ((& $flag $PostAssignmentProbe 'Succeeded') -and -not (& $flag $PostAssignmentProbe 'HasAssignments'))
+  $safeExceptHandover = ($postAssignmentsFree -and $zeroInstallations -and $mayDeleteByPolicy)
+
+  $keepReason = ''
+  if (-not $safeExceptHandover) {
+    # Reihenfolge = Rangfolge der Erklaerung: erst was nicht nachweisbar war, dann was dagegen
+    # spricht, zuletzt die Einstellung. Wer den Protokolltext liest, soll den ERSTEN echten Grund
+    # sehen und nicht den zufaellig zuletzt geprueften.
+    if (-not (& $flag $PostAssignmentProbe 'Succeeded') -or
+        -not (& $flag $PreInstallProbe 'Succeeded') -or
+        -not (& $flag $PostInstallProbe 'Succeeded')) {
+      $keepReason = 'unverifiable'
+    } elseif ((& $flag $PostAssignmentProbe 'HasAssignments')) {
+      # Bis 0.19.1 fiel dieser Fall durch die elseif-Kette und wurde GAR NICHT protokolliert: die
+      # alte App blieb stehen, und im Protokoll stand kein Wort dazu.
+      $keepReason = 'assigned'
+    } elseif ((& $flag $PreInstallProbe 'HasInstallations') -or (& $flag $PostInstallProbe 'HasInstallations')) {
+      $keepReason = 'installations'
+    } elseif (-not $mayDeleteByPolicy) {
+      $keepReason = 'policy'
+    }
+  }
+  return @{
+    SafeExceptHandover = $safeExceptHandover
+    # Nur eine App, die ueberhaupt Zuweisungen hatte, kann etwas uebergeben haben.
+    NeedsHandoverCheck = ($safeExceptHandover -and $hadAssignments)
+    KeepReason         = $keepReason
+  }
+}
+
+# Weg 2: es wurde gebaut und hochgeladen, und der Vorgaenger trug keine Zuweisung.
+#
+# Hier gibt es keine Uebergabe zu pruefen - es gab nichts zu uebergeben. Verlangt werden drei
+# bestaetigte Nullbefunde: keine Zuweisung nach dem Upload, keine erfolgreiche Installation davor
+# und keine danach. Vor und nach dem Upload, weil zwischen Paketbau und Ende des Uploads Minuten
+# liegen und in dieser Zeit ein Geraet die alte Fassung installiert haben kann.
+function Get-UnusedPredecessorDeleteVerdict {
+  param(
+    [Parameter(Mandatory)][AllowNull()][object]$PostAssignmentProbe,
+    [Parameter(Mandatory)][AllowNull()][object]$PreInstallProbe,
+    [Parameter(Mandatory)][AllowNull()][object]$PostInstallProbe
+  )
+  $flag = {
+    param($probe, $name)
+    [bool]($probe -and $probe.PSObject.Properties[$name] -and $probe.$name)
+  }
+  $delete = (
+    (& $flag $PostAssignmentProbe 'Succeeded') -and -not (& $flag $PostAssignmentProbe 'HasAssignments') -and
+    (& $flag $PreInstallProbe 'Succeeded') -and -not (& $flag $PreInstallProbe 'HasInstallations') -and
+    (& $flag $PostInstallProbe 'Succeeded') -and -not (& $flag $PostInstallProbe 'HasInstallations'))
+  $keepReason = ''
+  if (-not $delete) {
+    if ((& $flag $PostAssignmentProbe 'Succeeded') -and (& $flag $PostAssignmentProbe 'HasAssignments')) {
+      $keepReason = 'assigned'
+    } elseif ((& $flag $PreInstallProbe 'HasInstallations') -or (& $flag $PostInstallProbe 'HasInstallations')) {
+      $keepReason = 'installations'
+    } else {
+      $keepReason = 'unverifiable'
+    }
+  }
+  return @{ Delete = $delete; KeepReason = $keepReason }
+}
+
+# Der Weg "die Zielversion liegt schon im Tenant".
+#
+# Hier wird NICHTS gebaut und nichts hochgeladen: die gewuenschte Fassung existiert bereits, und
+# dieser Lauf fuehrt nur eine konkrete alte Graph-App in sie zusammen - Zuweisungen hinueber,
+# alte Fassung weg, sofern das sicher ist. Bis 0.19.1 stand das als 90-Zeilen-Block mitten in
+# Update-SingleApp und war von aussen nicht benennbar; im Protokoll heisst er seit jeher
+# "Consolidation", im Code hatte er keinen Namen.
+#
+# $Result ist derselbe Behaelter wie beim Aufrufer (eine Hashtable ist ein Verweis) - er wird
+# hier gefuellt und zusaetzlich zurueckgegeben, damit der Weg im Aufrufer eine Zeile bleibt.
+function Invoke-ExistingTargetConsolidation {
+  param(
+    [Parameter(Mandatory)][string]$AppName,
+    [Parameter(Mandatory)][string]$GraphId,
+    [Parameter(Mandatory)][string]$ExistingTargetGraphId,
+    [string]$CurrentVersion,
+    [string]$LatestVersion,
+    [Parameter(Mandatory)][hashtable]$Result
+  )
+  if ([string]::Equals($GraphId, $ExistingTargetGraphId, [System.StringComparison]::OrdinalIgnoreCase)) {
+    $Result.Message = "Old and target Graph IDs are identical for '$AppName'; refusing an ambiguous consolidation."
+    Write-Log $Result.Message
+    return $Result
+  }
+  $Result.EffectiveVersion = $LatestVersion
+  $Result.SupersedenceSkipped = $true
+  Write-Log ("Reusing existing Intune target for {0}: {1} -> {2} (target GraphId: {3})" -f $AppName, $CurrentVersion, $LatestVersion, $ExistingTargetGraphId)
+
+  $assignmentProbe = Get-AppAssignmentProbe -AppId $GraphId -AppName $AppName
+  if (-not $assignmentProbe.Succeeded) {
+    $Result.Message = "Existing target found, but assignments of the old app could not be verified; no change was made."
+    Write-Log ("Consolidation blocked for {0}: {1}" -f $AppName, $Result.Message)
+    return $Result
+  }
+  $preInstallProbe = Get-AppInstallationProbe -AppId $GraphId -AppName $AppName
+
+  if ($assignmentProbe.HasAssignments) {
+    if (-not $script:settings.MoveAssignmentsOnUpdate) {
+      $Result.Message = "The latest version already exists, but the old app is assigned and assignment hand-over is disabled in Settings."
+      Write-Log ("Consolidation skipped for {0}: {1}" -f $AppName, $Result.Message)
+      return $Result
+    }
+    if (-not (Move-AppAssignments -OldAppId $GraphId -NewAppId $ExistingTargetGraphId -AppName $AppName)) {
+      $Result.Message = "The latest version already exists, but assignments could not be moved from the old app."
+      Write-Log ("Consolidation failed for {0}: {1}" -f $AppName, $Result.Message)
+      return $Result
+    }
+    $Result.AssignmentsMoved = $true
+  }
+
+  # Re-probing only makes sense when something was actually changed in between. Without a
+  # hand-over nothing touched this app, so the pre-probes still describe it exactly - asking
+  # Intune again cost two extra round trips per predecessor and produced the duplicated probe
+  # pairs in the log.
+  $postAssignmentProbe = if ($Result.AssignmentsMoved) {
+    Get-AppAssignmentProbe -AppId $GraphId -AppName $AppName
+  } else { $assignmentProbe }
+  $postInstallProbe = if ($Result.AssignmentsMoved) {
+    Get-AppInstallationProbe -AppId $GraphId -AppName $AppName
+  } else { $preInstallProbe }
+  # Das Urteil faellt Get-ConsolidationDeleteVerdict - rein gerechnet und einzeln pruefbar.
+  $verdict = Get-ConsolidationDeleteVerdict -AssignmentProbe $assignmentProbe `
+    -PostAssignmentProbe $postAssignmentProbe -PreInstallProbe $preInstallProbe `
+    -PostInstallProbe $postInstallProbe -AutoRemoveSuperseded ([bool]$script:settings.AutoRemoveSuperseded)
+  # Same reason as in the supersedence path below: when this app WAS assigned, its assignments
+  # must be provably on the reused target before the source may be deleted. Asked last, and only
+  # when everything else already allows the deletion - the probe costs Graph calls and a short
+  # wait, and a predecessor that never had an assignment has nothing to hand over anyway.
+  $handoverConfirmed = $true
+  if ($verdict.NeedsHandoverCheck) {
+    $handoverConfirmed = Test-SuccessorAssignmentsConfirmed -NewAppId $ExistingTargetGraphId -AppName $AppName
+  }
+  $safeToDelete = ($verdict.SafeExceptHandover -and $handoverConfirmed)
+
+  if ($safeToDelete) {
+    try {
+      $null = Save-AppScopeSnapshot -AppId $GraphId -AppName $AppName -Version $CurrentVersion `
+        -Reason (Get-UiString 'ScopeSnapshotReasonConsolidation')
+      Invoke-WtRemoveWin32App -AppId $GraphId
+      $Result.OldVersionRemoved = $true
+      Write-Log ("Consolidation: removed unused old app {0} {1} ({2}); target {3} already existed." -f $AppName, $CurrentVersion, $GraphId, $ExistingTargetGraphId)
+    } catch {
+      $Result.Message = "Assignments were consolidated, but the unused old version could not be removed: $($_.Exception.Message)"
+      Write-Log ("Consolidation cleanup failed for {0}: {1}" -f $AppName, $_.Exception.Message)
+    }
+  } elseif (-not $handoverConfirmed) {
+    Write-Log ("Consolidation: kept old app {0} because the reused target {1} carries no confirmed assignment; deleting the source would leave the app assigned to nobody." -f $AppName, $ExistingTargetGraphId)
+  } else {
+    # Ein Grund steht IMMER da. Bis 0.19.1 war der Fall "die alte App traegt nach der Uebergabe
+    # noch eine Zuweisung" in der Kette nicht vorgesehen - sie blieb stehen und das Protokoll
+    # schwieg dazu.
+    $keepText = switch ($verdict.KeepReason) {
+      'unverifiable'  { 'assignment/installation state was not safely verifiable' }
+      'assigned'      { 'it still carries an assignment after the hand-over' }
+      'installations' { 'Intune still reports successful installations' }
+      'policy'        { 'automatic assigned-predecessor removal is disabled' }
+      default         { 'the safety checks did not clear it' }
+    }
+    Write-Log ("Consolidation: kept old app {0} because {1}." -f $AppName, $keepText)
+  }
+
+  $Result.Success = $true
+  if ([string]::IsNullOrWhiteSpace($Result.Message)) {
+    $Result.Message = if ($Result.OldVersionRemoved) {
+      "Existing latest version reused; unused old version removed."
+    } else {
+      "Existing latest version reused; old version kept according to safety/settings."
+    }
+  }
+  return $Result
+}
+
 function Update-SingleApp {
   param(
     [Parameter(Mandatory=$true)]
@@ -284,95 +567,11 @@ function Update-SingleApp {
 
     # If the requested target version already exists, never deploy a duplicate Intune app. Treat
     # this row as consolidation of one concrete old Graph object into the existing target.
+    # Liegt die Zielversion schon im Tenant, wird nicht gebaut, sondern zusammengefuehrt.
     if ($GraphId -and $ExistingTargetGraphId) {
-      if ([string]::Equals($GraphId, $ExistingTargetGraphId, [System.StringComparison]::OrdinalIgnoreCase)) {
-        $result.Message = "Old and target Graph IDs are identical for '$AppName'; refusing an ambiguous consolidation."
-        Write-Log $result.Message
-        return $result
-      }
-      $result.EffectiveVersion = $LatestVersion
-      $result.SupersedenceSkipped = $true
-      Write-Log ("Reusing existing Intune target for {0}: {1} -> {2} (target GraphId: {3})" -f $AppName, $CurrentVersion, $LatestVersion, $ExistingTargetGraphId)
-
-      $assignmentProbe = Get-AppAssignmentProbe -AppId $GraphId -AppName $AppName
-      if (-not $assignmentProbe.Succeeded) {
-        $result.Message = "Existing target found, but assignments of the old app could not be verified; no change was made."
-        Write-Log ("Consolidation blocked for {0}: {1}" -f $AppName, $result.Message)
-        return $result
-      }
-      $preInstallProbe = Get-AppInstallationProbe -AppId $GraphId -AppName $AppName
-
-      if ($assignmentProbe.HasAssignments) {
-        if (-not $script:settings.MoveAssignmentsOnUpdate) {
-          $result.Message = "The latest version already exists, but the old app is assigned and assignment hand-over is disabled in Settings."
-          Write-Log ("Consolidation skipped for {0}: {1}" -f $AppName, $result.Message)
-          return $result
-        }
-        if (-not (Move-AppAssignments -OldAppId $GraphId -NewAppId $ExistingTargetGraphId -AppName $AppName)) {
-          $result.Message = "The latest version already exists, but assignments could not be moved from the old app."
-          Write-Log ("Consolidation failed for {0}: {1}" -f $AppName, $result.Message)
-          return $result
-        }
-        $result.AssignmentsMoved = $true
-      }
-
-      # Re-probing only makes sense when something was actually changed in between. Without a
-      # hand-over nothing touched this app, so the pre-probes still describe it exactly - asking
-      # Intune again cost two extra round trips per predecessor and produced the duplicated probe
-      # pairs in the log.
-      $postAssignmentProbe = if ($result.AssignmentsMoved) {
-        Get-AppAssignmentProbe -AppId $GraphId -AppName $AppName
-      } else { $assignmentProbe }
-      $postInstallProbe = if ($result.AssignmentsMoved) {
-        Get-AppInstallationProbe -AppId $GraphId -AppName $AppName
-      } else { $preInstallProbe }
-      $zeroInstallationsConfirmed = (
-        $preInstallProbe.Succeeded -and -not $preInstallProbe.HasInstallations -and
-        $postInstallProbe.Succeeded -and -not $postInstallProbe.HasInstallations)
-      $mayDeleteByPolicy = (-not $assignmentProbe.HasAssignments) -or [bool]$script:settings.AutoRemoveSuperseded
-      $safeExceptHandover = (
-        $postAssignmentProbe.Succeeded -and -not $postAssignmentProbe.HasAssignments -and
-        $zeroInstallationsConfirmed -and $mayDeleteByPolicy)
-      # Same reason as in the supersedence path below: when this app WAS assigned, its assignments
-      # must be provably on the reused target before the source may be deleted. Asked last, and only
-      # when everything else already allows the deletion - the probe costs Graph calls and a short
-      # wait, and a predecessor that never had an assignment has nothing to hand over anyway.
-      $handoverConfirmed = $true
-      if ($safeExceptHandover -and $assignmentProbe.HasAssignments) {
-        $handoverConfirmed = Test-SuccessorAssignmentsConfirmed -NewAppId $ExistingTargetGraphId -AppName $AppName
-      }
-      $safeToDelete = ($safeExceptHandover -and $handoverConfirmed)
-
-      if ($safeToDelete) {
-        try {
-          $null = Save-AppScopeSnapshot -AppId $GraphId -AppName $AppName -Version $CurrentVersion `
-            -Reason (Get-UiString 'ScopeSnapshotReasonConsolidation')
-          Invoke-WtRemoveWin32App -AppId $GraphId
-          $result.OldVersionRemoved = $true
-          Write-Log ("Consolidation: removed unused old app {0} {1} ({2}); target {3} already existed." -f $AppName, $CurrentVersion, $GraphId, $ExistingTargetGraphId)
-        } catch {
-          $result.Message = "Assignments were consolidated, but the unused old version could not be removed: $($_.Exception.Message)"
-          Write-Log ("Consolidation cleanup failed for {0}: {1}" -f $AppName, $_.Exception.Message)
-        }
-      } elseif (-not $handoverConfirmed) {
-        Write-Log ("Consolidation: kept old app {0} because the reused target {1} carries no confirmed assignment; deleting the source would leave the app assigned to nobody." -f $AppName, $ExistingTargetGraphId)
-      } elseif (-not $postAssignmentProbe.Succeeded -or -not $preInstallProbe.Succeeded -or -not $postInstallProbe.Succeeded) {
-        Write-Log ("Consolidation: kept old app {0} because assignment/installation state was not safely verifiable." -f $AppName)
-      } elseif ($postInstallProbe.HasInstallations -or $preInstallProbe.HasInstallations) {
-        Write-Log ("Consolidation: kept old app {0} because Intune still reports successful installations." -f $AppName)
-      } elseif (-not $mayDeleteByPolicy) {
-        Write-Log ("Consolidation: kept formerly assigned old app {0} because automatic assigned-predecessor removal is disabled." -f $AppName)
-      }
-
-      $result.Success = $true
-      if ([string]::IsNullOrWhiteSpace($result.Message)) {
-        $result.Message = if ($result.OldVersionRemoved) {
-          "Existing latest version reused; unused old version removed."
-        } else {
-          "Existing latest version reused; old version kept according to safety/settings."
-        }
-      }
-      return $result
+      return (Invoke-ExistingTargetConsolidation -AppName $AppName -GraphId $GraphId `
+        -ExistingTargetGraphId $ExistingTargetGraphId -CurrentVersion $CurrentVersion `
+        -LatestVersion $LatestVersion -Result $result)
     }
 
     # 2) Create/refresh package using fallback logic
@@ -556,11 +755,10 @@ function Update-SingleApp {
     if ($GraphId -and $deployWithoutSupersedence) {
       $postDeployProbe = Get-AppAssignmentProbe -AppId $GraphId -AppName $AppName
       $postDeployInstallationProbe = Get-AppInstallationProbe -AppId $GraphId -AppName $AppName
-      $safeToDeleteUnusedPredecessor = (
-        $postDeployProbe.Succeeded -and -not $postDeployProbe.HasAssignments -and
-        $preDeployInstallationProbe -and $preDeployInstallationProbe.Succeeded -and -not $preDeployInstallationProbe.HasInstallations -and
-        $postDeployInstallationProbe.Succeeded -and -not $postDeployInstallationProbe.HasInstallations)
-      if ($safeToDeleteUnusedPredecessor) {
+      # Auch hier faellt das Urteil in einer reinen Rechnung (Get-UnusedPredecessorDeleteVerdict).
+      $unusedVerdict = Get-UnusedPredecessorDeleteVerdict -PostAssignmentProbe $postDeployProbe `
+        -PreInstallProbe $preDeployInstallationProbe -PostInstallProbe $postDeployInstallationProbe
+      if ($unusedVerdict.Delete) {
         try {
           $null = Save-AppScopeSnapshot -AppId $GraphId -AppName $AppName -Version $CurrentVersion `
             -Reason (Get-UiString 'ScopeSnapshotReasonUpdateCleanup')
@@ -579,11 +777,10 @@ function Update-SingleApp {
             Write-Log "Update cleanup: could not remove unused predecessor for ${AppName}: $rawMsg"
           }
         }
-      } elseif ($postDeployProbe.Succeeded -and $postDeployProbe.HasAssignments) {
+      } elseif ($unusedVerdict.KeepReason -eq 'assigned') {
         $result.Message += " (no supersedence; old version kept because it received an assignment during the update)"
         Write-Log "Update cleanup: kept old version of $AppName because it received an assignment during the update."
-      } elseif (($preDeployInstallationProbe -and $preDeployInstallationProbe.Succeeded -and $preDeployInstallationProbe.HasInstallations) -or
-                ($postDeployInstallationProbe.Succeeded -and $postDeployInstallationProbe.HasInstallations)) {
+      } elseif ($unusedVerdict.KeepReason -eq 'installations') {
         $result.Message += " (no supersedence; old version kept because Intune reports successful installations)"
         Write-Log "Update cleanup: kept old version of $AppName because Intune reports successful installations."
       } else {

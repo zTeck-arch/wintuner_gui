@@ -71,6 +71,9 @@ Neue Win32-Apps hochladen und wahlweise als verfügbar, erforderlich oder zur De
 **Microsoft-Store-Apps verwalten**
 Store-Apps über Namen oder Paket-ID auflösen, im Tenant suchen und bereitstellen. Bereits vorhandene Apps werden erkannt, damit nichts doppelt bereitgestellt wird.
 
+**macOS-Pakete bereitstellen (Beta)**
+Eine macOS-`.pkg` als „macOS app (PKG)" nach Intune bringen. Es muss nichts paketiert werden: Intune nimmt die Datei des Herstellers, wie sie ist. Die Anwendung lässt sich aus einem Katalog wählen, der aus Homebrew stammt — gefiltert auf die Einträge, die wirklich eine `.pkg` liefern, mit veröffentlichter Prüfsumme, wo es eine gibt — oder als Datei von Hand. Bundle-ID, Version, enthaltene Bundles und die Mindestversion von macOS werden aus dem Paket gelesen. Wird dieselbe Anwendung erneut bereitgestellt, ersetzt die Oberfläche den Inhalt der vorhandenen App, statt eine zweite anzulegen — Zuweisungen und Statistik bleiben damit erhalten. Siehe den Hinweis unter [macOS-Pakete sind Beta](#macos-pakete-sind-beta).
+
 **Bereitgestellte Apps auf Updates prüfen**
 Win32-Apps in Intune mit aktuellen WinGet-Versionen vergleichen. Die Ergebnisliste unterscheidet zwischen erforderlichem neuen Upload, Wiederverwendung eines bereits vorhandenen Ziels und offener Nacharbeit.
 
@@ -79,6 +82,8 @@ Eine neue Zielversion paketieren oder eine vorhandene wiederverwenden, Zuweisung
 
 **Alte Versionen sicher bereinigen**
 Abgelöste oder ungenutzte App-Objekte ermitteln. Automatisch gelöscht wird erst, nachdem Zuweisungen und erfolgreiche Installationen erneut geprüft wurden. Die risikoreichen Optionen sind standardmäßig aus.
+
+Zusätzlich lässt sich begrenzen, wie viele Versionen eines Pakets vorgehalten werden. Für sich genommen weicht diese Grenze gemeldeten Installationen: eine Fassung darüber bleibt stehen, solange auch nur ein Gerät sie meldet. Eine Einstellung lässt die Grenze stattdessen gewinnen, beim Aufräumen von Hand wie im automatischen Lauf. Zuweisungen schützen eine Fassung weiterhin, und eine Fassung, deren Zustand sich nicht lesen lässt, wird nie gelöscht. Wichtig zu wissen, bevor man das einschaltet: **Das Löschen eines App-Objekts deinstalliert die Software auf dem Gerät nicht** — Intune verliert Bericht, Zuweisung und die Möglichkeit zur Neuinstallation aus diesem Objekt, die Software selbst bleibt.
 
 **Eigene Installer paketieren und App-Inhalte ersetzen**
 Beliebige EXE- oder MSI-Installer zu einem `.intunewin`-Paket verarbeiten, auch Software, die es in WinGet nicht gibt. Zusätzlich lässt sich der Inhalt einer vorhandenen Intune-App direkt ersetzen: App-ID, Zuweisungen und Historie bleiben unverändert, es entsteht kein zweites App-Objekt und nichts wird abgelöst.
@@ -114,10 +119,23 @@ Deutsche und englische Oberfläche, mehrere Darstellungsmodi sowie lokal gespeic
 | Erkannte Apps | Intune-Inventar und WinGet | Ordnet installierte Software möglichen WinGet-Paketen zu. Der Scan selbst ist nur lesend |
 | Alle Tenant-Apps | Intune | Listet jedes App-Objekt jeden Typs. Zuweisungen werden gelesen und können geändert werden, was nach Intune schreibt. Ausgewählte Apps lassen sich von hier **löschen** - endgültig, nach einer Rückfrage, die jede App nennt und sagt, welche davon zugewiesen oder installiert sind |
 | Eigene Installer | Lokale Dateien und Intune | Paketiert beliebige EXE oder MSI lokal zu `.intunewin`. Das Ersetzen des Inhalts einer vorhandenen App schreibt nach Intune |
+| macOS (PKG) – Beta | Homebrew, der Download des Herstellers und Intune | Lädt eine macOS-`.pkg` herunter und legt sie in Intune an oder ersetzt den Inhalt einer früher bereitgestellten App. Die Metadaten werden lokal gelesen; kein Katalogeintrag wird ohne Rückfrage bereitgestellt |
 | Lokale Pakete | WinGet und lokaler Paketordner | Pflegt Paketkopien auf diesem Rechner: gemerkte Pakete prüfen und neuere herunterladen. Legt nichts in Intune an |
 | Einstellungen | Lokale Einstellungsdatei und Intune | Paket- und Protokollordner, Sprache, Darstellung, Aufräum-Optionen und gespeicherte Gruppen-Favoriten. Hier wird der Tenant nicht selbst verändert; die Optionen entscheiden, was die anderen Bereiche dürfen |
 
 Die Oberfläche installiert keine Software auf Endgeräten. Sie erstellt und verwaltet App-Objekte und Zuweisungen in Intune; die eigentliche Verteilung und Auswertung übernimmt anschließend Microsoft Intune.
+
+### macOS-Pakete sind Beta
+
+Alles, was auf der Windows-Seite dieses Weges liegt, ist durch Tests gedeckt. Das Ergebnis nicht: ob ein Paket wirklich installiert, sieht man nur auf einem Mac, und an den Prüfungen dieses Projekts nimmt kein Mac teil. Die erste Bereitstellung ist ein Versuch, keine Routine — am besten ohne Zuweisung, damit nichts ein Gerät erreicht.
+
+Drei Dinge entscheiden, ob es funktioniert, und keines davon kann diese Oberfläche für Sie prüfen:
+
+- Die `.pkg` muss vom Hersteller **signiert und notarisiert** sein. Alles andere blockt macOS auf dem Gerät, ganz gleich was Intune meldet.
+- **Installationsskripte im Paket laufen als root.** Hochgeladen wird also mehr als eine Anwendung — prüfen Sie, woher die Datei stammt.
+- Intune erkennt die App an Bundle-ID und Version, und ein Paket führt **zwei** Versionen (`CFBundleShortVersionString` und `CFBundleVersion`). Beide werden ausgelesen, und Sie wählen, welche verwendet wird. Ist es die falsche, wird die App bei jeder Prüfung neu installiert statt erkannt.
+
+Der Katalog führt nur Einträge, die wirklich eine `.pkg` liefern — eine Minderheit von Homebrew, weil die meisten Anwendungen ein DMG ausliefern, und das ist ein anderer Intune-App-Typ, der hier nicht unterstützt wird. Für einige Anwendungen, bei denen der Hersteller eine `.pkg` anbietet, Homebrew aber auf ein DMG zeigt, ist eine kurze, von Hand geprüfte Liste von Hersteller-Adressen eingebaut.
 
 ---
 

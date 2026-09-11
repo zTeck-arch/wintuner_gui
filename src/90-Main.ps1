@@ -2264,7 +2264,7 @@ $navGroupOrder = @('start', 'deploy', 'manage', 'local')
 # verschieben will, aendert sie, nicht die Dateireihenfolge. Nicht aufgefuehrte Schluessel landen
 # hinten (in ihrer Gruppe), damit ein neuer Bereich nie verschwindet.
 $navKeyOrder = @('dashboard',
-                 'winget', 'store', 'ownpackage',
+                 'winget', 'store', 'ownpackage', 'macospkg',
                  'updates', 'discovered', 'tenant', 'appsettings',
                  'localpackages', 'workrecord', 'customerdata', 'settings')
 $navOrdered = @($script:sections | Sort-Object -Stable `

@@ -12,6 +12,13 @@ packages/
 *.intunewin
 *.wtpackage
 
+# Echte Hersteller-Pakete zum Nachmessen des PKG-Lesers. GoogleChrome.pkg ist 252 MB - git wuerde
+# das fuer immer behalten und jeder clone zoege es mit. Wer eine solche Datei hier ablegt, prueft
+# den Leser gegen die Wirklichkeit; fehlt sie, ueberspringt sich der Test (wie beim Modulvertrag).
+# Bewusst nur die Wurzel von tests/: das kleine, selbst erzeugte Fixture unter tests/Fixtures/
+# ist einige KB gross, enthaelt kein Hersteller-Material und GEHOERT ins Repository.
+tests/*.pkg
+
 # Arbeitszettel dieser Sitzungen - kein Teil der Anwendung, halten sich nicht aktuell und
 # beschreiben Zwischenstaende. Bewusst NICHT im Repository (mit -f liesse sich das erzwingen).
 AUDIT-PLAN.md
