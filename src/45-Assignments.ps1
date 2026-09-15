@@ -274,11 +274,39 @@ function Invoke-DuplicateAssignedCleanup {
 # If the second step fails the worst case is the state we already had (both assigned) – never a gap
 # where nothing is assigned.
 #
+# Seit 0.20.1 ist das im Aktualisierungslauf der EINZIGE Weg, auf dem die Zuweisungen umziehen -
+# vorher war es nur ein Sicherheitsnetz hinter Deploy-WtWin32App. Das Modul erledigt Kopieren und
+# Leeren naemlich in ZWEI Schritten EINER Graph-Sammelanfrage, ohne dependsOn und ohne die Antwort
+# anzusehen (DeployWtWin32App.SupersedeApp). Eine Sammelanfrage meldet Fehler pro Schritt und wirft
+# nicht: scheitert das Kopieren und gelingt das Leeren, ist die Zuweisung weg, die neue Version
+# traegt nichts, und niemand erfaehrt es. Genau das wurde aus dem Betrieb gemeldet. Deshalb laeuft
+# die Abloese jetzt mit -KeepAssignments (das Modul ruehrt die alte App nicht mehr an) und der
+# Umzug passiert hier - in der obigen Reihenfolge und mit einer lesbaren Fehlermeldung.
+#
 # Uses raw Graph with WinTuner's own token for the same reason as Remove-SupersededByUnlinking:
 # Invoke-MgGraphRequest needs its own Connect-MgGraph session, Get-WtToken does not.
 # NOTE: this REMOVES assignments in Intune – validate on a test app first.
 function Move-AppAssignments {
-  param([Parameter(Mandatory)][string]$OldAppId, [Parameter(Mandatory)][string]$NewAppId, [string]$AppName = '')
+  param(
+    [Parameter(Mandatory)][string]$OldAppId,
+    [Parameter(Mandatory)][string]$NewAppId,
+    [string]$AppName = '',
+    # Nur der Aktualisierungsweg setzt das. Dort ist die ALTE App die Quelle der Wahrheit, und was
+    # auf der neuen schon steht, ist die Kopie, die Deploy-WtWin32App beim Abloesen selbst angelegt
+    # hat - samt einer Einstellung, die das Modul dabei erfindet: an eine Available-Zuweisung ohne
+    # Einstellungen haengt es win32LobAppAssignmentSettings (Benachrichtigung + automatische
+    # Aktualisierung abgeloester Apps). Ohne diesen Schalter sieht der Abgleich unten darin einen
+    # Widerspruch und bricht die ganze Uebergabe ab, obwohl beide Seiten dieselbe Zuweisung meinen.
+    # Beim Zusammenfuehren mehrerer Fassungen (Tenant-Apps) bleibt der Abbruch richtig - dort
+    # treffen zwei ECHTE Quellen aufeinander und eine davon zu verwerfen waere eine Entscheidung,
+    # die niemand getroffen hat.
+    [switch]$SourceIsAuthoritative,
+    # Ausgabebeutel: der Aufrufer erfaehrt, ob wirklich GESCHRIEBEN wurde. Der Rueckgabewert sagt
+    # das nicht - eine leere Quelle gilt ebenfalls als Erfolg. Der Leistungsnachweis braucht den
+    # Unterschied, sonst nennt er Arbeit, die niemand getan hat.
+    [hashtable]$Outcome
+  )
+  if ($Outcome) { $Outcome['Wrote'] = $false; $Outcome['SourceCount'] = 0 }
   $newAppWritten = $false
   $guid = '^[0-9a-fA-F-]{36}$'
   if ($OldAppId -notmatch $guid -or $NewAppId -notmatch $guid) { Write-Log "Assignments: invalid app id(s), aborting."; return $false }
@@ -292,6 +320,7 @@ function Move-AppAssignments {
 
   try {
     $oldAssignments = @(Get-GraphCollectionItems -Uri "$base/$OldAppId/assignments" -Headers $headers)
+    if ($Outcome) { $Outcome['SourceCount'] = $oldAssignments.Count }
     if ($oldAssignments.Count -eq 0) {
       Write-Log ("Assignments: old app {0} has none - nothing to move." -f $OldAppId)
       return $true
@@ -340,8 +369,16 @@ function Move-AppAssignments {
           $newSettings = if ($n.settings) { $n.settings | ConvertTo-Json -Compress -Depth 12 } else { '' }
           $oldSettings = if ($p.settings) { $p.settings | ConvertTo-Json -Compress -Depth 12 } else { '' }
           if ($newSettings -ne $oldSettings) {
-            Write-Log ("Assignments: conflicting settings for the same intent/target/filter while consolidating {0}; kept both source apps and aborted instead of discarding a policy." -f $AppName)
-            return $false
+            if (-not $SourceIsAuthoritative) {
+              Write-Log ("Assignments: conflicting settings for the same intent/target/filter while consolidating {0}; kept both source apps and aborted instead of discarding a policy." -f $AppName)
+              return $false
+            }
+            # Die Quelle gewinnt - ausser sie hat GAR KEINE Einstellungen. Dann ist das, was auf der
+            # neuen App steht, die Ergaenzung des Moduls, und sie wegzuwerfen waere ein stiller
+            # Rueckschritt gegenueber dem, was die Abloese gerade eingerichtet hat. $p ist dieselbe
+            # Hashtable, die im Sendepaket steht - die Zuweisung wirkt dort unmittelbar.
+            if (-not $p.settings -and $n.settings) { $p.settings = $n.settings }
+            Write-Log ("Assignments: successor {0} already carried the same intent/target for {1} with different settings; the predecessor's assignment wins and the hand-over continues." -f $NewAppId, $AppName)
           }
           $dupe = $true
           break
@@ -366,6 +403,7 @@ function Move-AppAssignments {
     # "did not happen; nothing was changed", waehrend in Wahrheit BEIDE Versionen zugewiesen waren.
     # Das ist genau die falsche Reparaturanweisung. Gefunden von MoveAssignments.Tests.ps1.
     $newAppWritten = $true
+    if ($Outcome) { $Outcome['Wrote'] = $true }
     Write-Log ("Assignments: new app {0} now has {1} assignment(s) [{2}]" -f $NewAppId, $merged.Count, $desc)
     # Recorded as soon as it is true, not at the end: the successors really do carry the assignments
     # from here on, and if step 2 fails the performance record would otherwise show nothing at all

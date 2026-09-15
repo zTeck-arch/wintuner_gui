@@ -25,6 +25,18 @@ BeforeAll {
       target = [pscustomobject]@{ '@odata.type' = '#microsoft.graph.groupAssignmentTarget'; groupId = $GroupId }
     }
   }
+  # Die Nutzlast des ERSTEN Schreibvorgangs - mit der Zusicherung, dass es ihn gab.
+  #
+  # Ohne diese Zeile ist die Pruefung wertlos: blieb der Schreibvorgang aus, liefert
+  # ConvertFrom-Json auf $null nur einen nicht abbrechenden Fehler, $body bleibt $null, und
+  # @($null.mobileAppAssignments).Count ist 1 - die Zusicherung "genau eine Zuweisung" waere also
+  # gruen, obwohl gar nichts gesendet wurde. Genau so ist dieser Test bei der Gegenprobe zuerst
+  # durchgerutscht.
+  function global:Get-FirstWriteBody {
+    $global:WriteBodies.Count | Should -BeGreaterThan 0
+    return ($global:WriteBodies[0] | ConvertFrom-Json)
+  }
+
   # Ein Fehler, der GEWORFEN werden kann und seinen Status behaelt.
   #
   # Ein einfaches PSCustomObject genuegt hier nicht: `throw $objekt` verpackt es in eine
@@ -47,6 +59,10 @@ Describe 'Move-AppAssignments: die Uebergabe schreibt ZWEI Mal' {
     $global:OldAssignments = @(New-GroupAssignment)
     $global:NewAssignments = @()
     $global:WriteCalls = [System.Collections.Generic.List[string]]::new()
+    # Was wirklich auf der Leitung lag. Ohne das laesst sich "die Zuweisung steht genau einmal im
+    # Paket" nicht pruefen - und genau daran haengt die Uebergabe, seit das Ziel schon die Kopie
+    # des Moduls traegt.
+    $global:WriteBodies = [System.Collections.Generic.List[string]]::new()
     $global:FailOnWrite = 0    # 1 = der erste Schreibvorgang scheitert, 2 = der zweite
     $global:FailStatus = 429
     $global:TestLog.Clear()
@@ -62,6 +78,7 @@ Describe 'Move-AppAssignments: die Uebergabe schreibt ZWEI Mal' {
       param($Uri, $Method = 'GET', $Headers, $Body, $TimeoutSeconds, $MaxRetries, $Context)
       $which = if ($Uri -like ("*" + $global:NewId + "*")) { 'new' } else { 'old' }
       $global:WriteCalls.Add($which)
+      $global:WriteBodies.Add([string]$Body)
       if (($global:FailOnWrite -eq 1 -and $which -eq 'new') -or
           ($global:FailOnWrite -eq 2 -and $which -eq 'old')) {
         throw (New-ThrowableHttpError -Status $global:FailStatus -Message 'assignment write rejected')
@@ -148,6 +165,84 @@ Describe 'Move-AppAssignments: die Uebergabe schreibt ZWEI Mal' {
       Move-AppAssignments -OldAppId $global:OldId -NewAppId $global:NewId -AppName 'Chrome' | Should -BeFalse
       $global:WriteCalls.Count | Should -Be 0
       @($global:TestLog | Where-Object { $_ -like '*policy-set/inherited*' }).Count | Should -Be 1
+    }
+  }
+
+  # Der Befund aus dem Betrieb (gemeldet zu 0.20.0): "die alten Zuweisungen werden geloescht, aber
+  # nicht bei der neuen Version hinterlegt". Die Uebergabe lag bis dahin bei Deploy-WtWin32App, das
+  # Kopieren und Leeren in EINER Graph-Sammelanfrage erledigt, ohne dependsOn und ohne die Antwort
+  # anzusehen - ein gescheitertes Kopieren neben einem geglueckten Leeren faellt dort niemandem auf.
+  # Seit 0.20.1 laeuft die Abloese mit -KeepAssignments und der Umzug passiert hier. Damit trifft
+  # die Uebergabe auf der neuen App auf die Kopie, die das Modul trotzdem angelegt hat - inklusive
+  # der Einstellungen, die es einer Available-Zuweisung ohne Einstellungen anhaengt.
+  Context 'das Ziel traegt schon die Kopie des Moduls' {
+    BeforeEach {
+      $global:OldAssignments = @(New-GroupAssignment -Intent 'available')
+      $copy = New-GroupAssignment -Intent 'available'
+      $copy | Add-Member -NotePropertyName settings -NotePropertyValue ([pscustomobject]@{
+        '@odata.type' = '#microsoft.graph.win32LobAppAssignmentSettings'
+        notifications = 'showReboot'
+      }) -Force
+      $global:NewAssignments = @($copy)
+    }
+
+    It 'bricht ohne den Schalter ab - beim Zusammenfuehren zweier echter Quellen ist das richtig' {
+      Move-AppAssignments -OldAppId $global:OldId -NewAppId $global:NewId -AppName 'Chrome' | Should -BeFalse
+      $global:WriteCalls.Count | Should -Be 0
+    }
+
+    It 'fuehrt die Uebergabe mit -SourceIsAuthoritative zu Ende' {
+      Move-AppAssignments -OldAppId $global:OldId -NewAppId $global:NewId -AppName 'Chrome' -SourceIsAuthoritative |
+        Should -BeTrue
+      @($global:WriteCalls) | Should -Be @('new', 'old')
+    }
+
+    It 'schickt die Zuweisung genau einmal, nicht als Quelle UND als Kopie' {
+      $null = Move-AppAssignments -OldAppId $global:OldId -NewAppId $global:NewId -AppName 'Chrome' -SourceIsAuthoritative
+      $body = Get-FirstWriteBody
+      @($body.mobileAppAssignments).Count | Should -Be 1
+    }
+
+    It 'behaelt die Einstellungen des Moduls, wenn die Quelle keine hat' {
+      $null = Move-AppAssignments -OldAppId $global:OldId -NewAppId $global:NewId -AppName 'Chrome' -SourceIsAuthoritative
+      $body = Get-FirstWriteBody
+      @($body.mobileAppAssignments)[0].settings.notifications | Should -Be 'showReboot'
+    }
+
+    It 'laesst die QUELLE gewinnen, wenn beide Seiten Einstellungen tragen' {
+      $src = New-GroupAssignment -Intent 'available'
+      $src | Add-Member -NotePropertyName settings -NotePropertyValue ([pscustomobject]@{
+        '@odata.type' = '#microsoft.graph.win32LobAppAssignmentSettings'
+        notifications = 'hideAll'
+      }) -Force
+      $global:OldAssignments = @($src)
+      $null = Move-AppAssignments -OldAppId $global:OldId -NewAppId $global:NewId -AppName 'Chrome' -SourceIsAuthoritative
+      $body = Get-FirstWriteBody
+      @($body.mobileAppAssignments)[0].settings.notifications | Should -Be 'hideAll'
+    }
+  }
+
+  # "Erfolg" heisst bei dieser Funktion auch "es gab nichts zu tun". Der Leistungsnachweis braucht
+  # den Unterschied: bis 0.20.0 nannte er die Uebergabe genau dann, wenn sie gescheitert war.
+  Context 'der Ausgabebeutel trennt "geschrieben" von "nichts zu tun"' {
+    It 'meldet Wrote, wenn wirklich geschrieben wurde' {
+      $bag = @{}
+      $null = Move-AppAssignments -OldAppId $global:OldId -NewAppId $global:NewId -AppName 'Chrome' -Outcome $bag
+      $bag['Wrote'] | Should -BeTrue
+      $bag['SourceCount'] | Should -Be 1
+    }
+    It 'meldet KEIN Wrote, wenn die Quelle schon leer war' {
+      $global:OldAssignments = @()
+      $bag = @{}
+      Move-AppAssignments -OldAppId $global:OldId -NewAppId $global:NewId -AppName 'Chrome' -Outcome $bag | Should -BeTrue
+      $bag['Wrote'] | Should -BeFalse
+      $bag['SourceCount'] | Should -Be 0
+    }
+    It 'meldet KEIN Wrote, wenn der erste Schreibvorgang scheitert' {
+      $global:FailOnWrite = 1
+      $bag = @{}
+      $null = Move-AppAssignments -OldAppId $global:OldId -NewAppId $global:NewId -AppName 'Chrome' -Outcome $bag
+      $bag['Wrote'] | Should -BeFalse
     }
   }
 

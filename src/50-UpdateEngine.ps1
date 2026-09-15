@@ -382,6 +382,35 @@ function Get-UnusedPredecessorDeleteVerdict {
   return @{ Delete = $delete; KeepReason = $keepReason }
 }
 
+# Was darf der Leistungsnachweis ueber die Zuweisungs-Uebergabe sagen?
+#
+# Reine Rechnung, weil genau hier bis 0.20.0 das Gegenteil stand: aufgenommen wurde
+# "Zuweisung an die neue Version uebergeben", wenn Move-AppAssignments $false zurueckgab - also
+# GENAU DANN, wenn die Uebergabe gescheitert war. Gelang sie, schwieg der Nachweis. Der Kommentar
+# daneben beschrieb die richtige Absicht, die Bedingung war verdreht.
+#
+# Die drei Eingaben sind alle gemessen, keine geraten: ob der Vorgaenger ueberhaupt etwas trug
+# (Sonde vor dem Upload), ob der Umzug gelang (Rueckgabewert) und ob dabei wirklich GESCHRIEBEN
+# wurde (Ausgabebeutel). Der letzte Unterschied zaehlt, weil Move-AppAssignments seinen eigenen
+# Schreibvorgang selbst vermerkt - ein zweiter Eintrag waere dieselbe Arbeit doppelt.
+#
+#   'failed'              - nichts aufnehmen, der Vorgaenger behaelt seine Zuweisungen
+#   'nothing'             - es gab nichts zu uebergeben
+#   'movedByUs'           - Move-AppAssignments hat geschrieben UND es selbst vermerkt
+#   'handedOverElsewhere' - die Quelle war schon leer: ein aelteres Modul oder eine Hand im Portal
+#                           hat uebergeben. Nennen soll der Nachweis es trotzdem.
+function Get-AssignmentHandoverRecord {
+  param(
+    [Parameter(Mandatory)][bool]$PredecessorHadAssignments,
+    [Parameter(Mandatory)][bool]$MoveSucceeded,
+    [Parameter(Mandatory)][bool]$MoveWrote
+  )
+  if (-not $MoveSucceeded) { return 'failed' }
+  if (-not $PredecessorHadAssignments) { return 'nothing' }
+  if ($MoveWrote) { return 'movedByUs' }
+  return 'handedOverElsewhere'
+}
+
 # Der Weg "die Zielversion liegt schon im Tenant".
 #
 # Hier wird NICHTS gebaut und nichts hochgeladen: die gewuenschte Fassung existiert bereits, und
@@ -519,6 +548,11 @@ function Update-SingleApp {
     EffectiveVersion = $null
     OldVersionRemoved = $false
     AssignmentsMoved = $false
+    # Getrennt von AssignmentsMoved, weil es eine Aussage ueber den LAUF ist und nicht ueber den
+    # Vorgaenger: die Uebergabe scheiterte, die alte Version traegt ihre Zuweisungen also noch.
+    # Beide Versionen sind dann zugewiesen - ein Zustand, den jemand aufraeumen muss, und der
+    # deshalb in der Abschlussmeldung stehen muss statt nur im Protokoll.
+    AssignmentHandoverFailed = $false
     NewVersionAssignmentsCleared = $false
     # Separate from OldVersionRemoved on purpose. "Superseded" and "deleted" are two different
     # outcomes for the predecessor, and the performance record used to print the word for the
@@ -655,13 +689,25 @@ function Update-SingleApp {
       $deploySplat.GraphId = $GraphId
       # IMPORTANT module semantics: Deploy-WtWin32App ALWAYS copies the predecessor's assignments
       # onto the new version during supersedence. -KeepAssignments does NOT stop that copy; it only
-      # stops the module from emptying the OLD app afterwards. So:
-      #   * hand-over ON  (default): deploy without KeepAssignments -> module copies to new AND empties
-      #     old. Move-AppAssignments below is a safety net. Result: new assigned, old empty.
-      #   * hand-over OFF: deploy WITH KeepAssignments -> old keeps its assignments. The new version is
-      #     still assigned by the copy, so we explicitly clear it after resolution (see below) to make
-      #     "the new one is deployed unassigned" actually true.
-      if (-not $script:settings.MoveAssignmentsOnUpdate) { $deploySplat.KeepAssignments = $true }
+      # stops the module from emptying the OLD app afterwards.
+      #
+      # Deshalb wird es seit 0.20.1 IMMER gesetzt, auch wenn die Zuweisungen umziehen sollen. Der
+      # Grund steht im Modul (DeployWtWin32App.SupersedeApp): Kopieren und Leeren sind zwei
+      # Schritte EINER Graph-Sammelanfrage, sie haengen nicht voneinander ab (kein dependsOn), und
+      # die Antwort der Sammelanfrage wird weggeworfen. Eine Sammelanfrage meldet ihre Fehler pro
+      # Schritt und wirft nicht - scheitert also das Kopieren (Drosselung, abgelehnte Nutzlast) und
+      # gelingt das Leeren, dann ist die Zuweisung weg, die neue Version traegt nichts, und NIEMAND
+      # erfaehrt es. Genau dieses Bild kam aus dem Betrieb: alte Zuweisungen geloescht, neue Version
+      # ohne Zuweisung.
+      #
+      # Mit KeepAssignments ruehrt das Modul die alte App nicht mehr an. Den Umzug macht danach
+      # Move-AppAssignments selbst: erst die neue schreiben, dann die alte leeren, mit Zeitablauf,
+      # 429-Wiederholung und einer Fehlermeldung im Klartext. Der schlimmste Fall ist damit "beide
+      # Versionen zugewiesen" - nie mehr "keine".
+      #
+      # Fuer "Umzug AUS" aendert sich nichts: die Kopie auf der neuen Version raeumt weiterhin
+      # Clear-AppAssignments weg (siehe unten), damit "unzugewiesen ausgeliefert" auch stimmt.
+      $deploySplat.KeepAssignments = $true
       $deploySplat.PackageId = $wingetId
       $deploySplat.Version = $effectiveVersion
       Write-Log ("Deploying by GraphId ({0}) + PackageId/Version (KeepAssignments={1})" -f $GraphId, [bool]$deploySplat.KeepAssignments)
@@ -706,26 +752,34 @@ function Update-SingleApp {
     Write-Log ("Target resolution took {0:n1}s for {1} {2}." -f $resolveStopwatch.Elapsed.TotalSeconds, $wingetId, $effectiveVersion)
     $newAppId = if ($resolvedTarget -and $resolvedTarget.GraphId) { [string]$resolvedTarget.GraphId } else { $null }
 
-    # Scope hand-over: only the newest version should stay assigned. Runs even when the module
-    # already moved them – Move-AppAssignments is a no-op when the old app has no assignments left.
+    # Scope hand-over: only the newest version should stay assigned. Seit 0.20.1 ist das der EINZIGE
+    # Weg, auf dem die Zuweisungen umziehen - das Modul laeuft mit -KeepAssignments und ruehrt die
+    # alte App nicht mehr an (Begruendung oben am Aufrufsplat).
     if ($GraphId -and -not $deployWithoutSupersedence -and $script:settings.MoveAssignmentsOnUpdate) {
       if ($newAppId) {
-        if (Move-AppAssignments -OldAppId $GraphId -NewAppId $newAppId -AppName $AppName) {
+        $handover = @{}
+        if (Move-AppAssignments -OldAppId $GraphId -NewAppId $newAppId -AppName $AppName `
+              -SourceIsAuthoritative -Outcome $handover) {
           $result.AssignmentsMoved = $true
+        } else {
+          # Gescheitert heisst hier NICHT "verloren": Move-AppAssignments schreibt erst die neue App
+          # und leert die alte nur danach, der Vorgaenger traegt seine Zuweisungen also noch. Das
+          # gehoert in die Meldung, sonst sucht jemand im Portal nach etwas, das gar nicht weg ist.
+          $result.AssignmentHandoverFailed = $true
+          Write-Log ("Assignments: hand-over for {0} from {1} to {2} did not complete; the predecessor keeps its scope. The Graph answer is in the line above." -f $AppName, $GraphId, $newAppId)
         }
-        # Record the hand-over even when Move-AppAssignments found nothing left to move.
-        #
-        # That is the NORMAL outcome: Deploy-WtWin32App always copies the predecessor's assignments
-        # onto the new version and clears the old one, so by the time we look there is nothing left.
-        # Move-AppAssignments then returns early without recording, and the record showed no
-        # assignment work at all for a run whose whole point was handing the scope over.
-        if ($result.PredecessorHadAssignments -and -not $result.AssignmentsMoved) {
-          try {
-            Add-SessionActivity -Kind 'AssignmentsChanged' -Name $AppName `
-              -ToVersion $effectiveVersion -Detail (Get-UiString 'ActivityAssignmentHandedOver')
-          } catch { }
+        switch (Get-AssignmentHandoverRecord -PredecessorHadAssignments ([bool]$result.PredecessorHadAssignments) `
+                  -MoveSucceeded ([bool]$result.AssignmentsMoved) -MoveWrote ([bool]$handover['Wrote'])) {
+          'handedOverElsewhere' {
+            try {
+              Add-SessionActivity -Kind 'AssignmentsChanged' -Name $AppName `
+                -ToVersion $effectiveVersion -Detail (Get-UiString 'ActivityAssignmentHandedOver')
+            } catch { }
+          }
+          default { }   # 'movedByUs' vermerkt Move-AppAssignments selbst, 'failed'/'nothing' nichts
         }
       } else {
+        $result.AssignmentHandoverFailed = $true
         Write-Log ("Assignments: the new target GraphId for {0} could not be resolved from Intune - predecessor keeps its assignments (check the portal)." -f $AppName)
       }
     }
@@ -747,6 +801,12 @@ function Update-SingleApp {
 
     $result.Success = $true
     $result.Message = "Update completed successfully for $AppName"
+    # Die neue Fassung liegt im Tenant, deshalb bleibt der Lauf erfolgreich - aber der Umzug fehlt,
+    # und beide Versionen sind zugewiesen. Wer das nicht liest, entzieht dem Vorgaenger die Gruppen
+    # nie.
+    if ($result.AssignmentHandoverFailed) {
+      $result.Message += " (assignment hand-over did NOT complete - the old version still carries its assignments; see the log)"
+    }
     Write-Log $result.Message
 
     # 4a) No assignment means no supersedence is needed. Re-check BOTH conditions AFTER the upload

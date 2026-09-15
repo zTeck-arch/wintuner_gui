@@ -255,6 +255,33 @@ Dazu die dritte: eine Absage, die **strukturell** ist, nicht in jedem Lauf wiede
 **nicht**, sonst schaltet ein einzelner Fehlschlag das Aufräumen für die Sitzung ab. Und der
 Merkzettel gehört in den Tenant-Riegel: App-Ids gehören einem Kunden.
 
+### Eine Graph-Sammelanfrage verschluckt das Scheitern ihrer einzelnen Schritte
+`Deploy-WtWin32App` erledigt die Ablöse in **einer** `$batch`-Anfrage: Ablösebeziehung setzen,
+Kategorien kopieren, Zuweisungen auf die neue Version schreiben, Zuweisungen der alten leeren. Die
+Schritte tragen kein `dependsOn`, laufen also in beliebiger Reihenfolge, und die Antwort der
+Sammelanfrage wird verworfen. Eine Sammelanfrage meldet ihre Fehler aber **pro Schritt** und wirft
+nicht: scheitert das Schreiben und gelingt das Leeren, ist der Geltungsbereich weg — ohne Ausnahme,
+ohne Protokollzeile, ohne dass irgendwer es merkt. Aus dem Betrieb gemeldet zu 0.20.0: „Die alten
+Zuweisungen werden gelöscht, aber nicht bei der neuen Version hinterlegt."
+
+Die Lehre ist allgemeiner als dieser eine Fall: **ein fremder Aufruf, dessen Rückgabewert niemand
+liest, ist keine Zusicherung.** Wo das Ergebnis zählt, muss der eigene Code es entweder selbst
+schreiben oder nachlesen — dieselbe Regel wie beim Ablöse-Rückbau eine Überschrift weiter oben.
+
+Umgesetzt: die Ablöse läuft jetzt immer mit `-KeepAssignments` (das Modul rührt die alte Version
+damit nicht mehr an), und den Umzug macht `Move-AppAssignments` — erst schreiben, dann leeren.
+Zwei Fallen dabei, beide als Test festgehalten:
+
+- Das Modul kopiert die Zuweisungen **trotz** `-KeepAssignments` auf die neue Version und hängt
+  dabei einer `available`-Zuweisung ohne Einstellungen eigene `win32LobAppAssignmentSettings` an.
+  Der Abgleich in `Move-AppAssignments` sah darin einen Widerspruch und brach ab. `-SourceIsAuthoritative`
+  löst ihn auf: die Quelle gewinnt, außer sie hat gar keine Einstellungen. Beim Zusammenführen
+  mehrerer Fassungen (Tenant-Apps) bleibt der Abbruch richtig — dort treffen zwei echte Quellen aufeinander.
+- „Erfolg" heißt bei `Move-AppAssignments` auch „es gab nichts zu übertragen". Wer daraus einen
+  Eintrag für den Leistungsnachweis ableitet, muss den Unterschied kennen (`-Outcome`, `Wrote`) —
+  sonst steht im Nachweis Arbeit, die niemand getan hat. Bis 0.20.0 stand dort genau das, und zwar
+  mit verdrehter Bedingung: gemeldet wurde die Übergabe ausschließlich dann, wenn sie gescheitert war.
+
 ### Das Protokoll muss sagen, WIE die Anwendung eingestellt ist
 `Get-SettingsSnapshotLines` (10-Settings) liefert die Zeilen, `90-Main` schreibt sie beim Start und
 `85-Rows` nach dem Speichern. Rein und getestet, weil die eigentliche Regel eine inhaltliche ist:

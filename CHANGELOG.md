@@ -1,5 +1,46 @@
 ﻿# Changelog
 
+## 0.20.1 – Die Zuweisungen ziehen wieder um
+
+**Aus dem Betrieb (15.09.2026).** Gemeldet wurde: „Die alten Zuweisungen werden gelöscht, aber nicht
+bei der neuen Version hinterlegt" — teils, nicht immer; der Verdacht lautete, es passiere ab drei
+Gruppen. Nach einem Update war die Vorgängerversion also leer, die neue unzugewiesen, und niemand im
+Scope bekam die Software noch.
+
+> [!NOTE]
+> **Zwei Bestätigungen kommen nach dem Update einmal wieder** — beide hängen absichtlich an der
+> Versionsnummer: „Rückfragen vor Änderungen in Intune überspringen" muss erneut bestätigt werden,
+> und der Produktivhinweis beim Start erscheint noch einmal, sofern Sie ihn nicht dauerhaft
+> abgestellt haben.
+
+- **Behoben: die Übergabe der Zuweisungen lief über einen Weg, der sein eigenes Scheitern nicht
+  bemerkt.** Sie lag bisher beim fremden Modul: `Deploy-WtWin32App` kopiert beim Ablösen die
+  Zuweisungen auf die neue Version **und** leert die alte. Beides sind zwei Schritte **einer**
+  Graph-Sammelanfrage (`$batch`) — sie hängen nicht voneinander ab (kein `dependsOn`), und die
+  Antwort der Sammelanfrage wird verworfen. Eine Sammelanfrage meldet ihre Fehler aber **pro
+  Schritt** und wirft nicht: scheitert das Kopieren — Drosselung, abgelehnte Nutzlast, was auch
+  immer — und gelingt das Leeren, dann ist die Zuweisung weg, die neue Version trägt nichts, und es
+  gibt keine Fehlermeldung, weil niemand hingesehen hat. Genau das gemeldete Bild. Die eigene,
+  vorsichtige Übergabe (`Move-AppAssignments`: erst schreiben, dann leeren) stand zwar daneben, war
+  aber wirkungslos — sie liest die **alte** App, und die hatte das Modul zu diesem Zeitpunkt schon
+  geleert. Ein Sicherheitsnetz, das genau im Schadensfall ins Leere greift.
+- **Die Ablöse läuft jetzt immer mit `-KeepAssignments`, und den Umzug macht die Oberfläche
+  selbst.** Das Modul rührt die alte Version damit nicht mehr an. Übertragen wird in der Reihenfolge,
+  die es immer sein sollte: erst die neue Version schreiben, und **nur wenn das gelungen ist** die
+  alte leeren — mit Zeitablauf, Wiederholung bei Drosselung und einer Fehlermeldung im Klartext.
+  Der schlimmste Fall ist damit „beide Versionen sind zugewiesen" und steht in der Abschlussmeldung.
+  Nie mehr „keine".
+- **Behoben: der Leistungsnachweis nannte die Übergabe genau dann, wenn sie gescheitert war.** Die
+  Bedingung dafür war verdreht — sie fragte nach „Umzug **nicht** erfolgreich". Da „es gab nichts zu
+  übertragen" bei dieser Funktion ebenfalls als Erfolg gilt, blieb der Eintrag in jedem normalen
+  Lauf aus und erschien ausgerechnet in den gescheiterten. Der Nachweis, der beim Kunden ins Ticket
+  geht, behauptete also Arbeit, die nicht stattgefunden hat. Die Entscheidung liegt jetzt in einer
+  reinen Rechnung mit eigenen Prüfungen, und sie unterscheidet die vier Fälle, die es wirklich gibt.
+- **Zur gemeldeten Grenze von zwei Gruppen:** die lässt sich weder bestätigen noch ausschließen —
+  der Grund steht oben, der Fehler des Kopierschritts wurde nie gelesen. Schlägt das Kopieren künftig
+  fehl, steht die Antwort von Graph im Protokoll, und die alte Version behält ihre Zuweisungen, bis
+  jemand hingesehen hat.
+
 ## 0.20.0 – macOS-Pakete und eine Versionsgrenze, die sich durchsetzt
 
 Zwei Neuerungen, die nichts miteinander zu tun haben außer dem Datum: die Oberfläche kann jetzt
