@@ -18,6 +18,66 @@ BeforeAll {
   . ([scriptblock]::Create((Get-UiStringsText)))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '10-Settings.ps1' -Name @(
     'Get-SettingsSnapshotLines'))))
+  . ([scriptblock]::Create((Get-SourceFunctionText -Part '50-UpdateEngine.ps1' -Name 'Get-BatchSummaryStatus')))
+  . ([scriptblock]::Create((Get-SourceFunctionText -Part '70-Runtime.ps1' -Name 'Get-ShortErrorDetail')))
+}
+
+# Aus einem echten Protokoll vom 22.09.2026, beides Berichtstreue - nichts ging verloren, aber der
+# Leser wurde in die Irre gefuehrt.
+Describe 'Ein Update, das seine alte Version nicht loswird, sagt das auch' {
+  It 'setzt die Marke, wenn die Konsolidierungs-Loeschung scheitert' {
+    # Intune verweigert die Loeschung strukturell, wenn die alte Fassung Vorgaenger einer dritten
+    # App ist. Das ist kein Fehler des Laufs - aber ein App-Objekt bleibt stehen.
+    $engine = Get-SourcePartText -Part '50-UpdateEngine.ps1'
+    $engine | Should -Match 'OldVersionRemovalFailed = \$false'
+    $engine | Should -Match '\$Result\.OldVersionRemovalFailed = \$true'
+  }
+
+  It 'haengt den Vorbehalt an die Erfolgszeile, statt sie unqualifiziert zu schreiben' {
+    # Vorher stand eine Zeile hoeher "Consolidation cleanup failed for X" und hier
+    # "Successfully updated: X" - wer nur die Erfolgszeilen ueberfliegt, erfuhr es nie.
+    $batch = Get-SourcePartText -Part '60-Batch.ps1'
+    $batch | Should -Match 'if \(\$result\.OldVersionRemovalFailed\)'
+    $batch | Should -Match 'could not be removed and is still in the tenant'
+  }
+}
+
+Describe 'Get-ShortErrorDetail: ein Dienstfehler, den ein Mensch lesen kann' {
+  # Eine fehlgeschlagene Anmeldung schrieb den vollstaendigen Graph-JSON VIER Mal ins Protokoll,
+  # und derselbe mehrzeilige Block stand danach in der Statuszeile.
+  It 'faltet Zeilenumbrueche zu einer Zeile' {
+    $text = "{`r`n  `"Message`": `"kaputt`",`r`n  `"Code`": 403`r`n}"
+    $short = Get-ShortErrorDetail -Text $text
+    $short | Should -Not -Match "`r"
+    $short | Should -Not -Match "`n"
+    $short | Should -Match 'kaputt'
+  }
+  It 'kuerzt und sagt, dass der Rest im Protokoll steht' {
+    $short = Get-ShortErrorDetail -Text ('x' * 900) -MaxLength 100
+    $short.Length | Should -BeLessThan 200
+    $short | Should -Match 'Protokoll'
+  }
+  It 'laesst einen kurzen Text unangetastet' {
+    Get-ShortErrorDetail -Text 'kurz und knapp' | Should -BeExactly 'kurz und knapp'
+  }
+  It 'kommt mit leer zurecht' {
+    Get-ShortErrorDetail -Text '' | Should -BeExactly ''
+  }
+
+  It 'wird beim Anmeldefehler auch wirklich benutzt, und der Koerper nicht doppelt geschrieben' {
+    $main = Get-SourcePartText -Part '90-Main.ps1'
+    $main | Should -Match 'Get-ShortErrorDetail -Text \$probeDetail'
+    # Die Zeile darf den Koerper nicht ein zweites Mal ausgeben - er steht schon in der Zeile aus
+    # Test-WtConnected.
+    $main | Should -Match 'the service answer is in the line above'
+    $main | Should -Not -Match 'First Intune query failed after sign-in \(\{0\}\): \{1\}'
+  }
+
+  It 'nennt die Einstufung, die wirklich gefallen ist, statt fest "transient or unknown"' {
+    $main = Get-SourcePartText -Part '90-Main.ps1'
+    $main | Should -Match '\$script:lastConnectionProbeVerdict'
+    $main | Should -Not -Match "'transient or unknown'"
+  }
 }
 
 Describe 'Die Pruefmeldung des Versionsaufraeumens' {
@@ -88,14 +148,33 @@ Describe 'Die Abschlussmeldung verschweigt keinen Aufraeum-Fehlschlag' {
 
   It 'reicht die Zahl der gescheiterten Loeschungen aus dem Aufraeumen durch' {
     $script:engine | Should -Match '\$script:lastVersionCleanupFailed = \$failed'
-    $script:main | Should -Match '\$cleanupFailed = \[int\]\$script:lastVersionCleanupFailed'
+    $script:main | Should -Match 'CleanupFailed \(\[int\]\$script:lastVersionCleanupFailed\)'
   }
 
-  It 'nennt sie in der Statuszeile, statt sie mit "0 fehlgeschlagen" zu ueberschreiben' {
-    $script:main | Should -Match 'CheckedAppsUpdatedCleanupFailedStatus'
+  # Seit 0.21.1 gilt dasselbe fuer den Erfolg: ein Lauf, der sieben alte Versionen ENTFERNT hat,
+  # endete sichtbar mit "0 fehlgeschlagen" und sonst nichts (gemeldet am 22.09.2026). Wer loescht,
+  # muss das sagen - nicht nur, wer beim Loeschen scheitert.
+  It 'reicht die Zahl der entfernten Versionen genauso durch' {
+    $script:engine | Should -Match '\$script:lastVersionCleanupRemoved = \$removed'
+    $script:main | Should -Match 'CleanupRemoved \(\[int\]\$script:lastVersionCleanupRemoved\)'
+  }
+
+  # Gegen die Fundstelle zu pruefen war der Fehler der ersten Fassung: die Zusicherung hing an
+  # einem Textschluessel IN 90-Main, und eine Verschiebung derselben Entscheidung in eine eigene
+  # Rechnung liess sie rot werden, obwohl sich am Verhalten nichts geaendert hatte. Gefragt wird
+  # jetzt die Rechnung selbst, in beiden Sprachen.
+  It 'nennt beides in der Statuszeile, statt es mit "0 fehlgeschlagen" zu ueberschreiben' {
     foreach ($lang in @('en', 'de')) {
       $script:uiLanguage = $lang
-      (Get-UiString 'CheckedAppsUpdatedCleanupFailedStatus') | Should -Not -BeNullOrEmpty
+      $failedOnly = Get-BatchSummaryStatus -SuccessCount 3 -FailedCount 0 -CleanupFailed 3
+      $removedOnly = Get-BatchSummaryStatus -SuccessCount 3 -FailedCount 0 -CleanupRemoved 7
+      $plain = Get-BatchSummaryStatus -SuccessCount 3 -FailedCount 0
+
+      $failedOnly | Should -Match '3'
+      $failedOnly | Should -Not -Be $plain
+      $removedOnly | Should -Match '7'
+      $removedOnly | Should -Not -Be $plain
+      $removedOnly | Should -Not -Be $failedOnly
     }
   }
 
@@ -103,10 +182,14 @@ Describe 'Die Abschlussmeldung verschweigt keinen Aufraeum-Fehlschlag' {
     # Sonst stammte die Zahl bei abgeschaltetem Aufraeumen aus einem FRUEHEREN Lauf, und die
     # Abschlussmeldung meldete einen Fehlschlag, den es in diesem Lauf nicht gab. Genau dieser
     # Fehler stand einen Moment in der ersten Fassung dieser Aenderung.
-    $resetPos = $script:batch.IndexOf('$script:lastVersionCleanupFailed = 0')
+    # Beide Merker, aus demselben Grund: eine stehengebliebene Zahl aus einem frueheren Lauf
+    # behauptet Loeschungen, die dieser Lauf nicht gemacht hat.
     $ifPos = $script:batch.IndexOf('if ($successCount -gt 0 -and $script:settings.AutoVersionCleanup)')
-    $resetPos | Should -BeGreaterThan 0
     $ifPos | Should -BeGreaterThan 0
-    $resetPos | Should -BeLessThan $ifPos
+    foreach ($marker in @('$script:lastVersionCleanupFailed = 0', '$script:lastVersionCleanupRemoved = 0')) {
+      $resetPos = $script:batch.IndexOf($marker)
+      $resetPos | Should -BeGreaterThan 0
+      $resetPos | Should -BeLessThan $ifPos
+    }
   }
 }

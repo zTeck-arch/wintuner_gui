@@ -1,5 +1,127 @@
 ﻿# Changelog
 
+## 0.21.2 – Drei Stellen, an denen das Protokoll etwas anderes sagte als der Lauf tat
+
+**Aus einem echten Betriebsprotokoll vom 22.09.2026**, das über vier Tenants lief. Kein Datenverlust,
+aber drei Stellen, an denen ein Leser in die Irre geführt wurde — und eine davon kostete zwei
+Anmeldeversuche.
+
+> [!NOTE]
+> **Zwei Bestätigungen kommen nach dem Update einmal wieder** — beide hängen absichtlich an der
+> Versionsnummer: „Rückfragen vor Änderungen in Intune überspringen" muss erneut bestätigt werden,
+> und der Produktivhinweis beim Start erscheint noch einmal, sofern Sie ihn nicht dauerhaft
+> abgestellt haben.
+
+### Behoben: die Anmeldung gab nach dem ersten Versuch auf, obwohl es nur das Token war
+
+Zweimal hintereinander scheiterte die Anmeldung mit einem 403, die dritte 27 Sekunden später lief
+durch — dasselbe Konto, derselbe Tenant, danach 149 gelesene App-Objekte. Die Berechtigung war also
+nie das Problem. Die Antwort trug `WWW-Authenticate: Bearer` und nannte **keine** fehlende
+Berechtigung: das ist ein Token, das unmittelbar nach dem Anmelden noch nicht greift.
+
+Die Sonde kannte aber nur eine feste Liste „transienter" Fehlerformen, und `Forbidden` stand nicht
+darin — also brach sie sofort ab. Der Anwender musste von Hand nachklicken.
+
+- **Ein 403 wird jetzt unterschieden statt pauschal behandelt.** Nennt er eine Berechtigung oder
+  einen Scope, bleibt es beim sofortigen Abbruch — da hilft kein Wiederholen, und der Grund soll
+  sofort dastehen. Nennt er keine, ist es die Token-Rennbedingung von oben, und es wird wiederholt.
+- **Die Protokollzeile kündigt kein Budget mehr an, das sie nicht verwendet.** Vorher stand dort
+  immer `(attempt 1/3)` und danach kam nie ein Versuch 2. Jetzt steht daneben, was wirklich
+  passiert: `retrying`, `no attempts left` oder `giving up - <Grund>`.
+
+### Behoben: zwei Zeilen übereinander, die sich widersprachen
+
+Direkt unter der Einstufung stand fest verdrahtet `transient or unknown` — auch für einen Fehler,
+den die Einstufung eine Zeile vorher als **nicht** transient verworfen hatte. Beide Zeilen kommen
+jetzt aus derselben Rechnung.
+
+### Behoben: ein Update, das seine alte Version nicht loswird, sagte es nicht
+
+Im Protokoll stand `Consolidation cleanup failed for Google Chrome: Cannot delete this app as it is
+the parent of another app` — und die Zeile **danach** lautete `Successfully updated: Google Chrome`,
+ohne jeden Vorbehalt. Der Lauf endete mit „3 erfolgreich, 0 fehlgeschlagen". Dass ein App-Objekt im
+Tenant stehen geblieben war, stand nirgends in der Bilanz; dass es überhaupt auffiel, lag nur daran,
+dass die Versionsbereinigung später zufällig über dasselbe Objekt stolperte.
+
+Der Lauf bleibt erfolgreich — die neue Fassung liegt ja im Tenant —, aber die Erfolgszeile nennt den
+Rest jetzt beim Namen. Das ist dieselbe Bauart, die es für die gescheiterte Zuweisungs-Übergabe
+schon gab.
+
+### Behoben: derselbe Fehlerblock stand viermal im Protokoll
+
+Eine fehlgeschlagene Anmeldung schrieb den vollständigen Graph-JSON **vier Mal** — in der
+Versuchszeile, in der Einstufung, in „Login failed" und in „Login canceled/failed" —, und derselbe
+mehrzeilige Block landete zusätzlich in der Statuszeile. Ein Fehlertext, durch den man scrollen
+muss, sagt weniger als ein Satz.
+
+- Der **vollständige** Körper steht weiterhin genau einmal im Protokoll, in der Versuchszeile.
+- Was ein **Mensch** liest — Statuszeile, Dialog — wird zu einer Zeile gefaltet und gekürzt, mit dem
+  Hinweis, dass der Rest im Protokoll steht.
+
+## 0.21.1 – Das Aufräumen im Hintergrund sagt vorher und hinterher, was es tut
+
+**Aus dem Betrieb (22.09.2026).** Gemeldet wurde sinngemäß: dass nach einem Update-Lauf im
+Hintergrund alte Versionen gelöscht werden, merkt man erst, wenn man den Leistungsnachweis
+aufschlägt. Nachgesehen in einem echten Protokoll aus vier Tenants: das automatische Aufräumen
+hatte **19 App-Objekte** entfernt, darunter eine Chrome-Version, die noch von **23 Geräten** als
+installiert gemeldet wurde. Auf dem Bildschirm stand am Ende des Laufs:
+
+```
+Markierte Apps aktualisiert: 4 erfolgreich, 0 fehlgeschlagen
+```
+
+Kein Wort von sieben Löschungen. Zwei Stellen waren schuld, eine davor und eine danach.
+
+> [!NOTE]
+> **Zwei Bestätigungen kommen nach dem Update einmal wieder** — beide hängen absichtlich an der
+> Versionsnummer: „Rückfragen vor Änderungen in Intune überspringen" muss erneut bestätigt werden,
+> und der Produktivhinweis beim Start erscheint noch einmal, sofern Sie ihn nicht dauerhaft
+> abgestellt haben.
+
+### Die Rückfrage vor dem Lauf versprach das Gegenteil
+
+Sie zählt auf, was die aktuellen Einstellungen bewirken, und sagte zum Aufräumen immer denselben
+Satz: ältere Versionen werden *„nach Prüfung von Zuweisungen und Installationen"* entfernt. Das
+stimmt — aber nur, solange die Einstellung **„Die Grenze von N Version(en) wiegt schwerer als
+gemeldete Installationen"** aus ist. Ist sie an, prüft die Installation gar nichts mehr: die
+Version fällt trotzdem. Wer also gelesen hatte, dass Installationen geprüft werden, durfte
+annehmen, eine App mit 23 meldenden Geräten sei sicher. Sie war es nicht.
+
+- Ist der Übersteuerer an, steht dort jetzt ausdrücklich, dass gemeldete Installationen eine
+  Version **nicht** zurückhalten, was das für die Geräte bedeutet (die Software bleibt, Intune
+  verliert Bericht, Zuweisung und die Möglichkeit zur Neuinstallation) und dass allein eine
+  **Zuweisung** eine Version noch hält.
+- Diese Warnung steht als **eigener Absatz am Ende**, direkt über den Knöpfen — nicht als vierter
+  Aufzählungspunkt. Das ist kein Geschmacksurteil: die Rückfrage wurde in beiden Sprachen und für
+  zwei Bildschirmgrößen gerendert und angesehen. Als Punkt in der Liste sah der Satz genauso aus
+  wie „Zuweisungen ziehen auf die neue Version um" und lief über die volle Dialogbreite — er stand
+  da, war beim Überfliegen aber nicht zu finden. Eine MessageBox kennt keine Auszeichnung; Stelle
+  und Leerzeile sind das einzige Mittel, das bleibt.
+- **Beide** Fassungen nennen jetzt den Umfang: das Aufräumen läuft über den **ganzen Tenant**, auch
+  über Apps, die an diesem Lauf gar nicht beteiligt waren. Im Protokoll stand das seit 0.19.0, in
+  der Rückfrage nicht — und die Rückfrage ist die Stelle, an der man es vorher wissen muss.
+
+### Die Abschlussmeldung nannte nur, was schiefging
+
+Die Bilanz des Aufräumens wurde in die Statuszeile geschrieben und eine Sekunde später von der
+Abschlussmeldung des Laufs überschrieben. Die nannte das Aufräumen **nur im Fehlerfall** — ein Lauf,
+der sieben Versionen entfernt hatte, endete mit „0 fehlgeschlagen" und sonst nichts. Erfolg war
+leiser als Misserfolg, obwohl er derjenige ist, der löscht.
+
+```
+Markierte Apps aktualisiert: 4 erfolgreich, 0 fehlgeschlagen
+- die Versionsbereinigung hat 7 alte Version(en) entfernt. Siehe Aktivitätsprotokoll.
+```
+
+Entfernte und nicht entfernte Versionen werden dabei getrennt genannt, auch wenn beides in
+demselben Lauf vorkam.
+
+### Nebenbei
+
+- Die Entscheidung, welche der vier Abschlussmeldungen gilt, liegt jetzt in einer reinen Rechnung
+  (`Get-BatchSummaryStatus`) statt in einer Verzweigung im Knopf-Handler. Eine Verzweigung dort
+  kann kein Test aufrufen; die vier Fälle sind jetzt einzeln geprüft.
+
 ## 0.21.0 – Abgelöste Apps lassen sich löschen, wenn nur noch der Bericht sie hält
 
 **Aus dem Betrieb (15.09.2026).** Gemeldet wurde: „Wieso kann ich einzelne abgelöste Apps nicht über

@@ -15,7 +15,7 @@
 #
 # Source code: https://github.com/zTeck-arch/wintuner_gui
 #
-# v0.21.0 - Public beta
+# v0.21.2 - Public beta
 # --- Guided prerequisite bootstrap (kept console-only so it also works in Windows PowerShell 5.1) ---
 $minimumPowerShellVersion = [version]'7.4'
 try { $psVersion = [version]$PSVersionTable.PSVersion } catch { $psVersion = [version]'0.0' }
@@ -191,5 +191,5 @@ $PSDefaultParameterValues = @{
 # ============================================================
 
 # --- Application metadata ---
-$script:appVersion  = "0.21.0"
+$script:appVersion  = "0.21.2"
 

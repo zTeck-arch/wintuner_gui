@@ -185,7 +185,15 @@ function Invoke-AppUpdateBatch {
             [void]$unresolvedTargetKeys.Add($targetKey)
           }
         }
-        Write-Log "Successfully updated: $appName"
+        # Ohne den Vorbehalt las sich der Lauf als sauber durch: im Protokoll vom 22.09.2026 stand
+        # eine Zeile hoeher "Consolidation cleanup failed for Google Chrome", und hier dann
+        # "Successfully updated: Google Chrome". Wer nur die Erfolgszeilen ueberfliegt - und dafuer
+        # sind sie da - erfaehrt nie, dass ein App-Objekt stehen geblieben ist.
+        if ($result.OldVersionRemovalFailed) {
+          Write-Log ("Successfully updated: {0} - BUT the old version could not be removed and is still in the tenant; see the line above." -f $appName)
+        } else {
+          Write-Log "Successfully updated: $appName"
+        }
         $effVer = if ($result.EffectiveVersion) { $result.EffectiveVersion } else { $appLatestVersion }
         $succeededList.Add([pscustomobject]@{
           Name              = $appName
@@ -233,6 +241,7 @@ function Invoke-AppUpdateBatch {
     # oder nichts erfolgreich aktualisiert), stammte die Zahl sonst aus einem FRUEHEREN Lauf und die
     # Abschlussmeldung wuerde einen Fehlschlag melden, den es in diesem Lauf nicht gab.
     $script:lastVersionCleanupFailed = 0
+    $script:lastVersionCleanupRemoved = 0
     if ($successCount -gt 0 -and $script:settings.AutoVersionCleanup) {
       try {
         # Ausdruecklich "EVERY app in the tenant": gemeldet am 08.09.2026 nach einem Lauf, in dem
