@@ -1644,6 +1644,21 @@ $versionCapOverrideCheckbox.AutoSize = $true
 $versionCapOverrideCheckbox.Checked = [bool]$script:settings.VersionCapOverridesInstallations
 [void](Add-SettingRow -Card $cardAfterUpdate -Control $versionCapOverrideCheckbox -Hint (Get-UiString 'HintVersionCapOverride') -Indent 32)
 
+# Dasselbe Uebersteuern, aber fuer die Abloese-Karte im Bereich "Updates" - und NUR fuer die dort
+# von Hand angehakten Zeilen.
+#
+# Gemeldet am 15.09.2026: nach einem Update stand die Liste der abgeloesten Fassungen voll, jede
+# mit assignments=False - die Zuweisung war laengst umgezogen. Gehalten hat sie allein der
+# Installationsbericht, und "Markierte loeschen" meldete Lauf um Lauf "0 geloescht, 3 behalten".
+#
+# Bewusst NICHT am Knopf "alle abgeloesten Apps loeschen" daneben: eine Zeile anzuhaken ist eine
+# Aussage ueber diese eine App, ein Klick auf "alle" ist keine.
+$supersededIgnoreInstallationsCheckbox = New-Object System.Windows.Forms.CheckBox
+$supersededIgnoreInstallationsCheckbox.Text = Get-UiString 'SupersededIgnoreInstallationsCheckbox'
+$supersededIgnoreInstallationsCheckbox.AutoSize = $true
+$supersededIgnoreInstallationsCheckbox.Checked = [bool]$script:settings.SupersededDeleteIgnoresInstallations
+[void](Add-SettingRow -Card $cardAfterUpdate -Control $supersededIgnoreInstallationsCheckbox -Hint (Get-UiString 'HintSupersededIgnoreInstallations') -Indent 32)
+
 function Update-KeepVersionCountUi {
   $count = $script:keepVersionCount
   try { $autoVersionCleanupCheckbox.Text = (Get-UiString 'AutoVersionCleanupCheckbox') -f $count } catch { Write-LogDebug 'keep-count checkbox text' }
@@ -1972,6 +1987,7 @@ $saveSettingsButton.Add_Click({
     $script:settings.AutoRemoveSuperseded = $autoRemoveSupersededCheckbox.Checked
     if ($autoVersionCleanupCheckbox) { $script:settings.AutoVersionCleanup = $autoVersionCleanupCheckbox.Checked }
     if ($versionCapOverrideCheckbox) { $script:settings.VersionCapOverridesInstallations = $versionCapOverrideCheckbox.Checked }
+    if ($supersededIgnoreInstallationsCheckbox) { $script:settings.SupersededDeleteIgnoresInstallations = $supersededIgnoreInstallationsCheckbox.Checked }
     if ($moveAssignmentsCheckbox) { $script:settings.MoveAssignmentsOnUpdate = $moveAssignmentsCheckbox.Checked }
     if ($saveScopeCheckbox) { $script:settings.SaveScopeBeforeRemoval = $saveScopeCheckbox.Checked }
     if ($favoriteAutoCheckbox) { $script:settings.AutoUpdateFavoritesOnStartup = $favoriteAutoCheckbox.Checked }

@@ -72,7 +72,7 @@ function Get-AppVersionGroups {
   return @($result)
 }
 
-# Darf DIESE Fassung fallen, weil sie ueber der Versionsgrenze liegt?
+# Darf DIESE Fassung fallen, wenn nur noch das Sicherheitsnetz dagegen steht?
 #
 # Das dritte Loeschurteil dieser Anwendung, und wie die anderen beiden eine reine Rechnung - damit
 # es pruefbar ist, ohne einen Lauf gegen einen echten Tenant zu fuehren.
@@ -81,20 +81,29 @@ function Get-AppVersionGroups {
 # zaehlt nie als "ist frei". Unbekannt heisst behalten. Eine geloeschte Intune-App laesst sich nicht
 # zurueckholen.
 #
-# Neu am 11.09.2026, ausdruecklich so gewuenscht: mit $CapOverridesInstallations wiegt die
-# Versionsgrenze schwerer als gemeldete Installationen. Der Grund, warum das vertretbar ist, steht
-# an der Einstellung selbst - eine geloeschte App wird auf dem Geraet NICHT deinstalliert. Die
+# Neu am 11.09.2026, ausdruecklich so gewuenscht: mit $OverrideInstallations wiegt der Grund des
+# Aufrufers schwerer als gemeldete Installationen. Der Grund, warum das vertretbar ist, steht an
+# den Einstellungen selbst - eine geloeschte App wird auf dem Geraet NICHT deinstalliert. Die
 # Software bleibt; Intune verliert fuer dieses Objekt den Bericht, die Zuweisung und die
 # Moeglichkeit zur Neuinstallation.
 #
 # ZUWEISUNGEN schuetzen weiterhin, und zwar unabhaengig davon. Das ist ein anderer Schaden: faellt
 # eine noch zugewiesene Fassung, verlieren die betroffenen Geraete die Verteilung - nicht nur den
 # Bericht darueber.
-function Get-VersionCapDeleteVerdict {
+#
+# Hiess bis 0.20.1 Get-VersionCapDeleteVerdict. Umbenannt am 15.09.2026, als das Loeschen markierter
+# abgeloester Apps dieselbe Entscheidung brauchte: die Rechnung kennt die Versionsgrenze gar nicht,
+# sie kennt nur "Zuweisung", "Installation", "unbekannt" und ein Uebersteuern. Zwei Aufrufer mit
+# zwei verschiedenen Gruenden - aber EIN Urteil. Eine zweite, wortgleiche Kopie waere die Stelle
+# gewesen, an der die beiden irgendwann auseinanderlaufen, ohne dass es jemand merkt.
+function Get-SafetyNetDeleteVerdict {
   param(
     [Parameter(Mandatory)][AllowNull()][object]$AssignmentProbe,
     [Parameter(Mandatory)][AllowNull()][object]$InstallationProbe,
-    [bool]$CapOverridesInstallations = $false
+    # Der Aufrufer sagt, ob SEIN Grund schwerer wiegt als eine gemeldete Installation: die
+    # Versionsgrenze (VersionCapOverridesInstallations) oder eine von Hand angehakte abgeloeste
+    # App (SupersededDeleteIgnoresInstallations).
+    [bool]$OverrideInstallations = $false
   )
   $flag = {
     param($probe, $name)
@@ -103,7 +112,7 @@ function Get-VersionCapDeleteVerdict {
   $out = @{ Delete = $false; KeepReason = ''; OverrodeInstallations = $false }
 
   # Zuerst der Unbekannt-Fall: ohne Antwort ist nichts entschieden, und dann wird nichts geloescht.
-  # Auch nicht mit gesetzter Grenze - die Grenze ueberstimmt eine MELDUNG, nicht ihr Fehlen.
+  # Auch nicht mit Uebersteuern - uebersteuert wird eine MELDUNG, nicht ihr Fehlen.
   if (-not (& $flag $AssignmentProbe 'Succeeded') -or -not (& $flag $InstallationProbe 'Succeeded')) {
     $out.KeepReason = 'unknown'
     return $out
@@ -113,7 +122,7 @@ function Get-VersionCapDeleteVerdict {
     return $out
   }
   if (& $flag $InstallationProbe 'HasInstallations') {
-    if (-not $CapOverridesInstallations) {
+    if (-not $OverrideInstallations) {
       $out.KeepReason = 'installations'
       return $out
     }
@@ -123,6 +132,107 @@ function Get-VersionCapDeleteVerdict {
   }
   $out.Delete = $true
   return $out
+}
+
+# Was passiert mit den in der Abloese-Karte ANGEHAKTEN Apps - und warum?
+#
+# Reine Rechnung ueber bereits sondierte Eintraege, nach dem Muster von Get-TenantAppDeletePlan:
+# der Aufrufer fragt Intune, diese Funktion entscheidet. Nur so laesst sich das Ergebnis pruefen,
+# ohne einen Lauf gegen einen echten Tenant zu fuehren - und nur so kann die Rueckfrage den
+# Zustand NENNEN, statt ihn den Benutzer erraten zu lassen.
+#
+# Die Reihenfolge ist wesentlich: sondieren, dann fragen, dann loeschen. Bis 0.20.1 fragte der
+# Knopf zuerst und sondierte danach - die Rueckfrage konnte also gar nicht sagen, dass von drei
+# angehakten Apps am Ende keine einzige faellt. Genau so sah es im Betrieb aus: "Ja" geklickt,
+# "0 removed, 3 kept" im Protokoll, kein Hinweis darauf, warum.
+#
+# $IgnoreInstallations ist die Einstellung SupersededDeleteIgnoresInstallations. Sie uebersteuert
+# ausschliesslich gemeldete INSTALLATIONEN. Zuweisungen und ein unlesbarer Zustand bleiben
+# Ausschlussgruende - das Urteil daruber faellt Get-SafetyNetDeleteVerdict, hier steht keine
+# zweite Fassung derselben Regel.
+function Get-SupersededDeletePlan {
+  param(
+    # Je Eintrag: Name, CurrentVersion, GraphId, AssignmentProbe, InstallationProbe.
+    [AllowNull()][object[]]$Candidates,
+    [bool]$IgnoreInstallations = $false
+  )
+  $delete  = [System.Collections.Generic.List[object]]::new()
+  $blocked = [System.Collections.Generic.List[object]]::new()
+  foreach ($c in @($Candidates)) {
+    if (-not $c -or [string]::IsNullOrWhiteSpace([string]$c.GraphId)) { continue }
+    $verdict = Get-SafetyNetDeleteVerdict -AssignmentProbe $c.AssignmentProbe `
+      -InstallationProbe $c.InstallationProbe -OverrideInstallations $IgnoreInstallations
+    if ($verdict.Delete) {
+      # OverrodeInstallations wird bis in die Rueckfrage und die Protokollzeile durchgereicht:
+      # eine Loeschung, die das Sicherheitsnetz uebersteuert hat, muss als solche erkennbar sein.
+      $delete.Add([pscustomobject]@{
+        App                   = $c
+        OverrodeInstallations = [bool]$verdict.OverrodeInstallations
+      })
+    } else {
+      $blocked.Add([pscustomobject]@{ App = $c; Reason = [string]$verdict.KeepReason })
+    }
+  }
+  $overrides = @(@($delete.ToArray()) | Where-Object { $_.OverrodeInstallations })
+  return @{
+    Delete          = @($delete.ToArray())
+    Blocked         = @($blocked.ToArray())
+    OverriddenCount = @($overrides).Count
+  }
+}
+
+# Der Mittelteil der Rueckfrage vor "Markierte loeschen": was faellt, was bleibt, und warum.
+#
+# Eigene Funktion, weil das hier der folgenreichste sichtbare Text dieser Anwendung ist - die
+# Grundlage, auf der jemand eine nicht rueckholbare Loeschung bestaetigt. In einem Ereignishandler
+# liesse er sich nur mit einem echten Tenant ansehen; hier laesst er sich rendern und pruefen.
+#
+# Die Bloecke werden zusammengesetzt und nicht in einen Textbaustein mit drei Platzhaltern
+# gestopft: ein LEERER Block hinterliess dort eine haengende Leerzeile und eine Ueberschrift ohne
+# Abstand davor - gemessen an der ausgerenderten Rueckfrage im Bereich "Apps im Tenant".
+function Format-SupersededDeleteDetails {
+  param([Parameter(Mandatory)][AllowNull()][object]$Plan)
+
+  # Die Installationssonde kennt die Geraetezahl nur, wenn sie ueber den Statusbericht oder die
+  # Zusammenfassung geantwortet hat. Ueber deviceStatuses bricht sie beim ERSTEN Treffer ab und
+  # zaehlt nicht weiter - dort stuende sonst irrefuehrend "1 Geraet", wo zehn gemeint sind.
+  $deviceText = {
+    param($entry)
+    $n = $null
+    if ($entry -and $entry.InstallationProbe) { $n = $entry.InstallationProbe.Count }
+    if ($null -ne $n) { (Get-UiString 'SupersededDeviceCountKnown') -f [int]$n }
+    else { Get-UiString 'SupersededDeviceCountUnknown' }
+  }
+  # 'unknown' ist der Vorgabezweig, nicht ein weiterer Fall neben anderen: ein Grund, den diese
+  # Funktion nicht kennt, darf nicht als harmloses "noch zugewiesen" durchgehen.
+  $reasonText = {
+    param($blocked)
+    switch ([string]$blocked.Reason) {
+      'assigned'      { Get-UiString 'SupersededBlockedReasonAssigned' }
+      'installations' { (Get-UiString 'SupersededBlockedReasonInstallations') -f (& $deviceText $blocked.App) }
+      default         { Get-UiString 'SupersededBlockedReasonUnknown' }
+    }
+  }
+
+  $describe = { param($a) "  - {0} {1} ({2})" -f $a.Name, $a.CurrentVersion, $a.GraphId }
+  $blocks = [System.Collections.Generic.List[string]]::new()
+  $blocks.Add(((@($Plan.Delete) | ForEach-Object { & $describe $_.App }) -join "`r`n"))
+  if ([int]$Plan.OverriddenCount -gt 0) {
+    # Dieselbe Formulierung wie im Block darunter, nicht nur die nackte Zahl: allein hinter einem
+    # Doppelpunkt stand dort "mindestens einem Geraet" - ein Dativ ohne Praeposition. Gemessen an
+    # der ausgerenderten Rueckfrage in beiden Sprachen, nicht im Kopf durchgespielt.
+    $blocks.Add((((Get-UiString 'SupersededDeleteOverrideWarning') -f ((@($Plan.Delete) |
+      Where-Object { $_.OverrodeInstallations } | ForEach-Object {
+        "  - {0} {1}: {2}" -f $_.App.Name, $_.App.CurrentVersion,
+          ((Get-UiString 'SupersededBlockedReasonInstallations') -f (& $deviceText $_.App))
+      }) -join "`r`n")).Trim()))
+  }
+  if (@($Plan.Blocked).Count -gt 0) {
+    $blocks.Add((((Get-UiString 'SupersededDeleteBlockedNote') -f ((@($Plan.Blocked) | ForEach-Object {
+      "  - {0} {1}: {2}" -f $_.App.Name, $_.App.CurrentVersion, (& $reasonText $_)
+    }) -join "`r`n")).Trim()))
+  }
+  return ($blocks -join "`r`n`r`n")
 }
 
 # Runs the "keep only N versions" cleanup. -Silent skips the confirmation (used by the automatic
@@ -178,6 +288,8 @@ function Invoke-VersionCleanup {
         # NICHT zu verwechseln mit VersionCapOverridesInstallations weiter unten: das Fenster hier
         # fragt "ist das Geraet noch aktiv?", die Einstellung dort sagt "die Versionsgrenze wiegt
         # schwerer als die Meldung, ganz gleich wie frisch sie ist" - und die gilt in beiden Laeufen.
+        # Und ebenso wenig mit SupersededDeleteIgnoresInstallations (15.09.2026): das wirkt nur auf
+        # die von Hand angehakten Zeilen der Abloese-Karte und nie auf diesen Lauf.
         $quietDays = if ($Silent) { 0 } else { [int]$script:settings.IgnoreDevicesQuietForDays }
         $installationProbe = Get-AppInstallationProbe -AppId $item.App.GraphId -AppName $g.Name `
           -IgnoreDevicesQuietForDays $quietDays
@@ -186,8 +298,8 @@ function Invoke-VersionCleanup {
         # Entscheidung vom 11.09.2026: "maximal N Versionen" soll immer halten und nicht nur, wenn
         # jemand daran denkt, den Knopf zu druecken.
         $capOverrides = [bool]$script:settings.VersionCapOverridesInstallations
-        $verdict = Get-VersionCapDeleteVerdict -AssignmentProbe $assignmentProbe `
-          -InstallationProbe $installationProbe -CapOverridesInstallations $capOverrides
+        $verdict = Get-SafetyNetDeleteVerdict -AssignmentProbe $assignmentProbe `
+          -InstallationProbe $installationProbe -OverrideInstallations $capOverrides
         if (-not $verdict.Delete) {
           if ($verdict.KeepReason -eq 'unknown') {
             # Unknown state is a genuine problem: nothing can be decided, so this one counts as an

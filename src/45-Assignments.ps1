@@ -939,9 +939,16 @@ function Remove-AppWithUnlinkFallback {
     Write-Log ("Deletion skipped for {0} ({1}): Intune already refused it structurally in this session (it is the predecessor of another app). Nothing was attempted." -f $AppName, $GraphId)
     return $false
   }
+  # Grund des Schnappschusses und Vorsatz der Protokollzeilen haengen an derselben Angabe wie der
+  # Eintrag im Leistungsnachweis. Bis 0.20.1 stand beides fest auf "Aufraeumen von Versionen", auch
+  # wenn der Aufrufer ausdruecklich 'SupersededRemoved' meldete - im Protokoll las sich dann jede
+  # Abloese-Loeschung wie ein Versionsaufraeumen, und im Verzeichnis der gesicherten Geltungsbereiche
+  # stand der falsche Grund. Ein Wert, zwei Stellen, keine vierte Entscheidung.
+  $snapshotReason = if ($RecordAs -eq 'SupersededRemoved') { 'ScopeSnapshotReasonSuperseded' } else { 'ScopeSnapshotReasonVersionCleanup' }
+  $logContext     = if ($RecordAs -eq 'SupersededRemoved') { 'Superseded cleanup' } else { 'Version cleanup' }
   try {
     $null = Save-AppScopeSnapshot -AppId $GraphId -AppName $AppName -Version $Version `
-      -Reason (Get-UiString 'ScopeSnapshotReasonVersionCleanup')
+      -Reason (Get-UiString $snapshotReason)
     Invoke-WtRemoveWin32App -AppId $GraphId
     Add-SessionActivity -Kind $RecordAs -Name $AppName -FromVersion $Version
     return $true
@@ -958,9 +965,9 @@ function Remove-AppWithUnlinkFallback {
       # Abhaengen hat es auch nicht geloest. Damit ist die Absage fuer diese Sitzung endgueltig:
       # gemerkt, damit der naechste Durchlauf sie nicht wiederholt.
       [void]$script:deleteBlockedApps.Add($GraphId)
-      Write-Log ("Version cleanup: {0} ({1}) cannot be deleted while it is the predecessor of another app, and unlinking did not resolve it. It will not be retried in this session; delete the newer app's supersedence in the Intune portal, or delete the newer app first." -f $AppName, $GraphId)
+      Write-Log ("{0}: {1} ({2}) cannot be deleted while it is the predecessor of another app, and unlinking did not resolve it. It will not be retried in this session; delete the newer app's supersedence in the Intune portal, or delete the newer app first." -f $logContext, $AppName, $GraphId)
     }
-    Write-Log ("Version cleanup: could not remove {0} ({1}): {2}" -f $AppName, $GraphId, $m)
+    Write-Log ("{0}: could not remove {1} ({2}): {3}" -f $logContext, $AppName, $GraphId, $m)
     return $false
   }
 }

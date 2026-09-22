@@ -142,6 +142,21 @@ $script:settings = @{
   # nach einem Update - ausdruecklich so entschieden, weil eine Obergrenze, die nur auf Knopfdruck
   # gilt, keine Obergrenze ist.
   VersionCapOverridesInstallations = $false
+  # Abgeloeste Fassungen von Hand loeschen, obwohl Intune noch Installationen meldet.
+  #
+  # Gemeldet am 15.09.2026: nach einem Update stand die Ablese-Liste voll, alle Eintraege mit
+  # assignments=False - die Zuweisung war laengst auf die neue Version umgezogen (das macht die
+  # Oberflaeche seit 0.20.1 selbst). Geblieben war allein der Installationsbericht, und der hielt
+  # jede Loeschung auf. Die Nachziehlogik braucht das alte Objekt dafuer nicht: die Geraete
+  # bekommen die neue Fassung ueber die Zuweisung der NEUEN App und die Abloesebeziehung.
+  #
+  # Gilt NUR fuer "Markierte loeschen" in der Abloese-Karte, also fuer eine Auswahl, die jemand
+  # Zeile fuer Zeile angehakt hat. Der Knopf "alle abgeloesten Apps loeschen" daneben behaelt den
+  # harten Riegel - ein Klick darf nicht den halben Tenant treffen.
+  #
+  # Vorgabe aus, wie bei jeder Einstellung, die Loeschungen freigibt. ZUWEISUNGEN und ein
+  # unlesbarer Zustand schuetzen weiterhin, beide unveraendert.
+  SupersededDeleteIgnoresInstallations = $false
   ThemeName = "Light"
   Language = "en"
   RecentLogins = @()   # most-recent-first list of previously used UPNs, for quick re-selection
@@ -307,6 +322,12 @@ function Get-SettingsSnapshotLines {
     $(if (& $val 'VersionCapOverridesInstallations' $false) {
         ("a version beyond the newest {0} is deleted EVEN IF devices still report it installed (assignments still protect; the software stays on those devices, Intune loses the reporting). Applies to the manual AND the automatic cleanup." -f [int](& $val 'KeepVersionCount' 0))
       } else { 'reported installations always block a deletion (VersionCapOverridesInstallations=off)' })))
+  # Zweiter Schalter, der Loeschungen freigibt - und der einzige, der nur auf eine von Hand
+  # angehakte Auswahl wirkt. Ausgeschrieben aus demselben Grund wie der darueber.
+  $lines.Add(("{0} | superseded 'delete checked': {1}" -f $Prefix,
+    $(if (& $val 'SupersededDeleteIgnoresInstallations' $false) {
+        'a CHECKED superseded app is deleted EVEN IF devices still report it installed (assignments still protect; the bulk "delete all superseded" button is unaffected)'
+      } else { 'reported installations always block a deletion (SupersededDeleteIgnoresInstallations=off)' })))
   # Der Schalter allein sagt nicht, was WIRKT: das Unterdruecken gilt nur, wenn das Risiko fuer
   # GENAU DIESE Version bestaetigt wurde (Test-ChangeConfirmationsSuppressed). Gemeldet am
   # 08.09.2026 aus einem echten Protokoll: dort stand "suppressed=True (accepted for version
@@ -693,6 +714,7 @@ function Load-Settings {
         # re-enable the auto-removal opt-in the user just turned off.
         $script:settings.KeepVersionCount        = Get-SettingValue -Source $o -Name 'KeepVersionCount'        -Type Int  -Default 2 -Minimum 1
         $script:settings.VersionCapOverridesInstallations = Get-SettingValue -Source $o -Name 'VersionCapOverridesInstallations' -Type Bool -Default $false
+        $script:settings.SupersededDeleteIgnoresInstallations = Get-SettingValue -Source $o -Name 'SupersededDeleteIgnoresInstallations' -Type Bool -Default $false
         # Obergrenze 3650 (zehn Jahre): ein Tippfehler wie 99999 wuerde das Fenster praktisch
         # abschalten und damit stillschweigend das alte Verhalten herstellen - das faellt niemandem
         # auf. Untergrenze 0, weil 0 ausdruecklich "aus" bedeutet.

@@ -1,5 +1,76 @@
 ﻿# Changelog
 
+## 0.21.0 – Abgelöste Apps lassen sich löschen, wenn nur noch der Bericht sie hält
+
+**Aus dem Betrieb (15.09.2026).** Gemeldet wurde: „Wieso kann ich einzelne abgelöste Apps nicht über
+‚Markierte löschen' loswerden?" Im Protokoll stand dazu Lauf um Lauf dasselbe Bild — drei Apps
+angehakt, bestätigt, und danach `0 removed, 3 kept`:
+
+```
+Assignment probe:   'Google Chrome' has assignments=False, installing=False, count=0
+Installation probe: 'Google Chrome' has successful installations=True (2 installed device(s))
+Delete superseded: kept Google Chrome 148.0.7778.168; still in use (assignments=False, installations=True)
+```
+
+Die Zuweisung war also längst weg — seit 0.20.1 zieht die Oberfläche sie beim Update selbst auf die
+neue Version um. Gehalten hat die alten Fassungen allein der Installationsbericht. Für das
+Nachziehen braucht ihn niemand: die Geräte bekommen die neuere Version über **deren** Zuweisung und
+die Ablösebeziehung; dem alten Objekt bleiben nur noch der Bericht und der Ablöse-Verweis.
+
+> [!NOTE]
+> **Zwei Bestätigungen kommen nach dem Update einmal wieder** — beide hängen absichtlich an der
+> Versionsnummer, und hier ist das besonders angebracht, weil ein Schalter dazugekommen ist, der
+> Löschungen freigibt: „Rückfragen vor Änderungen in Intune überspringen" muss erneut bestätigt
+> werden, und der Produktivhinweis beim Start erscheint noch einmal, sofern Sie ihn nicht dauerhaft
+> abgestellt haben.
+
+### Neu: „MARKIERTE abgelöste Apps auch löschen, wenn Geräte sie noch melden"
+
+Ein Schalter in den Einstellungen unter „Was nach einem Update mit der alten Version passiert",
+**Vorgabe aus**, wie bei jeder Einstellung, die Löschungen freigibt. Er übersteuert ausschließlich
+gemeldete **Installationen**.
+
+- **Er gilt nur für „Markierte löschen"** in der Karte „Abgelöste Apps" — also für eine Auswahl, die
+  jemand Zeile für Zeile angehakt hat. Der Knopf „Alle abgelösten Apps löschen" daneben behält den
+  harten Riegel, und kein automatischer Lauf liest den Schalter. Eine Zeile anzuhaken ist eine
+  Aussage über diese eine App, ein Klick auf „alle" ist keine.
+- **Zwei Riegel bleiben und sind nicht abschaltbar:** eine noch **zugewiesene** App wird nie
+  gelöscht (das ist ein anderer Schaden — die betroffenen Geräte bekämen sie dann gar nicht mehr),
+  und ein Zustand, den Intune nicht beantwortet, gibt ebenfalls nie etwas frei.
+- **Was dabei wirklich passiert:** eine gelöschte App wird auf dem Gerät **nicht** deinstalliert.
+  Die Software bleibt; Intune verliert für dieses Objekt den Bericht, die Zuweisung und die
+  Möglichkeit zur Neuinstallation daraus.
+
+### „Markierte löschen" sondiert jetzt zuerst und fragt danach
+
+Bis 0.20.1 war die Reihenfolge umgekehrt: die Rückfrage zählte die angehakten Apps auf, das
+Sicherheitsnetz lief erst danach. Man bestätigte also eine Löschung, die gar nicht stattfinden
+konnte, und erfuhr den Grund erst im Protokoll — genau das gemeldete Bild.
+
+- Die Rückfrage **nennt den Zustand**, statt ihn raten zu lassen: was gelöscht wird, was
+  zurückgehalten wird und **warum** (zugewiesen / noch auf N Geräten gemeldet / nicht feststellbar).
+- Ist die Einstellung an, steht darin zusätzlich ein eigener Block mit jeder App, die **trotz**
+  gemeldeter Installationen fällt, samt Gerätezahl. Dieselbe Angabe geht ins Protokoll.
+- Darf nichts gelöscht werden, sagt das jetzt die Statuszeile — vorher blieb das Fenster stumm.
+- Die Gerätezahl wird nur genannt, wenn sie bekannt ist. Über `deviceStatuses` bricht die Sonde beim
+  **ersten** Treffer ab und kennt sie nicht; dort stünde sonst irreführend „1 Gerät".
+- Der Lauf hält jetzt die Busy-Sperre (Fortschrittsanzeige), solange er sondiert und löscht.
+
+### Nebenbei aufgeräumt
+
+- **Das Löschen selbst läuft über denselben Weg wie jede andere Löschung** (`Remove-AppWithUnlinkFallback`).
+  Der Knopf hatte eine eigene Fassung davon, der drei Dinge fehlten: „ist schon weg" galt als
+  Fehler, eine strukturelle Absage von Intune wurde in jedem Durchlauf erneut versucht, und der
+  Vergleich auf den Fehlertext war ein anderer als der überall sonst.
+- **Grund des Geltungsbereich-Schnappschusses und Vorsatz der Protokollzeilen** hängen dort jetzt an
+  derselben Angabe wie der Eintrag im Leistungsnachweis. Bis 0.20.1 stand beides fest auf
+  „Aufräumen von Versionen" — eine Ablöse-Löschung las sich im Protokoll also wie ein
+  Versionsaufräumen, und im Verzeichnis der gesicherten Geltungsbereiche stand der falsche Grund.
+- **`Get-VersionCapDeleteVerdict` heißt jetzt `Get-SafetyNetDeleteVerdict`.** Die Rechnung kennt die
+  Versionsgrenze gar nicht — sie kennt „Zuweisung", „Installation", „unbekannt" und ein
+  Übersteuern. Jetzt fällen zwei Aufrufer mit zwei verschiedenen Gründen **ein** Urteil; eine
+  zweite, wortgleiche Kopie wäre die Stelle gewesen, an der die beiden irgendwann auseinanderlaufen.
+
 ## 0.20.1 – Die Zuweisungen ziehen wieder um
 
 **Aus dem Betrieb (15.09.2026).** Gemeldet wurde: „Die alten Zuweisungen werden gelöscht, aber nicht
