@@ -4,6 +4,7 @@ BeforeAll {
   . ([scriptblock]::Create((Get-UiStringsText)))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '10-Settings.ps1' -Name 'Resolve-CleanupOptionConflict')))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '40-Graph.ps1' -Name 'Get-UpdateCleanupNotice')))
+  . ([scriptblock]::Create((Get-SourceFunctionText -Part '50-UpdateEngine.ps1' -Name 'Get-BatchSummaryStatus')))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '70-Runtime.ps1' -Name 'Test-WtConnected')))
   $script:uiLanguage = 'de'
 }
@@ -72,6 +73,79 @@ Describe 'Get-UpdateCleanupNotice' {
   It 'always states the rule for unassigned predecessors' {
     $script:settings = @{ MoveAssignmentsOnUpdate = $true; AutoRemoveSuperseded = $false; AutoVersionCleanup = $false }
     Get-UpdateCleanupNotice | Should -Match 'ohne Zuweisung'
+  }
+
+  # Aus dem Betrieb (22.09.2026): das Aufraeumen entfernte Chrome mit 23 meldenden Geraeten, und
+  # der Anwender hatte in genau dieser Rueckfrage gelesen, dass Installationen geprueft werden.
+  # Mit VersionCapOverridesInstallations halten sie aber nichts mehr zurueck - der Satz versprach
+  # das Gegenteil dessen, was der Lauf tat.
+  It 'promises the installation check only when installations really hold a version back' {
+    $script:settings = @{ MoveAssignmentsOnUpdate = $true; AutoRemoveSuperseded = $false
+                          AutoVersionCleanup = $true; VersionCapOverridesInstallations = $false }
+    $notice = Get-UpdateCleanupNotice
+    $notice | Should -Match 'kein Gerät sie als installiert meldet'
+    $notice | Should -Not -Match 'ACHTUNG'
+  }
+  It 'says outright that installations do NOT protect once the limit outweighs them' {
+    $script:settings = @{ MoveAssignmentsOnUpdate = $true; AutoRemoveSuperseded = $false
+                          AutoVersionCleanup = $true; VersionCapOverridesInstallations = $true }
+    $notice = Get-UpdateCleanupNotice
+    $notice | Should -Match 'schützen eine Version dabei NICHT'
+    $notice | Should -Not -Match 'kein Gerät sie als installiert meldet'
+  }
+  # Gemessen an der gerenderten Rueckfrage: als vierter von vier gleich aussehenden Punkten war die
+  # Warnung nicht zu finden. Sie muss ein eigener Absatz sein und zuletzt kommen - direkt ueber den
+  # Knoepfen ist die Stelle, die noch gelesen wird.
+  It 'puts the warning in its own paragraph at the very end, not as another bullet' {
+    $script:settings = @{ MoveAssignmentsOnUpdate = $true; AutoRemoveSuperseded = $false
+                          AutoVersionCleanup = $true; VersionCapOverridesInstallations = $true }
+    $lines = (Get-UpdateCleanupNotice) -split "`r`n"
+    $lines[-1] | Should -Match '^ACHTUNG'
+    $lines[-2] | Should -BeExactly ''
+    ($lines | Where-Object { $_ -match '^ACHTUNG' }).Count | Should -Be 1
+  }
+  # Gemeldet am 08.09.2026 fuer das Protokoll, hier fuer die Rueckfrage: das Aufraeumen ist eine
+  # tenantweite Regel und kein Anhang an die eben aktualisierte App.
+  It 'states the tenant-wide scope in both variants' {
+    foreach ($override in @($false, $true)) {
+      $script:settings = @{ MoveAssignmentsOnUpdate = $true; AutoRemoveSuperseded = $false
+                            AutoVersionCleanup = $true; VersionCapOverridesInstallations = $override }
+      Get-UpdateCleanupNotice | Should -Match 'im GANZEN Tenant'
+    }
+  }
+}
+
+# Die Abschlussmeldung eines Laufs. Aus dem Betrieb (22.09.2026): ein Lauf entfernte sieben alte
+# Versionen und endete sichtbar mit "4 erfolgreich, 0 fehlgeschlagen" - die Loeschungen standen nur
+# im Protokoll und im Leistungsnachweis. Genannt wurde bis dahin nur der FEHLSCHLAG des Aufraeumens.
+Describe 'Get-BatchSummaryStatus' {
+  It 'names only the run when the cleanup did nothing' {
+    $text = Get-BatchSummaryStatus -SuccessCount 4 -FailedCount 0
+    $text | Should -Match '4 erfolgreich, 0 fehlgeschlagen'
+    $text | Should -Not -Match 'Versionsbereinigung'
+  }
+  It 'names removed versions even when nothing failed' {
+    $text = Get-BatchSummaryStatus -SuccessCount 4 -FailedCount 0 -CleanupRemoved 7
+    $text | Should -Match 'hat 7 alte Version\(en\) entfernt'
+  }
+  It 'still names a failure on its own' {
+    $text = Get-BatchSummaryStatus -SuccessCount 3 -FailedCount 0 -CleanupFailed 1
+    $text | Should -Match 'nicht entfernen'
+    $text | Should -Not -Match 'hat 0 alte'
+  }
+  It 'names both numbers when both happened' {
+    $text = Get-BatchSummaryStatus -SuccessCount 3 -FailedCount 0 -CleanupRemoved 1 -CleanupFailed 2
+    $text | Should -Match 'hat 1 alte Version\(en\) entfernt'
+    $text | Should -Match 'und 2 nicht entfernen können'
+  }
+  It 'keeps the four cases apart' {
+    $seen = @(
+      (Get-BatchSummaryStatus -SuccessCount 1 -FailedCount 0),
+      (Get-BatchSummaryStatus -SuccessCount 1 -FailedCount 0 -CleanupRemoved 2),
+      (Get-BatchSummaryStatus -SuccessCount 1 -FailedCount 0 -CleanupFailed 2),
+      (Get-BatchSummaryStatus -SuccessCount 1 -FailedCount 0 -CleanupRemoved 2 -CleanupFailed 3)
+    )
+    (@($seen | Select-Object -Unique)).Count | Should -Be 4
   }
 }
 
