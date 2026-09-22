@@ -1212,13 +1212,11 @@ $updateSelectedButton.Add_Click({
         # der Statuszeile. Ist dort etwas gescheitert, wird es hier mitgenannt - sonst endet ein
         # Lauf mit "0 fehlgeschlagen", waehrend drei Loeschungen im Protokoll gescheitert sind
         # (gemeldet am 08.09.2026).
-        $cleanupFailed = [int]$script:lastVersionCleanupFailed
-        if ($cleanupFailed -gt 0) {
-          Update-Status ((Get-UiString 'CheckedAppsUpdatedCleanupFailedStatus') -f `
-            $batchResult.SuccessCount, $batchResult.FailedList.Count, $cleanupFailed)
-        } else {
-          Update-Status ((Get-UiString 'CheckedAppsUpdatedStatus') -f $batchResult.SuccessCount, $batchResult.FailedList.Count)
-        }
+        Update-Status (Get-BatchSummaryStatus `
+          -SuccessCount $batchResult.SuccessCount `
+          -FailedCount $batchResult.FailedList.Count `
+          -CleanupRemoved ([int]$script:lastVersionCleanupRemoved) `
+          -CleanupFailed ([int]$script:lastVersionCleanupFailed))
     } catch {
         Update-Status ((Get-UiString 'UpdateErrorStatus') -f $_.Exception.Message)
         Write-Log "updateSelectedButton error: $($_.Exception.Message)"

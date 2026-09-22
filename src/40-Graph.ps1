@@ -807,7 +807,24 @@ function Get-UpdateCleanupNotice {
   # Only worth a line when it will actually run; it is mutually exclusive with the option above.
   if ($script:settings.AutoVersionCleanup) {
     $keep = if ($script:keepVersionCount -ge 1) { [int]$script:keepVersionCount } else { 2 }
-    $lines.Add(((Get-UiString 'UpdateNoticeVersionCleanup') -f $keep))
+    # Zwei verschiedene Aussagen, nicht eine mit Zusatz: bis 0.21.0 stand hier immer "nach Pruefung
+    # von Zuweisungen und Installationen", auch wenn VersionCapOverridesInstallations an war. Genau
+    # dann pruefen Installationen aber nichts mehr - sie halten nichts zurueck. Aus dem Betrieb
+    # (22.09.2026): in einem Lauf verschwand Chrome mit 23 meldenden Geraeten, und der Anwender
+    # hatte kurz zuvor gelesen, dass Installationen geprueft werden. Die Rueckfrage darf nicht das
+    # Gegenteil dessen versprechen, was der Lauf tut.
+    $override = [bool]$script:settings.VersionCapOverridesInstallations
+    $noticeKey = if ($override) { 'UpdateNoticeVersionCleanupOverride' } else { 'UpdateNoticeVersionCleanup' }
+    $lines.Add(((Get-UiString $noticeKey) -f $keep))
+    # Als eigener Absatz ganz ans Ende, nicht als vierter Aufzaehlungspunkt. Gemessen an der
+    # gerenderten Rueckfrage (22.09.2026): als Punkt in der Liste sah die Warnung genauso aus wie
+    # "Zuweisungen ziehen um" und lief ueber 1700 px Breite - vorhanden, aber beim Ueberfliegen
+    # nicht zu finden. Eine MessageBox kennt keine Auszeichnung; Stelle und Leerzeile sind das
+    # einzige Mittel, das hier bleibt. Zuletzt gelesen wird, was direkt ueber den Knoepfen steht.
+    if ($override) {
+      $lines.Add('')
+      $lines.Add((Get-UiString 'UpdateNoticeVersionCleanupWarning'))
+    }
   }
   return ($lines -join "`r`n")
 }

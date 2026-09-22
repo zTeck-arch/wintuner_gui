@@ -18,6 +18,7 @@ BeforeAll {
   . ([scriptblock]::Create((Get-UiStringsText)))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '10-Settings.ps1' -Name @(
     'Get-SettingsSnapshotLines'))))
+  . ([scriptblock]::Create((Get-SourceFunctionText -Part '50-UpdateEngine.ps1' -Name 'Get-BatchSummaryStatus')))
 }
 
 Describe 'Die Pruefmeldung des Versionsaufraeumens' {
@@ -88,14 +89,33 @@ Describe 'Die Abschlussmeldung verschweigt keinen Aufraeum-Fehlschlag' {
 
   It 'reicht die Zahl der gescheiterten Loeschungen aus dem Aufraeumen durch' {
     $script:engine | Should -Match '\$script:lastVersionCleanupFailed = \$failed'
-    $script:main | Should -Match '\$cleanupFailed = \[int\]\$script:lastVersionCleanupFailed'
+    $script:main | Should -Match 'CleanupFailed \(\[int\]\$script:lastVersionCleanupFailed\)'
   }
 
-  It 'nennt sie in der Statuszeile, statt sie mit "0 fehlgeschlagen" zu ueberschreiben' {
-    $script:main | Should -Match 'CheckedAppsUpdatedCleanupFailedStatus'
+  # Seit 0.21.1 gilt dasselbe fuer den Erfolg: ein Lauf, der sieben alte Versionen ENTFERNT hat,
+  # endete sichtbar mit "0 fehlgeschlagen" und sonst nichts (gemeldet am 22.09.2026). Wer loescht,
+  # muss das sagen - nicht nur, wer beim Loeschen scheitert.
+  It 'reicht die Zahl der entfernten Versionen genauso durch' {
+    $script:engine | Should -Match '\$script:lastVersionCleanupRemoved = \$removed'
+    $script:main | Should -Match 'CleanupRemoved \(\[int\]\$script:lastVersionCleanupRemoved\)'
+  }
+
+  # Gegen die Fundstelle zu pruefen war der Fehler der ersten Fassung: die Zusicherung hing an
+  # einem Textschluessel IN 90-Main, und eine Verschiebung derselben Entscheidung in eine eigene
+  # Rechnung liess sie rot werden, obwohl sich am Verhalten nichts geaendert hatte. Gefragt wird
+  # jetzt die Rechnung selbst, in beiden Sprachen.
+  It 'nennt beides in der Statuszeile, statt es mit "0 fehlgeschlagen" zu ueberschreiben' {
     foreach ($lang in @('en', 'de')) {
       $script:uiLanguage = $lang
-      (Get-UiString 'CheckedAppsUpdatedCleanupFailedStatus') | Should -Not -BeNullOrEmpty
+      $failedOnly = Get-BatchSummaryStatus -SuccessCount 3 -FailedCount 0 -CleanupFailed 3
+      $removedOnly = Get-BatchSummaryStatus -SuccessCount 3 -FailedCount 0 -CleanupRemoved 7
+      $plain = Get-BatchSummaryStatus -SuccessCount 3 -FailedCount 0
+
+      $failedOnly | Should -Match '3'
+      $failedOnly | Should -Not -Be $plain
+      $removedOnly | Should -Match '7'
+      $removedOnly | Should -Not -Be $plain
+      $removedOnly | Should -Not -Be $failedOnly
     }
   }
 
@@ -103,10 +123,14 @@ Describe 'Die Abschlussmeldung verschweigt keinen Aufraeum-Fehlschlag' {
     # Sonst stammte die Zahl bei abgeschaltetem Aufraeumen aus einem FRUEHEREN Lauf, und die
     # Abschlussmeldung meldete einen Fehlschlag, den es in diesem Lauf nicht gab. Genau dieser
     # Fehler stand einen Moment in der ersten Fassung dieser Aenderung.
-    $resetPos = $script:batch.IndexOf('$script:lastVersionCleanupFailed = 0')
+    # Beide Merker, aus demselben Grund: eine stehengebliebene Zahl aus einem frueheren Lauf
+    # behauptet Loeschungen, die dieser Lauf nicht gemacht hat.
     $ifPos = $script:batch.IndexOf('if ($successCount -gt 0 -and $script:settings.AutoVersionCleanup)')
-    $resetPos | Should -BeGreaterThan 0
     $ifPos | Should -BeGreaterThan 0
-    $resetPos | Should -BeLessThan $ifPos
+    foreach ($marker in @('$script:lastVersionCleanupFailed = 0', '$script:lastVersionCleanupRemoved = 0')) {
+      $resetPos = $script:batch.IndexOf($marker)
+      $resetPos | Should -BeGreaterThan 0
+      $resetPos | Should -BeLessThan $ifPos
+    }
   }
 }

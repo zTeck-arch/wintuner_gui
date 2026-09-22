@@ -235,6 +235,33 @@ function Format-SupersededDeleteDetails {
   return ($blocks -join "`r`n`r`n")
 }
 
+# Waehlt die Schlusszeile eines Update-Laufs. Hier treffen ZWEI Bilanzen aufeinander: die Apps, die
+# aktualisiert wurden, und das Aufraeumen, das danach lief - und das Aufraeumen LOESCHT im Tenant.
+# Sein Ergebnis gehoert deshalb in den Satz, den der Anwender wirklich liest. Bis 0.21.0 stand dort
+# nur sein Fehlschlag; ein Lauf, der sieben alte Versionen entfernt hatte, endete mit
+# "4 erfolgreich, 0 fehlgeschlagen" und sonst nichts (gemeldet am 22.09.2026).
+#
+# Eine reine Rechnung, damit sie pruefbar ist: die vier Faelle sassen sonst als Verzweigung in
+# einem Knopf-Handler, und den kann kein Test aufrufen.
+function Get-BatchSummaryStatus {
+  param(
+    [int]$SuccessCount = 0,
+    [int]$FailedCount = 0,
+    [int]$CleanupRemoved = 0,
+    [int]$CleanupFailed = 0
+  )
+  if ($CleanupRemoved -gt 0 -and $CleanupFailed -gt 0) {
+    return ((Get-UiString 'CheckedAppsUpdatedCleanupBothStatus') -f $SuccessCount, $FailedCount, $CleanupRemoved, $CleanupFailed)
+  }
+  if ($CleanupFailed -gt 0) {
+    return ((Get-UiString 'CheckedAppsUpdatedCleanupFailedStatus') -f $SuccessCount, $FailedCount, $CleanupFailed)
+  }
+  if ($CleanupRemoved -gt 0) {
+    return ((Get-UiString 'CheckedAppsUpdatedCleanupRemovedStatus') -f $SuccessCount, $FailedCount, $CleanupRemoved)
+  }
+  return ((Get-UiString 'CheckedAppsUpdatedStatus') -f $SuccessCount, $FailedCount)
+}
+
 # Runs the "keep only N versions" cleanup. -Silent skips the confirmation (used by the automatic
 # post-update run); interactive callers get a Yes/No list of exactly what would be removed.
 function Invoke-VersionCleanup {
@@ -364,6 +391,12 @@ function Invoke-VersionCleanup {
     # verschwieg, dass drei Loeschungen gescheitert sind. Die Statuszeile ist der Ort, an dem
     # jemand hinsieht, nicht das Protokoll.
     $script:lastVersionCleanupFailed = $failed
+    # Dieselbe Begruendung eine Spalte weiter, gemeldet am 22.09.2026: die Bilanz nannte nur den
+    # FEHLSCHLAG. Ein Lauf, der sieben alte Versionen entfernt hat, endete sichtbar mit
+    # "4 erfolgreich, 0 fehlgeschlagen" - dass im Hintergrund geloescht wurde, stand nur im
+    # Protokoll und im Leistungsnachweis. Erfolg muss genauso laut sein wie Misserfolg, gerade
+    # wenn er loescht.
+    $script:lastVersionCleanupRemoved = $removed
 
     # Say WHY, where the user is looking. Without this the run reads as "nothing happened" and the
     # explanation sits in a log file nobody opens mid-task.

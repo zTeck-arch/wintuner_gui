@@ -233,6 +233,7 @@ function Invoke-AppUpdateBatch {
     # oder nichts erfolgreich aktualisiert), stammte die Zahl sonst aus einem FRUEHEREN Lauf und die
     # Abschlussmeldung wuerde einen Fehlschlag melden, den es in diesem Lauf nicht gab.
     $script:lastVersionCleanupFailed = 0
+    $script:lastVersionCleanupRemoved = 0
     if ($successCount -gt 0 -and $script:settings.AutoVersionCleanup) {
       try {
         # Ausdruecklich "EVERY app in the tenant": gemeldet am 08.09.2026 nach einem Lauf, in dem

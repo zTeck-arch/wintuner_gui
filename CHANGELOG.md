@@ -1,5 +1,69 @@
 ﻿# Changelog
 
+## 0.21.1 – Das Aufräumen im Hintergrund sagt vorher und hinterher, was es tut
+
+**Aus dem Betrieb (22.09.2026).** Gemeldet wurde sinngemäß: dass nach einem Update-Lauf im
+Hintergrund alte Versionen gelöscht werden, merkt man erst, wenn man den Leistungsnachweis
+aufschlägt. Nachgesehen in einem echten Protokoll aus vier Tenants: das automatische Aufräumen
+hatte **19 App-Objekte** entfernt, darunter eine Chrome-Version, die noch von **23 Geräten** als
+installiert gemeldet wurde. Auf dem Bildschirm stand am Ende des Laufs:
+
+```
+Markierte Apps aktualisiert: 4 erfolgreich, 0 fehlgeschlagen
+```
+
+Kein Wort von sieben Löschungen. Zwei Stellen waren schuld, eine davor und eine danach.
+
+> [!NOTE]
+> **Zwei Bestätigungen kommen nach dem Update einmal wieder** — beide hängen absichtlich an der
+> Versionsnummer: „Rückfragen vor Änderungen in Intune überspringen" muss erneut bestätigt werden,
+> und der Produktivhinweis beim Start erscheint noch einmal, sofern Sie ihn nicht dauerhaft
+> abgestellt haben.
+
+### Die Rückfrage vor dem Lauf versprach das Gegenteil
+
+Sie zählt auf, was die aktuellen Einstellungen bewirken, und sagte zum Aufräumen immer denselben
+Satz: ältere Versionen werden *„nach Prüfung von Zuweisungen und Installationen"* entfernt. Das
+stimmt — aber nur, solange die Einstellung **„Die Grenze von N Version(en) wiegt schwerer als
+gemeldete Installationen"** aus ist. Ist sie an, prüft die Installation gar nichts mehr: die
+Version fällt trotzdem. Wer also gelesen hatte, dass Installationen geprüft werden, durfte
+annehmen, eine App mit 23 meldenden Geräten sei sicher. Sie war es nicht.
+
+- Ist der Übersteuerer an, steht dort jetzt ausdrücklich, dass gemeldete Installationen eine
+  Version **nicht** zurückhalten, was das für die Geräte bedeutet (die Software bleibt, Intune
+  verliert Bericht, Zuweisung und die Möglichkeit zur Neuinstallation) und dass allein eine
+  **Zuweisung** eine Version noch hält.
+- Diese Warnung steht als **eigener Absatz am Ende**, direkt über den Knöpfen — nicht als vierter
+  Aufzählungspunkt. Das ist kein Geschmacksurteil: die Rückfrage wurde in beiden Sprachen und für
+  zwei Bildschirmgrößen gerendert und angesehen. Als Punkt in der Liste sah der Satz genauso aus
+  wie „Zuweisungen ziehen auf die neue Version um" und lief über die volle Dialogbreite — er stand
+  da, war beim Überfliegen aber nicht zu finden. Eine MessageBox kennt keine Auszeichnung; Stelle
+  und Leerzeile sind das einzige Mittel, das bleibt.
+- **Beide** Fassungen nennen jetzt den Umfang: das Aufräumen läuft über den **ganzen Tenant**, auch
+  über Apps, die an diesem Lauf gar nicht beteiligt waren. Im Protokoll stand das seit 0.19.0, in
+  der Rückfrage nicht — und die Rückfrage ist die Stelle, an der man es vorher wissen muss.
+
+### Die Abschlussmeldung nannte nur, was schiefging
+
+Die Bilanz des Aufräumens wurde in die Statuszeile geschrieben und eine Sekunde später von der
+Abschlussmeldung des Laufs überschrieben. Die nannte das Aufräumen **nur im Fehlerfall** — ein Lauf,
+der sieben Versionen entfernt hatte, endete mit „0 fehlgeschlagen" und sonst nichts. Erfolg war
+leiser als Misserfolg, obwohl er derjenige ist, der löscht.
+
+```
+Markierte Apps aktualisiert: 4 erfolgreich, 0 fehlgeschlagen
+- die Versionsbereinigung hat 7 alte Version(en) entfernt. Siehe Aktivitätsprotokoll.
+```
+
+Entfernte und nicht entfernte Versionen werden dabei getrennt genannt, auch wenn beides in
+demselben Lauf vorkam.
+
+### Nebenbei
+
+- Die Entscheidung, welche der vier Abschlussmeldungen gilt, liegt jetzt in einer reinen Rechnung
+  (`Get-BatchSummaryStatus`) statt in einer Verzweigung im Knopf-Handler. Eine Verzweigung dort
+  kann kein Test aufrufen; die vier Fälle sind jetzt einzeln geprüft.
+
 ## 0.21.0 – Abgelöste Apps lassen sich löschen, wenn nur noch der Bericht sie hält
 
 **Aus dem Betrieb (15.09.2026).** Gemeldet wurde: „Wieso kann ich einzelne abgelöste Apps nicht über
