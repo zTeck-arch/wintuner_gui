@@ -19,6 +19,65 @@ BeforeAll {
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '10-Settings.ps1' -Name @(
     'Get-SettingsSnapshotLines'))))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '50-UpdateEngine.ps1' -Name 'Get-BatchSummaryStatus')))
+  . ([scriptblock]::Create((Get-SourceFunctionText -Part '70-Runtime.ps1' -Name 'Get-ShortErrorDetail')))
+}
+
+# Aus einem echten Protokoll vom 22.09.2026, beides Berichtstreue - nichts ging verloren, aber der
+# Leser wurde in die Irre gefuehrt.
+Describe 'Ein Update, das seine alte Version nicht loswird, sagt das auch' {
+  It 'setzt die Marke, wenn die Konsolidierungs-Loeschung scheitert' {
+    # Intune verweigert die Loeschung strukturell, wenn die alte Fassung Vorgaenger einer dritten
+    # App ist. Das ist kein Fehler des Laufs - aber ein App-Objekt bleibt stehen.
+    $engine = Get-SourcePartText -Part '50-UpdateEngine.ps1'
+    $engine | Should -Match 'OldVersionRemovalFailed = \$false'
+    $engine | Should -Match '\$Result\.OldVersionRemovalFailed = \$true'
+  }
+
+  It 'haengt den Vorbehalt an die Erfolgszeile, statt sie unqualifiziert zu schreiben' {
+    # Vorher stand eine Zeile hoeher "Consolidation cleanup failed for X" und hier
+    # "Successfully updated: X" - wer nur die Erfolgszeilen ueberfliegt, erfuhr es nie.
+    $batch = Get-SourcePartText -Part '60-Batch.ps1'
+    $batch | Should -Match 'if \(\$result\.OldVersionRemovalFailed\)'
+    $batch | Should -Match 'could not be removed and is still in the tenant'
+  }
+}
+
+Describe 'Get-ShortErrorDetail: ein Dienstfehler, den ein Mensch lesen kann' {
+  # Eine fehlgeschlagene Anmeldung schrieb den vollstaendigen Graph-JSON VIER Mal ins Protokoll,
+  # und derselbe mehrzeilige Block stand danach in der Statuszeile.
+  It 'faltet Zeilenumbrueche zu einer Zeile' {
+    $text = "{`r`n  `"Message`": `"kaputt`",`r`n  `"Code`": 403`r`n}"
+    $short = Get-ShortErrorDetail -Text $text
+    $short | Should -Not -Match "`r"
+    $short | Should -Not -Match "`n"
+    $short | Should -Match 'kaputt'
+  }
+  It 'kuerzt und sagt, dass der Rest im Protokoll steht' {
+    $short = Get-ShortErrorDetail -Text ('x' * 900) -MaxLength 100
+    $short.Length | Should -BeLessThan 200
+    $short | Should -Match 'Protokoll'
+  }
+  It 'laesst einen kurzen Text unangetastet' {
+    Get-ShortErrorDetail -Text 'kurz und knapp' | Should -BeExactly 'kurz und knapp'
+  }
+  It 'kommt mit leer zurecht' {
+    Get-ShortErrorDetail -Text '' | Should -BeExactly ''
+  }
+
+  It 'wird beim Anmeldefehler auch wirklich benutzt, und der Koerper nicht doppelt geschrieben' {
+    $main = Get-SourcePartText -Part '90-Main.ps1'
+    $main | Should -Match 'Get-ShortErrorDetail -Text \$probeDetail'
+    # Die Zeile darf den Koerper nicht ein zweites Mal ausgeben - er steht schon in der Zeile aus
+    # Test-WtConnected.
+    $main | Should -Match 'the service answer is in the line above'
+    $main | Should -Not -Match 'First Intune query failed after sign-in \(\{0\}\): \{1\}'
+  }
+
+  It 'nennt die Einstufung, die wirklich gefallen ist, statt fest "transient or unknown"' {
+    $main = Get-SourcePartText -Part '90-Main.ps1'
+    $main | Should -Match '\$script:lastConnectionProbeVerdict'
+    $main | Should -Not -Match "'transient or unknown'"
+  }
 }
 
 Describe 'Die Pruefmeldung des Versionsaufraeumens' {

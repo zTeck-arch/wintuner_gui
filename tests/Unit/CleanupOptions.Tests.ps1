@@ -5,7 +5,7 @@ BeforeAll {
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '10-Settings.ps1' -Name 'Resolve-CleanupOptionConflict')))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '40-Graph.ps1' -Name 'Get-UpdateCleanupNotice')))
   . ([scriptblock]::Create((Get-SourceFunctionText -Part '50-UpdateEngine.ps1' -Name 'Get-BatchSummaryStatus')))
-  . ([scriptblock]::Create((Get-SourceFunctionText -Part '70-Runtime.ps1' -Name 'Test-WtConnected')))
+  . ([scriptblock]::Create((Get-SourceFunctionText -Part '70-Runtime.ps1' -Name 'Test-WtConnected', 'Get-ConnectionProbeRetryVerdict')))
   $script:uiLanguage = 'de'
 }
 
@@ -186,5 +186,52 @@ Describe 'Test-WtConnected' {
     $global:WtHandler = { param($n) @() }
     Test-WtConnected | Should -BeTrue
     $global:WtCalls | Should -Be 1
+  }
+
+  # Aus dem Betrieb (22.09.2026): zwei Anmeldungen scheiterten mit einem 403, die dritte 27 s
+  # spaeter lief durch - dasselbe Konto, derselbe Tenant, danach 149 gelesene App-Objekte. Bis
+  # 0.21.1 gab die Sonde nach dem ERSTEN Versuch auf, weil "Forbidden" in keiner transienten Form
+  # stand. Der Anwender musste von Hand nachklicken, und das Protokoll sagte trotzdem "attempt 1/3".
+  It 'retries a bare 403 right after sign-in, because the token may not be usable yet' {
+    $global:WtHandler = {
+      param($n)
+      if ($n -lt 2) { throw '{"ErrorCode":"Forbidden","Message":"An error has occurred - Activity ID: c5f5100c","HttpHeaders":"{\"WWW-Authenticate\":\"Bearer\"}"}' }
+      @()
+    }
+    Test-WtConnected | Should -BeTrue
+    $global:WtCalls | Should -Be 2
+  }
+}
+
+Describe 'Get-ConnectionProbeRetryVerdict' {
+  It 'retries the known transient shapes' {
+    foreach ($shape in @('Collection was modified', "Value cannot be null. (Parameter 'value')",
+                         'The operation timed out', 'ServiceUnavailable', 'Too Many Requests', 'HTTP 503')) {
+      (Get-ConnectionProbeRetryVerdict -Message $shape).Retry | Should -BeTrue -Because $shape
+    }
+  }
+  # Die Unterscheidung, um die es geht: ein 403 ist nicht gleich ein 403.
+  It 'retries a 403 that names no permission' {
+    $verdict = Get-ConnectionProbeRetryVerdict -Message '{"ErrorCode":"Forbidden","Message":"An error has occurred"}'
+    $verdict.Retry | Should -BeTrue
+    $verdict.Reason | Should -Match 'token'
+  }
+  It 'does NOT retry a 403 that names a missing permission - retrying cannot fix that' {
+    foreach ($text in @('Forbidden. Required permission scope DeviceManagementApps.ReadWrite.All is missing.',
+                        '403 Forbidden - insufficient privilege',
+                        'Forbidden: access denied')) {
+      (Get-ConnectionProbeRetryVerdict -Message $text).Retry | Should -BeFalse -Because $text
+    }
+  }
+  It 'does not retry an unknown shape' {
+    (Get-ConnectionProbeRetryVerdict -Message 'Something else entirely').Retry | Should -BeFalse
+  }
+  It 'does not retry an empty message' {
+    (Get-ConnectionProbeRetryVerdict -Message '').Retry | Should -BeFalse
+  }
+  It 'always gives a reason, so the log never has to guess' {
+    foreach ($text in @('', 'Collection was modified', 'Forbidden', 'Forbidden: permission missing', 'weird')) {
+      (Get-ConnectionProbeRetryVerdict -Message $text).Reason | Should -Not -BeNullOrEmpty
+    }
   }
 }

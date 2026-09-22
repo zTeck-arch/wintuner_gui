@@ -144,6 +144,23 @@ function Write-LogSafe {
 # was: a parameter-binding error, a Graph/HTTP error and a module race read very differently in a bug
 # report, and the real cause often sits in an InnerException the top message never shows. Kept to a
 # single greppable line: "[Type] message | inner[Type]: message | HTTP 403 | at line 512".
+# Ein mehrzeiliger Dienst-Antwortkoerper, zusammengefaltet und gekuerzt - fuer alles, was ein
+# MENSCH liest: Statuszeile, Dialog, Abschlussmeldung.
+#
+# Anlass (Protokoll vom 22.09.2026): eine fehlgeschlagene Anmeldung schrieb den vollstaendigen
+# Graph-JSON vier Mal, und derselbe Block stand danach in der Statuszeile. Ein Fehlertext, den man
+# ueber acht Zeilen scrollen muss, sagt weniger als ein Satz. Der VOLLE Text bleibt im Protokoll -
+# gekuerzt wird nur, was angezeigt wird.
+function Get-ShortErrorDetail {
+  param([string]$Text = '', [int]$MaxLength = 300)
+  if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
+  $flat = ($Text -replace '\s+', ' ').Trim()
+  if ($MaxLength -gt 0 -and $flat.Length -gt $MaxLength) {
+    return $flat.Substring(0, $MaxLength) + ('… (+{0} Zeichen, vollstaendig im Protokoll)' -f ($flat.Length - $MaxLength))
+  }
+  return $flat
+}
+
 function Format-ErrorDetail {
   param([Parameter(Mandatory)]$ErrorRecord)
   try {
@@ -404,6 +421,63 @@ function Test-ValidM365UserName {
   return ($UserName -match $upnRegex)
 }
 
+# Entscheidet, ob die erste Intune-Abfrage nach erfolgreicher Anmeldung einen zweiten Versuch wert
+# ist. Rein, damit die Regel ohne Netz pruefbar ist - vorher sass sie als Ausdruck mitten in der
+# Schleife, und keine der drei Aussagen darin war einzeln zu pruefen.
+#
+# Der Fall, der sie noetig gemacht hat (Protokoll vom 22.09.2026): zwei Anmeldungen scheiterten mit
+# 403, die dritte 27 s spaeter lief durch - dasselbe Konto, derselbe Tenant, danach 149 gelesene
+# App-Objekte. Die Berechtigung war also nie das Problem. Der Koerper trug
+# "WWW-Authenticate":"Bearer" und nannte KEINE fehlende Berechtigung: das ist ein Token, das
+# unmittelbar nach der Anmeldung noch nicht greift, und genau dafuer ist ein zweiter Versuch da.
+#
+# Deshalb wird ein 403 unterschieden, statt pauschal behandelt:
+#   - nennt er eine Berechtigung/einen Scope, bleibt es beim sofortigen Abbruch. Da hilft kein
+#     Wiederholen, und der Benutzer soll den Grund sofort lesen.
+#   - nennt er keine, ist es die Token-Rennbedingung von oben -> wiederholen.
+function Get-ConnectionProbeRetryVerdict {
+  param([string]$Message = '')
+  $text = [string]$Message
+  if ([string]::IsNullOrWhiteSpace($text)) {
+    return [pscustomobject]@{ Retry = $false; Reason = 'no error text' }
+  }
+  # Diese Formen heissen "frag nochmal", nicht "du bist nicht angemeldet": ein Rennen im Modul oder
+  # im Graph-SDK, Drosselung, ein kurzer Aussetzer des Dienstes.
+  $transientShapes = @(
+    'Collection was modified',
+    # In derselben Sitzung Momente spaeter beobachtet wie "Collection was modified", auf einer
+    # Anmeldung, die von Hand wiederholt sofort lief: beides sind Rennen im Inventaraufruf.
+    'Value cannot be null',
+    'timed out',
+    'ServiceUnavailable',
+    'temporarily unavailable',
+    'Too Many Requests'
+  )
+  foreach ($shape in $transientShapes) {
+    if ($text -match [regex]::Escape($shape)) {
+      return [pscustomobject]@{ Retry = $true; Reason = 'transient' }
+    }
+  }
+  if ($text -match '\b(429|500|503|504)\b') {
+    return [pscustomobject]@{ Retry = $true; Reason = 'transient' }
+  }
+  # Ein 403, der eine Berechtigung beim Namen nennt, ist dauerhaft - Wiederholen aendert daran nichts.
+  $namesPermission = (
+    $text -match '(?i)permission' -or
+    $text -match '(?i)\bscope\b' -or
+    $text -match '(?i)privilege' -or
+    $text -match '(?i)not authorized' -or
+    $text -match '(?i)access denied')
+  $isForbidden = ($text -match '(?i)\bforbidden\b' -or $text -match '\b403\b')
+  if ($isForbidden) {
+    if ($namesPermission) {
+      return [pscustomobject]@{ Retry = $false; Reason = 'a named missing permission cannot be fixed by retrying' }
+    }
+    return [pscustomobject]@{ Retry = $true; Reason = 'forbidden without a named permission - the token may not be usable yet' }
+  }
+  return [pscustomobject]@{ Retry = $false; Reason = 'not a known transient shape' }
+}
+
 # Helper: check if WinTuner is connected (simple smoke test).
 # The reason for a failure is kept in $script:lastConnectionProbeError. Swallowing it silently
 # made every cause - Graph outage, timeout, missing permission - surface as "Authentication error",
@@ -411,6 +485,7 @@ function Test-ValidM365UserName {
 function Test-WtConnected {
   param([int]$Attempts = 3)
   $script:lastConnectionProbeError = $null
+  $script:lastConnectionProbeVerdict = $null
   for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
     try {
       # Materialised right here with @(): the module hands back a collection it may still be
@@ -425,23 +500,17 @@ function Test-WtConnected {
     } catch {
       $probeError = $_.Exception.Message
       $script:lastConnectionProbeError = $probeError
-      Write-LogSafe ("Sign-in succeeded, but the first Intune query failed (attempt {0}/{1}): {2}" -f $attempt, $Attempts, $probeError)
-      # These shapes say "ask again", not "you are not signed in": a race inside the module/Graph
-      # SDK, throttling, or a momentary service blip. Turning them into a hard authentication error
-      # sent troubleshooting after credentials that were never the problem. Anything else - a
-      # missing permission, for example - still fails immediately, because retrying cannot fix it.
-      $transient = (
-        $probeError -match 'Collection was modified' -or
-        # Observed in the same session as "Collection was modified", moments apart, on a sign-in
-        # that then worked on a manual retry: both are races inside the module's inventory call,
-        # not a statement about the session. Without this the user had to click Login again.
-        $probeError -match "Value cannot be null" -or
-        $probeError -match 'timed out' -or
-        $probeError -match 'ServiceUnavailable' -or
-        $probeError -match 'temporarily unavailable' -or
-        $probeError -match 'Too Many Requests' -or
-        $probeError -match '\b(429|500|503|504)\b')
-      if (-not $transient -or $attempt -eq $Attempts) { return $false }
+      $verdict = Get-ConnectionProbeRetryVerdict -Message $probeError
+      $script:lastConnectionProbeVerdict = $verdict
+      # Die Zahl "1/3" nur nennen, wenn ein zweiter Versuch auch wirklich folgt. Bis 0.21.1 stand
+      # dort immer "(attempt 1/3)" und danach nie ein Versuch 2 - die Zeile kuendigte ein Budget an,
+      # das sie nicht verwendete, und las sich wie ein Abbruch mitten in der Wiederholung.
+      $willRetry = ($verdict.Retry -and $attempt -lt $Attempts)
+      $outcome = if ($willRetry) { 'retrying' }
+                 elseif ($verdict.Retry) { 'no attempts left' }
+                 else { 'giving up - ' + $verdict.Reason }
+      Write-LogSafe ("Sign-in succeeded, but the first Intune query failed (attempt {0}/{1}, {2}): {3}" -f $attempt, $Attempts, $outcome, $probeError)
+      if (-not $willRetry) { return $false }
       # DoEvents keeps the window alive during the pause, like the other post-deploy waits.
       for ($second = 0; $second -lt (2 * $attempt); $second++) {
         [System.Windows.Forms.Application]::DoEvents()

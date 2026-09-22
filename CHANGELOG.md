@@ -1,5 +1,63 @@
 ﻿# Changelog
 
+## 0.21.2 – Drei Stellen, an denen das Protokoll etwas anderes sagte als der Lauf tat
+
+**Aus einem echten Betriebsprotokoll vom 22.09.2026**, das über vier Tenants lief. Kein Datenverlust,
+aber drei Stellen, an denen ein Leser in die Irre geführt wurde — und eine davon kostete zwei
+Anmeldeversuche.
+
+> [!NOTE]
+> **Zwei Bestätigungen kommen nach dem Update einmal wieder** — beide hängen absichtlich an der
+> Versionsnummer: „Rückfragen vor Änderungen in Intune überspringen" muss erneut bestätigt werden,
+> und der Produktivhinweis beim Start erscheint noch einmal, sofern Sie ihn nicht dauerhaft
+> abgestellt haben.
+
+### Behoben: die Anmeldung gab nach dem ersten Versuch auf, obwohl es nur das Token war
+
+Zweimal hintereinander scheiterte die Anmeldung mit einem 403, die dritte 27 Sekunden später lief
+durch — dasselbe Konto, derselbe Tenant, danach 149 gelesene App-Objekte. Die Berechtigung war also
+nie das Problem. Die Antwort trug `WWW-Authenticate: Bearer` und nannte **keine** fehlende
+Berechtigung: das ist ein Token, das unmittelbar nach dem Anmelden noch nicht greift.
+
+Die Sonde kannte aber nur eine feste Liste „transienter" Fehlerformen, und `Forbidden` stand nicht
+darin — also brach sie sofort ab. Der Anwender musste von Hand nachklicken.
+
+- **Ein 403 wird jetzt unterschieden statt pauschal behandelt.** Nennt er eine Berechtigung oder
+  einen Scope, bleibt es beim sofortigen Abbruch — da hilft kein Wiederholen, und der Grund soll
+  sofort dastehen. Nennt er keine, ist es die Token-Rennbedingung von oben, und es wird wiederholt.
+- **Die Protokollzeile kündigt kein Budget mehr an, das sie nicht verwendet.** Vorher stand dort
+  immer `(attempt 1/3)` und danach kam nie ein Versuch 2. Jetzt steht daneben, was wirklich
+  passiert: `retrying`, `no attempts left` oder `giving up - <Grund>`.
+
+### Behoben: zwei Zeilen übereinander, die sich widersprachen
+
+Direkt unter der Einstufung stand fest verdrahtet `transient or unknown` — auch für einen Fehler,
+den die Einstufung eine Zeile vorher als **nicht** transient verworfen hatte. Beide Zeilen kommen
+jetzt aus derselben Rechnung.
+
+### Behoben: ein Update, das seine alte Version nicht loswird, sagte es nicht
+
+Im Protokoll stand `Consolidation cleanup failed for Google Chrome: Cannot delete this app as it is
+the parent of another app` — und die Zeile **danach** lautete `Successfully updated: Google Chrome`,
+ohne jeden Vorbehalt. Der Lauf endete mit „3 erfolgreich, 0 fehlgeschlagen". Dass ein App-Objekt im
+Tenant stehen geblieben war, stand nirgends in der Bilanz; dass es überhaupt auffiel, lag nur daran,
+dass die Versionsbereinigung später zufällig über dasselbe Objekt stolperte.
+
+Der Lauf bleibt erfolgreich — die neue Fassung liegt ja im Tenant —, aber die Erfolgszeile nennt den
+Rest jetzt beim Namen. Das ist dieselbe Bauart, die es für die gescheiterte Zuweisungs-Übergabe
+schon gab.
+
+### Behoben: derselbe Fehlerblock stand viermal im Protokoll
+
+Eine fehlgeschlagene Anmeldung schrieb den vollständigen Graph-JSON **vier Mal** — in der
+Versuchszeile, in der Einstufung, in „Login failed" und in „Login canceled/failed" —, und derselbe
+mehrzeilige Block landete zusätzlich in der Statuszeile. Ein Fehlertext, durch den man scrollen
+muss, sagt weniger als ein Satz.
+
+- Der **vollständige** Körper steht weiterhin genau einmal im Protokoll, in der Versuchszeile.
+- Was ein **Mensch** liest — Statuszeile, Dialog — wird zu einer Zeile gefaltet und gekürzt, mit dem
+  Hinweis, dass der Rest im Protokoll steht.
+
 ## 0.21.1 – Das Aufräumen im Hintergrund sagt vorher und hinterher, was es tut
 
 **Aus dem Betrieb (22.09.2026).** Gemeldet wurde sinngemäß: dass nach einem Update-Lauf im

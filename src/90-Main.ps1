@@ -245,8 +245,23 @@ $loginButton.Add_Click({
         $probeDetail -match '(?i)not onboarded' -or
         ($probeDetail -match '(?i)Intune' -and $probeDetail -match '(?i)licen[sc]e'))
       $errKey = if ($noIntune) { 'LoginNoIntuneError' } else { 'LoginProbeFailedError' }
-      Write-Log ("First Intune query failed after sign-in ({0}): {1}" -f $(if ($noIntune) { 'tenant has no usable Intune / no permission' } else { 'transient or unknown' }), $probeDetail)
-      throw ((Get-UiString $errKey) -f $probeDetail)
+      # Die Einstufung kommt aus derselben Rechnung, die ueber das Wiederholen entschieden hat.
+      # Bis 0.21.1 stand hier fest "transient or unknown" - auch fuer einen Fehler, den die
+      # Einstufung gerade als NICHT transient verworfen hatte. Zwei Zeilen uebereinander, die sich
+      # widersprachen.
+      $classification = if ($noIntune) {
+        'tenant has no usable Intune / no permission'
+      } elseif ($script:lastConnectionProbeVerdict) {
+        [string]$script:lastConnectionProbeVerdict.Reason
+      } else {
+        'unknown'
+      }
+      # Der Antwortkoerper steht bereits vollstaendig in der Zeile aus Test-WtConnected. Ihn hier
+      # erneut zu schreiben hiess: vier gleiche JSON-Bloecke fuer EIN fehlgeschlagenes Anmelden
+      # (gemessen am Protokoll vom 22.09.2026). Ein Protokoll, in dem dieselbe Nutzlast viermal
+      # steht, ist schwerer zu lesen als eines, in dem sie einmal steht.
+      Write-Log ("First Intune query failed after sign-in ({0}); the service answer is in the line above." -f $classification)
+      throw ((Get-UiString $errKey) -f (Get-ShortErrorDetail -Text $probeDetail))
     }
     $script:isConnected = $true
     # Before anything tenant-specific is shown again: whatever is still on screen belongs to the
