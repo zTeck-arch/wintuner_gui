@@ -1452,81 +1452,124 @@ $deleteSelectedAppButton.Add_Click({
   }
   if ($victims.Count -eq 0) { Update-Status (Get-UiString 'SelectSupersededFirstStatus'); return }
 
-  # Namen aller Betroffenen in die Rueckfrage - bei mehr als einer App ist "wirklich loeschen?"
-  # ohne die Liste keine Frage, die man beantworten kann.
-  $names = ($victims | ForEach-Object { "{0} {1}" -f $_.Name, $_.CurrentVersion }) -join "`r`n"
-  $result = [System.Windows.Forms.MessageBox]::Show(
-    ((Get-UiString 'RemoveSupersededConfirmDialog') -f $names),
-    (Get-UiString 'ConfirmationTitle'),
-    [System.Windows.Forms.MessageBoxButtons]::YesNo,
-    [System.Windows.Forms.MessageBoxIcon]::Warning,
-    [System.Windows.Forms.MessageBoxDefaultButton]::Button2
-  )
-  if ($result -ne [System.Windows.Forms.DialogResult]::Yes) {
-    Update-Status (Get-UiString 'RemovalAbortedStatus')
-    return
-  }
-
-  $removed = 0; $kept = 0
-  foreach ($app in $victims) {
-    # Dieselbe Sicherheitspruefung wie bei jeder anderen Loeschung: null Zuweisungen UND null
-    # erfolgreiche Installationen, beides bestaetigt - sonst bleibt die Version stehen.
+  # Die Sichtbarkeit der Fortschrittsanzeige IST die Busy-Sperre. Der Lauf sondiert erst alle
+  # angehakten Apps und loescht dann - waehrenddessen laeuft DoEvents, damit das Fenster zeichnet,
+  # und ohne diese Sperre waere jeder andere Knopf in dieser Zeit anklickbar. Hide-Progress steht
+  # im finally, weil jeder Ausstieg hier ein frueher sein kann (nichts zu loeschen, abgebrochen).
+  Show-Progress -Total ([Math]::Max(1, @($victims).Count))
+  try {
+    # ERST sondieren, DANN fragen. Bis 0.20.1 war es umgekehrt: die Rueckfrage zaehlte die
+    # angehakten Apps auf, das Sicherheitsnetz lief danach, und im Protokoll stand hinterher
+    # "0 removed, 3 kept". Gemeldet am 15.09.2026 - der Benutzer bestaetigte eine Loeschung, die
+    # gar nicht stattfinden konnte, und erfuhr den Grund erst im Protokoll.
     #
-    # Die Ansage davor ist nicht Kosmetik: die beiden Sonden fragen bis zu drei Graph-Endpunkte ab,
-    # und wenn die nicht antworten, dauert das mit Zeitueberlaeufen ueber zehn Sekunden. Ohne diese
-    # Zeile steht das Fenster still und sieht aus, als haenge es.
-    Update-Status ((Get-UiString 'SupersededProbingStatus') -f $app.Name)
-    [System.Windows.Forms.Application]::DoEvents()
-    $assignmentProbe = Get-AppAssignmentProbe -AppId $app.GraphId -AppName $app.Name
-    $installationProbe = Get-AppInstallationProbe -AppId $app.GraphId -AppName $app.Name
+    # Die Ansage je App ist nicht Kosmetik: die beiden Sonden fragen bis zu drei Graph-Endpunkte
+    # ab, und wenn die nicht antworten, dauert das mit Zeitueberlaeufen ueber zehn Sekunden.
+    $candidates = [System.Collections.Generic.List[object]]::new()
+    $probed = 0
+    foreach ($app in $victims) {
+      Set-ProgressValue $probed
+      $probed++
+      Update-Status ((Get-UiString 'SupersededProbingStatus') -f $app.Name)
+      [System.Windows.Forms.Application]::DoEvents()
+      $candidates.Add([pscustomobject]@{
+        Name              = [string]$app.Name
+        CurrentVersion    = [string]$app.CurrentVersion
+        GraphId           = [string]$app.GraphId
+        AssignmentProbe   = (Get-AppAssignmentProbe -AppId $app.GraphId -AppName $app.Name)
+        InstallationProbe = (Get-AppInstallationProbe -AppId $app.GraphId -AppName $app.Name)
+      })
+    }
 
-    # ZWEI Faelle, die vorher in einer Meldung zusammenfielen ("vorhanden ODER nicht pruefbar").
-    # Sie bedeuten voellig Verschiedenes: im einen ist die App noch in Benutzung und alles ist in
-    # Ordnung, im anderen hat Intune nicht geantwortet und man weiss schlicht nichts. Wer das nicht
-    # unterscheiden kann, weiss nicht, ob er warten oder etwas reparieren muss.
-    $stateUnknown = (-not $assignmentProbe.Succeeded) -or (-not $installationProbe.Succeeded)
-    $stillInUse = $assignmentProbe.HasAssignments -or $installationProbe.HasInstallations
-    if ($stateUnknown -or $stillInUse) {
-      $kept++
-      if ($stateUnknown) {
-        Update-Status ((Get-UiString 'SupersededKeptUnknownStatus') -f $app.Name)
-        Write-Log ("Delete superseded: kept {0} {1} ({2}); the state could NOT be established (assignment probe ok={3}, installation probe ok={4}) - an unknown state never authorizes deletion." -f $app.Name, $app.CurrentVersion, $app.GraphId, $assignmentProbe.Succeeded, $installationProbe.Succeeded)
+    # Die Einstellung uebersteuert AUSSCHLIESSLICH gemeldete Installationen und nur hier, bei einer
+    # von Hand angehakten Auswahl. Der Knopf "alle abgeloesten Apps loeschen" daneben liest sie nicht.
+    $ignoreInstallations = [bool]$script:settings.SupersededDeleteIgnoresInstallations
+    $plan = Get-SupersededDeletePlan -Candidates @($candidates.ToArray()) -IgnoreInstallations $ignoreInstallations
+
+    foreach ($b in @($plan.Blocked)) {
+      if ([string]$b.Reason -eq 'unknown') {
+        Write-Log ("Delete superseded: kept {0} {1} ({2}); the state could NOT be established (assignment probe ok={3}, installation probe ok={4}) - an unknown state never authorizes deletion." -f `
+          $b.App.Name, $b.App.CurrentVersion, $b.App.GraphId, $b.App.AssignmentProbe.Succeeded, $b.App.InstallationProbe.Succeeded)
       } else {
-        Update-Status ((Get-UiString 'SupersededSafetyKeptStatus') -f $app.Name)
-        Write-Log ("Delete superseded: kept {0} {1} ({2}); still in use (assignments={3}, installations={4})." -f $app.Name, $app.CurrentVersion, $app.GraphId, $assignmentProbe.HasAssignments, $installationProbe.HasInstallations)
+        Write-Log ("Delete superseded: kept {0} {1} ({2}); still in use (assignments={3}, installations={4})." -f `
+          $b.App.Name, $b.App.CurrentVersion, $b.App.GraphId, $b.App.AssignmentProbe.HasAssignments, $b.App.InstallationProbe.HasInstallations)
+      }
+    }
+
+    if (@($plan.Delete).Count -eq 0) {
+      # Der haeufigste Ausgang vor 0.21.0, und der einzige, der damals nicht erklaert wurde.
+      Write-Log ("Delete checked superseded apps: nothing may be deleted; {0} of {1} checked app(s) are held back by the safety net (setting SupersededDeleteIgnoresInstallations={2})." -f `
+        @($plan.Blocked).Count, @($victims).Count, $ignoreInstallations)
+      $firstBlocked = @($plan.Blocked)[0]
+      if ($firstBlocked -and [string]$firstBlocked.Reason -eq 'unknown') {
+        Update-Status ((Get-UiString 'SupersededKeptUnknownStatus') -f $firstBlocked.App.Name)
+      } else {
+        Update-Status (Get-UiString 'SupersededDeleteNothingStatus')
+      }
+      return
+    }
+
+    $detailText = Format-SupersededDeleteDetails -Plan $plan
+
+    # Haengt NICHT an SuppressChangeConfirmations - eine Loeschung ist von hier aus nicht
+    # rueckholbar. Vorgabeknopf ist "Nein".
+    $result = [System.Windows.Forms.MessageBox]::Show(
+      ((Get-UiString 'SupersededDeleteCheckedConfirmDialog') -f @($plan.Delete).Count, @($victims).Count, $detailText),
+      (Get-UiString 'ConfirmationTitle'),
+      [System.Windows.Forms.MessageBoxButtons]::YesNo,
+      [System.Windows.Forms.MessageBoxIcon]::Warning,
+      [System.Windows.Forms.MessageBoxDefaultButton]::Button2
+    )
+    if ($result -ne [System.Windows.Forms.DialogResult]::Yes) {
+      Write-Log ("Delete checked superseded apps: canceled by user; {0} app(s) would have been deleted." -f @($plan.Delete).Count)
+      Update-Status (Get-UiString 'RemovalAbortedStatus')
+      return
+    }
+
+    $removed = 0; $failed = 0
+    $done = 0
+    foreach ($entry in @($plan.Delete)) {
+      Set-ProgressValue $done
+      $done++
+      $app = $entry.App
+      if ($entry.OverrodeInstallations) {
+        # Die folgenreichste Zeile dieses Laufs: hier faellt eine App, die das Sicherheitsnetz ohne
+        # die Einstellung gehalten haette. Sie nennt die Zahl, sonst ist sie nicht nachvollziehbar.
+        Write-Log ("Delete superseded: removing {0} {1} ({2}) DESPITE reported installations ({3}) - SupersededDeleteIgnoresInstallations is on. Assignments: {4}. The software stays on those devices; Intune loses the reporting, the assignment and the option to reinstall from this object." -f `
+          $app.Name, $app.CurrentVersion, $app.GraphId,
+          $(if ($null -ne $app.InstallationProbe.Count) { ("{0} device(s)" -f [int]$app.InstallationProbe.Count) } else { 'count not enumerated' }),
+          $app.AssignmentProbe.HasAssignments)
+      } else {
+        Write-Log ("Delete superseded: removing {0} {1} ({2}); assignments={3}, installations={4}." -f `
+          $app.Name, $app.CurrentVersion, $app.GraphId, $app.AssignmentProbe.HasAssignments, $app.InstallationProbe.HasInstallations)
+      }
+      Update-Status ((Get-UiString 'SupersededProbingStatus') -f $app.Name)
+      [System.Windows.Forms.Application]::DoEvents()
+      # Derselbe Weg wie jede andere Loeschung: Sicherung des Geltungsbereichs, Abhaengen einer
+      # Abloesebeziehung falls Intune sie verlangt, Eintrag im Leistungsnachweis. Bis 0.20.1 stand
+      # hier eine eigene Fassung davon, der drei Dinge fehlten: "schon weg" galt als Fehler, eine
+      # strukturelle Absage wurde in jedem Durchlauf erneut versucht, und der Vergleich auf den
+      # Fehlertext war ein anderer als der ueberall sonst.
+      if (Remove-AppWithUnlinkFallback -GraphId ([string]$app.GraphId) -AppName ([string]$app.Name) `
+            -Version ([string]$app.CurrentVersion) -RecordAs 'SupersededRemoved') {
+        $removed++
+        Update-Status ((Get-UiString 'DeletedStatus') -f $app.Name)
+      } else {
+        $failed++
+        Update-Status ((Get-UiString 'SupersededStillReferencedStatus') -f $app.Name)
       }
       [System.Windows.Forms.Application]::DoEvents()
-      continue
     }
-    try {
-      $null = Save-AppScopeSnapshot -AppId ([string]$app.GraphId) -AppName ([string]$app.Name) `
-        -Version ([string]$app.CurrentVersion) -Reason (Get-UiString 'ScopeSnapshotReasonSuperseded')
-      Invoke-WtRemoveWin32App -AppId $app.GraphId
-      Add-SessionActivity -Kind 'SupersededRemoved' -Name ([string]$app.Name) -FromVersion ([string]$app.CurrentVersion)
-      $removed++
-      Update-Status ((Get-UiString 'DeletedStatus') -f $app.Name)
-    } catch {
-      $delMsg = $_.Exception.Message
-      if ($delMsg -match 'parent of another app' -or $delMsg -match 'Cannot delete this app') {
-        $newId = Get-SupersedingAppIdFromError $delMsg
-        if ($newId -and (Remove-SupersededByUnlinking -OldAppId $app.GraphId -NewAppId $newId)) {
-          $removed++
-          Update-Status ((Get-UiString 'DeletedStatus') -f $app.Name)
-        } else {
-          $kept++
-          Write-Log "Delete superseded: kept $($app.Name) - still referenced as the predecessor of a newer version."
-          Update-Status ((Get-UiString 'SupersededStillReferencedStatus') -f $app.Name)
-        }
-      } else {
-        $kept++
-        Update-Status ((Get-UiString 'ErrorRemovalStatus') -f $delMsg)
-      }
-    }
-    [System.Windows.Forms.Application]::DoEvents()
+    $kept = @($plan.Blocked).Count + $failed
+    Write-Log ("Delete checked superseded apps: {0} removed, {1} kept ({2} held back by the safety net, {3} failed), {4} deleted despite reported installations." -f `
+      $removed, $kept, @($plan.Blocked).Count, $failed, [int]$plan.OverriddenCount)
+    Update-Status ((Get-UiString 'SupersededDeleteCheckedDone') -f $removed, $kept)
+  } finally {
+    Hide-Progress
   }
-  Write-Log ("Delete checked superseded apps: {0} removed, {1} kept." -f $removed, $kept)
-  Update-Status ((Get-UiString 'SupersededDeleteCheckedDone') -f $removed, $kept)
   # Neu suchen, damit die Liste den Tenant zeigt und nicht den Stand von vor dem Loeschen.
+  # Ausserhalb des finally: die Suche setzt die Statuszeile und darf erst laufen, wenn die
+  # Busy-Sperre wieder offen ist - sonst stellt Test-UiBusy sie in die Warteschlange.
   try { $supersededSearchButton.PerformClick() } catch { Write-LogDebug ("Superseded refresh: {0}" -f $_.Exception.Message) }
 })
 

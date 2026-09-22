@@ -573,6 +573,8 @@ Which defaults apply: return codes 0/1707 count as success, 3010/1641 as restart
     HintKeepVersionCount = "Applies to the automatic clean-up above and to the ""All apps: keep newest"" button in the Updates section. The new number is used only after saving."
     VersionCapOverrideCheckbox = "The limit of {0} version(s) outweighs reported installations"
     HintVersionCapOverride = "Without this, a version beyond the limit stays forever as soon as ONE device still reports it installed - which is why old versions pile up in grown environments. With it, the limit wins: the version is deleted even if devices still have it.`r`n`r`nWhat that actually does: a deleted app is NOT uninstalled from the device. The software stays; Intune loses the reporting, the assignment and the option to reinstall from that app object.`r`n`r`nAssignments still protect a version - that is a different loss, because the affected devices would stop receiving the app at all. A version whose state cannot be read is never deleted either.`r`n`r`nUnlike the setting above, this one applies to the automatic clean-up after an update run as well: a limit that only holds when someone presses a button is not a limit."
+    SupersededIgnoreInstallationsCheckbox = "Delete CHECKED superseded apps even when devices still report them"
+    HintSupersededIgnoreInstallations = "Applies only to ""Delete checked"" in the ""Superseded apps"" card, never to ""Delete all superseded apps"" next to it and never to any automatic run - it takes a selection someone ticked row by row.`r`n`r`nAfter an update the predecessor is normally unassigned already, because the new version has taken the groups over. What is left holding it is the install report, and that alone can keep it for months. The devices do not need the old object to move on: they get the newer version through ITS assignment and the supersedence link.`r`n`r`nWhat that actually does: a deleted app is NOT uninstalled from the device. The software stays; Intune loses the reporting, the assignment and the option to reinstall from that app object.`r`n`r`nAssignments still protect an app, and so does a state that cannot be read. The confirmation names every app that is still reported as installed, with its device count, before anything is deleted."
     HintSaveScope = "Reads an app's groups and keeps them for this session BEFORE the app is deleted, so a scope that turns out to have been needed can still be looked up under Tools > ""Kept assignments of deleted apps"". Costs one read per deletion and is the only record once the app is gone."
     SettingsCardSafety = "Confirmation prompts"
     HintStartupNoticesReset = "Startup messages carrying a 'Do not show this message again' box - a WinTuner module that is too old, a module installed twice, the production-risk warning - stay hidden once you tick it. A hidden message still goes to the activity log. This button brings all of them back."
@@ -1075,6 +1077,29 @@ What it is NOT: it does not create, update or delete apps, and it does not chang
     SupersededFetchErrorStatus = "Error fetching superseded apps: {0}"
     NoSupersededFoundStatus = "No superseded apps found"
     RemoveSupersededConfirmDialog = "The following outdated apps will be checked for removal:`r`n{0}`r`n`r`nOnly apps with confirmed zero assignments and zero successful installations are deleted."
+    SupersededDeleteCheckedConfirmDialog = @"
+{0} of {1} checked app(s) will be PERMANENTLY deleted from Intune:
+
+{2}
+
+Deleting removes the app OBJECT. Nothing is uninstalled from a device - the software stays. What Intune loses for that object is the install reporting, the assignment and the option to reinstall from it. Devices still get the newer version through ITS assignment and the supersedence link.
+
+Delete now?
+"@
+    SupersededDeleteOverrideWarning = @"
+ATTENTION - these are still reported as installed and are deleted anyway (the setting "Delete checked superseded apps even when devices still report them" is on):
+{0}
+"@
+    SupersededDeleteBlockedNote = @"
+NOT deleted, and left in the list:
+{0}
+"@
+    SupersededBlockedReasonAssigned = "still assigned to at least one group"
+    SupersededBlockedReasonInstallations = "still reported as installed on {0}"
+    SupersededBlockedReasonUnknown = "Intune did not answer - an unknown state never authorises a deletion"
+    SupersededDeviceCountKnown = "{0} device(s)"
+    SupersededDeviceCountUnknown = "at least one device"
+    SupersededDeleteNothingStatus = "Nothing was deleted - none of the checked apps may be removed as they stand. Details are in the activity log."
     SupersededSafetyKeptStatus = "Kept {0}: it is still assigned or still installed on at least one device."
     SupersededKeptUnknownStatus = "Kept {0}: Intune did not answer, so the state is unknown - nothing is deleted on an unknown state. Details are in the activity log."
     SupersededProbingStatus = "Checking {0}: assignments and installed devices..."
@@ -1276,6 +1301,8 @@ Old app versions that a newer version has replaced (superseded).
 Intune keeps a predecessor until the devices have migrated, so these entries pile up over time. Deleting them here removes the APP in Intune - it does not uninstall anything from a device. Intune refuses to delete an app while it is still the predecessor of a newer one; in that case the link is removed first.
 
 "Keep the newest N" is a list of candidates, not an unconditional instruction: a version is only removed once Intune reports zero assignments AND zero installed devices for it. An older version that is still running on devices therefore stays on purpose - even when that leaves more than N versions behind. Once those devices have moved to the newer version, the next run clears it away without any further action. The log states why a version was kept, including the device count.
+
+"Delete checked" probes every ticked row first and then asks, so the prompt names what will be deleted, what stays and why. After an update the predecessor is normally unassigned already and only the install report holds it; the setting "Delete checked superseded apps even when devices still report them" lets that go - for ticked rows only, never for "Delete all superseded apps". Assignments, and a state Intune will not answer, keep protecting an app either way.
 "@
     InfoCardScan = @"
 Starts the inventory scan.
@@ -1939,6 +1966,8 @@ Welche Standardwerte gelten: Rückgabewerte 0/1707 als Erfolg, 3010/1641 als Neu
     VersionCapOverrideCheckbox = "Die Grenze von {0} Version(en) wiegt schwerer als gemeldete Installationen"
     HintVersionCapOverride = "Ohne dies bleibt eine Version über der Grenze für immer stehen, sobald EIN Gerät sie noch als installiert meldet - deshalb sammeln sich in gewachsenen Umgebungen alte Fassungen an. Damit gewinnt die Grenze: die Version wird auch dann gelöscht, wenn Geräte sie noch tragen.`r`n`r`nWas dabei wirklich passiert: eine gelöschte App wird auf dem Gerät NICHT deinstalliert. Die Software bleibt; Intune verliert für dieses App-Objekt den Bericht, die Zuweisung und die Möglichkeit zur Neuinstallation.`r`n`r`nZuweisungen schützen eine Version weiterhin - das ist ein anderer Verlust, weil die betroffenen Geräte die App dann gar nicht mehr bekämen. Eine Version, deren Zustand sich nicht lesen lässt, wird ebenfalls nie gelöscht.`r`n`r`nAnders als die Einstellung darüber gilt diese auch für das automatische Aufräumen nach einem Update-Lauf: eine Grenze, die nur auf Knopfdruck hält, ist keine Grenze."
     HintKeepVersionCount = "Gilt für die automatische Bereinigung darüber und für den Knopf ""Alle Apps: neueste N behalten"" im Bereich ""Updates"". Der neue Wert greift erst nach dem Speichern."
+    SupersededIgnoreInstallationsCheckbox = "MARKIERTE abgelöste Apps auch löschen, wenn Geräte sie noch melden"
+    HintSupersededIgnoreInstallations = "Gilt ausschließlich für ""Markierte löschen"" in der Karte ""Abgelöste Apps"", nie für ""Alle abgelösten Apps löschen"" daneben und nie für einen automatischen Lauf - betroffen ist nur eine Auswahl, die jemand Zeile für Zeile angehakt hat.`r`n`r`nNach einem Update ist der Vorgänger in aller Regel schon unzugewiesen, weil die neue Version die Gruppen übernommen hat. Was ihn dann noch hält, ist der Installationsbericht, und der allein kann ihn monatelang stehen lassen. Für das Nachziehen brauchen die Geräte das alte Objekt nicht: sie bekommen die neuere Version über DEREN Zuweisung und die Ablösebeziehung.`r`n`r`nWas dabei wirklich passiert: eine gelöschte App wird auf dem Gerät NICHT deinstalliert. Die Software bleibt; Intune verliert für dieses App-Objekt den Bericht, die Zuweisung und die Möglichkeit zur Neuinstallation.`r`n`r`nZuweisungen schützen eine App weiterhin, und ein nicht lesbarer Zustand ebenfalls. Die Rückfrage nennt vor dem Löschen jede App, die noch als installiert gemeldet ist, mit ihrer Gerätezahl."
     HintSaveScope = "Liest die Gruppen einer App und merkt sie sich für diese Sitzung, BEVOR die App gelöscht wird - so lässt sich ein doch benötigter Scope später unter ""Extras > Gesicherte Zuweisungen gelöschter Apps"" nachsehen. Kostet eine Leseabfrage je Löschung und ist der einzige Nachweis, sobald die App weg ist."
     SettingsCardSafety = "Rückfragen"
     HintStartupNoticesReset = "Startmeldungen mit einem Kontrollkästchen zum Ausblenden - ein zu altes WinTuner-Modul, ein doppelt installiertes Modul, der Produktivhinweis - bleiben weg, sobald das Häkchen gesetzt ist. Eine ausgeblendete Meldung steht weiterhin im Aktivitätsprotokoll. Dieser Knopf holt alle zurück."
@@ -2441,6 +2470,29 @@ Was es NICHT ist: Es legt keine Apps an, aktualisiert und löscht keine, und es 
     SupersededFetchErrorStatus = "Fehler beim Abrufen abgelöster Apps: {0}"
     NoSupersededFoundStatus = "Keine abgelösten Apps gefunden"
     RemoveSupersededConfirmDialog = "Die folgenden veralteten Apps werden zum Entfernen geprüft:`r`n{0}`r`n`r`nGelöscht werden nur Apps mit bestätigten null Zuweisungen und null erfolgreichen Installationen."
+    SupersededDeleteCheckedConfirmDialog = @"
+{0} von {1} markierten App(s) werden ENDGÜLTIG aus Intune gelöscht:
+
+{2}
+
+Gelöscht wird das App-OBJEKT. Von einem Gerät wird nichts deinstalliert - die Software bleibt. Intune verliert für dieses Objekt den Installationsbericht, die Zuweisung und die Möglichkeit zur Neuinstallation daraus. Die neuere Version bekommen die Geräte weiterhin über DEREN Zuweisung und die Ablösebeziehung.
+
+Jetzt löschen?
+"@
+    SupersededDeleteOverrideWarning = @"
+ACHTUNG - diese sind noch als installiert gemeldet und werden trotzdem gelöscht (die Einstellung „Markierte abgelöste Apps auch löschen, wenn Geräte sie noch melden" ist eingeschaltet):
+{0}
+"@
+    SupersededDeleteBlockedNote = @"
+Wird NICHT gelöscht und bleibt in der Liste:
+{0}
+"@
+    SupersededBlockedReasonAssigned = "noch mindestens einer Gruppe zugewiesen"
+    SupersededBlockedReasonInstallations = "noch als installiert gemeldet auf {0}"
+    SupersededBlockedReasonUnknown = "Intune hat nicht geantwortet - ein unbekannter Zustand gibt nie eine Löschung frei"
+    SupersededDeviceCountKnown = "{0} Gerät(en)"
+    SupersededDeviceCountUnknown = "mindestens einem Gerät"
+    SupersededDeleteNothingStatus = "Es wurde nichts gelöscht - keine der markierten Apps darf so, wie sie dasteht, entfernt werden. Einzelheiten stehen im Aktivitätsprotokoll."
     SupersededSafetyKeptStatus = "{0} wurde behalten: noch zugewiesen oder noch auf mindestens einem Gerät installiert."
     SupersededKeptUnknownStatus = "{0} wurde behalten: Intune hat nicht geantwortet, der Zustand ist damit unbekannt - bei unbekanntem Zustand wird nicht gelöscht. Einzelheiten stehen im Aktivitätsprotokoll."
     SupersededProbingStatus = "{0} wird geprüft: Zuweisungen und installierte Geräte..."
@@ -2642,6 +2694,8 @@ Alte App-Versionen, die von einer neueren abgelöst wurden.
 Intune behält den Vorgänger, bis die Geräte migriert sind - dadurch sammeln sich diese Einträge an. Das Löschen hier entfernt die APP in Intune, es deinstalliert nichts von einem Gerät. Intune verweigert das Löschen, solange die App noch Vorgänger einer neueren ist; in dem Fall wird die Verknüpfung zuerst entfernt.
 
 „Neueste N behalten" ist eine Kandidatenliste, keine unbedingte Anweisung: Entfernt wird eine Version erst, wenn Intune dafür null Zuweisungen UND null installierte Geräte meldet. Eine ältere Version, die noch auf Geräten läuft, bleibt deshalb bewusst stehen - auch dann, wenn dadurch mehr als N Versionen übrig bleiben. Sobald diese Geräte auf die neuere Version gewechselt sind, räumt der nächste Lauf sie ohne weiteres Zutun ab. Warum eine Version geblieben ist, steht mit der Gerätezahl im Protokoll.
+
+„Markierte löschen" sondiert erst jede angehakte Zeile und fragt dann - die Rückfrage nennt also, was gelöscht wird, was bleibt und warum. Nach einem Update ist der Vorgänger in aller Regel schon unzugewiesen und nur noch vom Installationsbericht gehalten; die Einstellung „MARKIERTE abgelöste Apps auch löschen, wenn Geräte sie noch melden" gibt genau den frei - nur für angehakte Zeilen, nie für „Alle abgelösten Apps löschen". Zuweisungen und ein von Intune unbeantworteter Zustand schützen eine App in beiden Fällen weiterhin.
 "@
     InfoCardScan = @"
 Startet den Inventar-Scan.
