@@ -1,4 +1,4 @@
-﻿name: Validate PowerShell
+name: Validate PowerShell
 
 on:
   push:
@@ -22,7 +22,7 @@ jobs:
   parser:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # The parts in src/ are assembled first: the static checks describe the script that
       # users actually download, not the individual fragments.
@@ -55,7 +55,7 @@ jobs:
   unit:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Pester
         shell: pwsh
@@ -98,7 +98,7 @@ jobs:
   lint:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install PSScriptAnalyzer
         shell: pwsh
